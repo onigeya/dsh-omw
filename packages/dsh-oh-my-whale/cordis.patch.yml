@@ -1,3 +1,18 @@
-# Story 1.2 填充。当前为空数组占位：本文件是安装期清单（不被 tsdown 打进 lib/），
-# 宿主 `dsh plugin add` 依据 package.json `dsh.bundle.patch` 字段定位它。
-[]
+# 安装期清单（不被 tsdown 打进 lib/；宿主 `dsh plugin add` 依据 package.json
+# `dsh.bundle.patch` 字段定位本文件，并在启动时把它作为一个 patch 层应用）。
+#
+# 顶层 YAML 数组；唯一项用 `insert:` 追加一行：memory 是新增行，宿主配置树里
+# 没有同名 `id` 行，所以不能用 `override:`（`override` 按 id 替换整行 config，
+# 且非深度合并，只在覆盖已有 bundle 行时才用，publish.md:131-134）。
+#
+# 按 cordis 模块名字符串引用 memory 插件，而非相对源码路径——这样 Node 解析
+# 找到的是已安装进 profile 的包（publish.md:56）。AD-1：宿主不 import memory，
+# memory 也不 import preset；这条行是两者唯一的连接方式。
+#
+# 刻意不写 `config:`：bundle patch 一旦硬编码 config，用户在 /settings 的选择
+# 就会被盖掉（参考物证 `dsh-decision-engine/cordis.patch.yml`）；本 story 的
+# memory 也还没有任何 Config 字段（Story 1.3 才落）。字段缺失时由 schema 默认值
+# 填充，用户配置得以生效。
+- insert:
+    - id: dsh-oh-my-whale-memory
+      name: dsh-oh-my-whale-memory
