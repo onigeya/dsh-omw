@@ -12,11 +12,40 @@
  * 五步流程：open → CREATE NODE TABLE → INSERT → QUERY → CREATE_VECTOR_INDEX
  * 任一步失败则测试 fail，Story 1.1 须标 blocked 上报，不迁就失败。
  */
+import { existsSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as lbug from '@ladybugdb/core'
+
+/**
+ * LadybugDB `vector` / `fts` 扩展动态链接 OpenSSL 3（libssl-3-x64.dll /
+ * libcrypto-3-x64.dll），Windows 上 pnpm 不会随 @ladybugdb/core 分发它们。
+ *
+ * 已知自带 OpenSSL 3 的常见位置（按优先级）：
+ * - Git for Windows: C:\Program Files\Git\mingw64\bin
+ * - DSH ops bash bundle: %USERPROFILE%\.dsh\profiles\web\node_modules\@dsh-ops\bash-win32-x64\ucrt64\bin
+ *
+ * 找到第一个存在的目录就加进本进程 PATH（不影响系统），让扩展加载器
+ * 能通过标准 DLL 搜索路径找到依赖。Linux/macOS 一般系统自带 OpenSSL 3，
+ * 此步骤等价于 no-op。
+ */
+function injectOpenSslPath(): void {
+  const userProfile = process.env.USERPROFILE
+  const candidates = [
+    'C:\\Program Files\\Git\\mingw64\\bin',
+    userProfile
+      ? join(userProfile, '.dsh', 'profiles', 'web', 'node_modules', '@dsh-ops', 'bash-win32-x64', 'ucrt64', 'bin')
+      : null,
+  ].filter((p): p is string => p !== null)
+  for (const dir of candidates) {
+    if (existsSync(dir)) {
+      process.env.PATH = `${dir};${process.env.PATH}`
+      return
+    }
+  }
+}
 
 // LadybugDB 官方示例 HNSW/BM25 参数（research.md L107 / L131）
 const HNSW_MU = 30
@@ -35,6 +64,10 @@ let conn: lbug.Connection
 let dir: string
 
 beforeAll(async () => {
+  // Windows 上 vector/fts 扩展加载依赖 OpenSSL 3 DLL（见 injectOpenSslPath 注释），
+  // 必须在打开数据库连接之前注入，否则 step 5 的 INSTALL vector 会以
+  // "Failed to load library: ... libvector.lbug_extension" 失败。
+  injectOpenSslPath()
   dir = await mkdtemp(join(tmpdir(), 'omw-abi-smoke-'))
   db = new lbug.Database(join(dir, 'lbug.db'))
   conn = new lbug.Connection(db)
