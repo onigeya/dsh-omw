@@ -1,0 +1,29 @@
+{
+  "name": "dsh-omw",
+  "version": "1.0.0",
+  "private": true,
+  "description": "DSH Oh My Whale — pnpm workspace 根（不发布）",
+  "main": "index.js",
+  "scripts": {
+    "build": "pnpm -r build",
+    "test": "vitest run"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devEngines": {
+    "packageManager": {
+      "name": "pnpm",
+      "version": "12.18.0",
+      "onFail": "download"
+    }
+  },
+  "packageManager": "pnpm@12.18.0",
+  "engines": {
+    "node": ">=24.9.0"
+  },
+  "type": "module",
+  "devDependencies": {
+    "vitest": "^3.2.4"
+  }
+}

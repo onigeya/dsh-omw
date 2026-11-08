@@ -1,0 +1,3 @@
+# Story 1.2 填充。当前为空数组占位：本文件是安装期清单（不被 tsdown 打进 lib/），
+# 宿主 `dsh plugin add` 依据 package.json `dsh.bundle.patch` 字段定位它。
+[]

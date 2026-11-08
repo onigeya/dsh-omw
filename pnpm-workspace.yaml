@@ -1,0 +1,10 @@
+packages:
+  - 'packages/*'
+
+nodeLinker: hoisted
+
+autoInstallPeers: false
+
+allowBuilds:
+  "@ladybugdb/core": true
+  esbuild: true

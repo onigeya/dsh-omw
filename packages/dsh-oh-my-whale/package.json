@@ -1,0 +1,45 @@
+{
+  "name": "dsh-oh-my-whale",
+  "version": "0.1.0",
+  "description": "DSH 记忆插件 bundle 入口（AD-2 发布名，永不重命名）",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "cordis.patch.yml",
+    "lib/index.js",
+    "lib/**/*.d.ts"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "dsh": ">=0.2.0 <0.3.0"
+  },
+  "scripts": {
+    "build": "tsdown && tsc -p tsconfig.build.json",
+    "test": "vitest run --root ../.."
+  },
+  "dependencies": {
+    "dsh-oh-my-whale-memory": "workspace:*"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "~4.1.0",
+    "@types/node": "^24.0.0",
+    "tsdown": "^0.23.7",
+    "typescript": "~5.6.0"
+  },
+  "license": "MIT"
+}

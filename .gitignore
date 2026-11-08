@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+lib/
+dist/
+*.tsbuildinfo
+
+# test
+coverage/
+.coverage*
+
+# env & secrets
+.env
+.env.*
+
+# logs & debug
+pnpm-debug.log
+*.log
+
+# editor & OS
+.vscode/
+.idea/
+.DS_Store
+
+# dsh local profile artifacts (never commit)
+.storages/
+.sessions/
+.temp/
+*.tgz
+!.env.example
