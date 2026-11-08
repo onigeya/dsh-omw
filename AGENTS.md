@@ -32,6 +32,7 @@ DSH 记忆插件 v1——Zettelkasten 原子记忆 + LLM Wiki + SCD-2 双时态�
 - `dsh --profile <name> --dump-config` 验证 patch 层落地（不启动宿主）
 - `pnpm pack` 装进干净 profile 冒烟（PRD §14 工程纪律）
 - 测试脚本已配 `vitest run`（根统一；各包 `scripts.test = "vitest run --root ../.."` 复用同一入口），含 Windows ABI 冒烟 `packages/dsh-oh-my-whale-memory/test/abi-smoke.test.ts`
+- **Windows 上 vector/fts 扩展需要 OpenSSL 3**：LadybugDB 扩展动态链接 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`，pnpm 不随 `@ladybugdb/core` 分发。冒烟测试的 `injectOpenSslPath()` 会自动从 Git for Windows（`C:\Program Files\Git\mingw64\bin`）或 DSH ops bash bundle（`%USERPROFILE%\.dsh\profiles\web\node_modules\@dsh-ops\bash-win32-x64\ucrt64\bin`）注入 PATH；两处都没有时 step 5 会以 `Failed to load library: ... libvector.lbug_extension` 失败。CI 需预装 Git for Windows，或改用会设置 OpenSSL 3 的镜像。
 - `engines.dsh` 声明兼容范围（如 `">=0.2.0 <0.3.0"`），否则宿主可能拒绝加载
 
 ## Package shape
