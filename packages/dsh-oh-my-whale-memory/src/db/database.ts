@@ -83,8 +83,13 @@ export interface MemoryDatabase {
   /** 是否为只读降级实例（Story 1.5 / AC2：后续 story 的工具与命令据此禁用写入）。 */
   readonly readonly: boolean
   readonly connection: MemoryConnection
-  /** 写入/合并一条记忆；embedding 长度必须等于 pin 的 dim。只读实例一律抛 `readonly_mode`。 */
-  upsertMemory(input: Omit<UpsertMemoryInput, 'embeddingModelId'> & { embeddingModelId?: string }): Promise<UpsertMemoryResult>
+  /**
+   * 写入/合并一条记忆。只读实例一律抛 `readonly_mode`（Story 1.5 / AC2）。
+   * `embedding` 长度必须等于 pin 的 dim；传 `null` 表示本次无向量（Story 1.7 手动写入，
+   * 三列 embedding/embedding_model_id/embedding_dim 同落 NULL，不写零向量）。
+   * 有向量且未显式给 embeddingModelId 时补库配置的 modelId。
+   */
+  upsertMemory(input: Omit<UpsertMemoryInput, 'embeddingModelId'> & { embeddingModelId?: string | null }): Promise<UpsertMemoryResult>
   close(): Promise<void>
 }
 /** 已打开的原始句柄（进程内按绝对路径唯一；Windows 上 close 后同进程无法重开，故永不 close）。 */
@@ -282,14 +287,20 @@ async function initializeDatabase(
     readonly: false,
     connection,
     async upsertMemory(input) {
-      const embedding = Array.from(input.embedding)
-      if (embedding.length !== dim) {
+      // null = 本次无向量（手动写入）：跳过维度校验并透传，三列由写层落 NULL。
+      const embedding = input.embedding === null ? null : Array.from(input.embedding)
+      if (embedding !== null && embedding.length !== dim) {
         throw new MemoryDbError(
           'embedding_dim_mismatch',
           `embedding 向量长度与库 pin 的维度不符：期望 ${dim}，实际 ${embedding.length}（${dbPath}）`,
         )
       }
-      return upsertMemory(connection, { ...input, embedding, embeddingModelId: input.embeddingModelId ?? options.modelId }, { now })
+      return upsertMemory(connection, {
+        ...input,
+        embedding,
+        // 有向量时才补默认模型 id；无向量时不得残留模型 ID（三列必须同为 NULL）。
+        embeddingModelId: embedding === null ? null : (input.embeddingModelId ?? options.modelId),
+      }, { now })
     },
     async close() {
       // dispose 只回收 facade；底层句柄保留在进程内以便宿主 dispose→apply 抖动时复用。

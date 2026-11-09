@@ -54,7 +54,8 @@ describe('memory 插件入口导出形态', () => {
     expect(plugin.Config.type).toBe('object')
   })
 
-  it('inject 含 \'settings\'（AD-11：/settings 表单投影与 /memory status 通道）', () => {
+  it('inject 含 \'commands\' 与 \'settings\'（Story 1.7 /memory 命令 + AD-11 设置通道）', () => {
+    expect(plugin.inject).toContain('commands')
     expect(plugin.inject).toContain('settings')
   })
 
@@ -62,7 +63,8 @@ describe('memory 插件入口导出形态', () => {
     const warn = vi.fn()
     // 裸 ctx（无 profileContext）：Story 1.4 起除分级校验外还会 warn 一句"跳过建库"，
     // 因为裸 Context 没有 profile 归属，插件不猜库路径（AC1）。
-    const ctx = { logger: { warn } } as unknown as Parameters<typeof plugin.apply>[0]
+    // Story 1.7：apply 无条件注册命令 effect（裸 ctx 也须提供 effect；commands 缺失走 no-op 降级）
+    const ctx = { logger: { warn }, effect: () => () => {} } as unknown as Parameters<typeof plugin.apply>[0]
 
     // token 缺失 → 降级 disabled + warn（I/O 矩阵第 6 行，apply 侧）
     const degraded = {
@@ -105,18 +107,20 @@ describe('memory 插件入口导出形态', () => {
     await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
     expect(warn).not.toHaveBeenCalled()
     await expect(access(resolveMemoryDbPath(dir))).resolves.toBeUndefined()
-    // Story 1.5：apply 注册两个 disposer——库 facade（1.4）与写者锁（AC1/AD-12）。
-    expect(closers).toHaveLength(2)
+    // Story 1.5：apply 注册库 facade（1.4）与写者锁（AC1/AD-12）两个 disposer；
+    // Story 1.7：无条件注册命令 effect（omw-memory-command）→ 每次成功 apply 共 3 个。
+    expect(closers).toHaveLength(3)
     // 写者实例持有锁文件 `<dbPath>.lock`：这是跨进程"第二实例"的判据（AD-12）。
     await expect(access(`${resolveMemoryDbPath(dir)}.lock`)).resolves.toBeUndefined()
     expect(plugin.memoryRuntimeState()).toMatchObject({ readonly: false, dbPath: resolveMemoryDbPath(dir) })
     expect(info.mock.calls[0][0]).toMatch(/记忆库就绪/)
     expect(info.mock.calls[0][0]).toContain(resolveMemoryDbPath(dir))
 
-    // dim 不符 → 拒绝启动（AC5），且不再注册新的 closer；刚拿到的锁引用被回滚
+    // dim 不符 → 拒绝启动（AC5）：db closer 与锁 closer 都不新增，只多出 Story 1.7
+    // 无条件注册的命令 effect；刚拿到的锁引用被回滚。
     await expect(plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'other', dim: 8 } }))
       .rejects.toThrow(/维度不符/)
-    expect(closers).toHaveLength(2)
+    expect(closers).toHaveLength(4)
 
     // 回滚必须真的把引用还回去：否则引用计数停在 2，dispose 第一个实例后锁文件仍在，
     // 一个没有 facade 的窗口会永久占着写者锁，让真正的第二实例被迫降级只读。
@@ -144,7 +148,8 @@ describe('memory 插件入口导出形态', () => {
     await plugin.apply(ctx, config)
     expect(warn).not.toHaveBeenCalled()
     expect(plugin.memoryRuntimeState().readonly).toBe(false)
-    expect(closers).toHaveLength(4)
+    // 每次 apply：命令 effect + db closer + 写者锁 closer = 3，两次共 6。
+    expect(closers).toHaveLength(6)
 
     // 引用归零后锁文件消失（dispose 语义），且可以重新取得写者锁。
     for (const dispose of closers) await dispose()

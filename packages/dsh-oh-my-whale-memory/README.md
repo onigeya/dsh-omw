@@ -103,6 +103,26 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
   因此库文件在进程存活期间只在进程内复用、只能靠**跨进程**重开才拿到文件锁；
   同路径不同 dim 直接抛 `embedding_dim_mismatch`。
 
+## /memory 命令（Story 1.7）
+
+代码在 `src/command.ts`（纯工厂 + 解析，不碰 ctx / 库）与 `src/index.ts`（`apply` 中接线）。
+
+- `/memory remember <内容>`：把一条文本写入 L1 收件箱（`layer = 'L1_INBOX'`）。
+  参数解析先 `trimStart`，首 token 必须是 `remember`，其余整体 `trim` 后即正文；
+  无正文、空输入、未知子命令（如 `/memory status`）一律返回 usage 错误的
+  `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`：`/memory remember <内容>`）。
+- **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /
+  `embedding_dim` 三列同落 NULL（不写零向量——零向量会污染 HNSW，留待 Story 2.3 回填）。
+  维度校验因此只在 `embedding` 非 null 时生效；非 null 且长度与库 pin 不符仍 fail-loud
+  抛 `embedding_dim_mismatch`。
+- **永不抛错**：handler 内 `try/catch` 把所有异常（含写库失败，如归一化后为空
+  `empty_fingerprint_text`）收敛为 `{ kind: 'error', text }`——命令失败不打断会话。
+- **无条件注册**：命令在 `apply` 开头、profileContext 早退**之前**注册
+  （`ctx.effect(..., 'omw-memory-command')`），因此没有 profile 归属时命令也存在，
+  只是写库抛「记忆库未就绪」的明确错误。未注入 `commands` 时注册降级为 no-op；
+  `inject` 因此为 `['commands', 'settings']`。
+- 同一 `(layer, 归一化 text)` 重复 remember 由指纹 id 合并，节点数不变（AD-4）。
+
 ## 安装期注意
 
 - `pnpm-workspace.yaml#allowBuilds` 除 spec 锁定的 `@ladybugdb/core: true` 外，还需要

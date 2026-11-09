@@ -22,10 +22,14 @@ export interface UpsertMemoryInput {
   layer: string
   /** 记忆原文；参与指纹，归一化后为空即拒绝。 */
   text: string
-  /** 向量；长度必须等于库 pin 的 dim。 */
-  embedding: readonly number[]
-  /** 该向量使用的模型 id（写入节点列）。 */
-  embeddingModelId: string
+  /**
+   * 向量；长度必须等于库 pin 的 dim。传 `null` 表示本次无向量（Story 1.7 手动
+   * 写入无 embedding 客户端，Epic 1）——写入节点时三列 embedding /
+   * embedding_model_id / embedding_dim 全部落 NULL，绝不写零向量污染 HNSW。
+   */
+  embedding: readonly number[] | null
+  /** 该向量使用的模型 id（写入节点列）；embedding 为 null 时同为 null。 */
+  embeddingModelId: string | null
   /** 记忆类型，可选（如 note / summary）。 */
   kind?: string
   /** 优先级，默认 0。 */
@@ -73,7 +77,8 @@ export async function upsertMemory(
   const recordedAt = input.recordedAt ?? now.toISOString()
   const validAt = input.validAt ?? now.toISOString()
   const sourceRefs = (input.sourceRefs ?? []).map(String)
-  const embedding = Array.from(input.embedding, (value) => Number(value))
+  // null = 本次无向量（手动写入）：三列同落 NULL。禁止用零向量占位——会污染 HNSW 近邻。
+  const embedding = input.embedding === null ? null : Array.from(input.embedding, (value) => Number(value))
 
   const statement = await connection.prepare(UPSERT_STATEMENT)
   const result = await connection.execute(statement, {
@@ -87,7 +92,7 @@ export async function upsertMemory(
     recorded_at: recordedAt,
     source_refs: sourceRefs,
     embedding_model_id: input.embeddingModelId,
-    embedding_dim: embedding.length,
+    embedding_dim: embedding === null ? null : embedding.length,
   })
   const single = Array.isArray(result) ? result[0]! : result
   const rows = (await single.getAll()) as Record<string, unknown>[]
