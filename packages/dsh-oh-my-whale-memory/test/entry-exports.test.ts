@@ -10,7 +10,7 @@
  * `node -e "import('./packages/dsh-oh-my-whale-memory/lib/index.js')..."` 覆盖
  * （spec Verification 第 4 条）。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
 
 describe('memory 插件入口导出形态', () => {
@@ -35,5 +35,36 @@ describe('memory 插件入口导出形态', () => {
     // schemastery 的 schema 既是函数又带元数据属性，不是普通 object。
     expect(plugin.Config).toBeTypeOf('function')
     expect(plugin.Config.type).toBe('object')
+  })
+
+  it('inject 含 \'settings\'（AD-11：/settings 表单投影与 /memory status 通道）', () => {
+    expect(plugin.inject).toContain('settings')
+  })
+
+  it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无 warn', async () => {
+    const warn = vi.fn()
+    const ctx = { logger: { warn } } as unknown as Parameters<typeof plugin.apply>[0]
+
+    // token 缺失 → 降级 disabled + warn（I/O 矩阵第 6 行，apply 侧）
+    const degraded = {
+      embedding: { endpoint: 'https://api.example.com/v1', token: '', model: 'bge-m3' },
+    }
+    await plugin.apply(ctx, degraded)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toMatch(/^embedding 降级为 disabled：缺少 embedding\.token/)
+    expect(warn.mock.calls[0][0]).not.toContain('bge-m3')
+
+    // 全字段合法 → 无 warn（I/O 矩阵第 1 行，apply 侧）
+    warn.mockClear()
+    const valid = {
+      embedding: { endpoint: 'https://api.example.com/v1', token: 'sk-test', model: 'bge-m3' },
+    }
+    await plugin.apply(ctx, valid)
+    expect(warn).not.toHaveBeenCalled()
+
+    // 硬校验失败 → apply 抛错（仅阻塞本插件）
+    await expect(plugin.apply(ctx, {
+      embedding: { endpoint: 'ftp://x', token: 'sk-test', model: 'bge-m3' },
+    })).rejects.toThrow(/embedding\.endpoint/)
   })
 })
