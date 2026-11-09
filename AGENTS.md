@@ -1,5 +1,5 @@
 <!-- bmad:context -->
-<!-- Verified 2026-11-08 against uncommitted initial state. Managed by bmad-project-context; edits inside this block are replaced on refresh. -->
+<!-- Verified 2026-11-09 against 6399126. Managed by bmad-project-context; edits inside this block are replaced on refresh. -->
 
 ## dsh-oh-my-whale 记忆插件
 
@@ -18,6 +18,7 @@ DSH 记忆插件 v1——Zettelkasten 原子记忆 + LLM Wiki + SCD-2 双时态�
 - **无 `ctx.settings.register` API**——SettingsForms 自动扫描 `inject` 含 `settings` 的插件；需要进 `/settings` 表单的字段必须标 `.volatile()`（AD-11）。
 - **Windows ABI 冒烟测试是 v1 Week-1 阻塞项**（AD-13）。
 - **不重议已关闭决策**：包名（Q-6）、compaction/start 同步快照（Q-1）、注入形式（Q-2）、SCD-2 全双时态（Q-7）、单模型通道（Q-8/m00548）。
+- **worktree 只建在 `worktrees/<name>`**——统一 `git worktree add worktrees/<name> <branch>`；不要用仓库同级路径（如 `../dsh-omw-story-1.5`、`../dsh-omw-worktrees/`），否则 worktree 散落在 `D:\workspace` 根下。`worktrees/.gitignore` 为 `*`，worktree 内容不入库。
 
 ## Where things are
 
