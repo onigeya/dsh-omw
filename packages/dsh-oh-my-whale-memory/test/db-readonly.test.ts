@@ -83,11 +83,21 @@ interface WriterInstance {
   kill(): Promise<void>
 }
 
+interface FixtureOptions {
+  /** 建库语句；默认与生产建库一致（`buildSchemaStatements`）。 */
+  statements?: string[]
+  /** 抢到锁后、建库前的等待：复现"写者持锁但库文件尚未落盘"的启动竞态。 */
+  delayMs?: number
+  /** 抢到锁就打印 `ready`（不等 DDL 完成），让父进程在库文件出现前拿到控制权。 */
+  readyEarly?: boolean
+}
+
 async function startWriterInstance(
   dbPath: string,
   dim: number,
-  statements: string[] = buildSchemaStatements(dim),
+  options: FixtureOptions = {},
 ): Promise<WriterInstance> {
+  const statements = options.statements ?? buildSchemaStatements(dim)
   // 与生产路径一致的顺序：先建目录（锁文件 `<dbPath>.lock` 也在里面），再抢锁、再开库。
   await ensureMemoryDbDirectory(dbPath)
   const child = spawn(process.execPath, [FIXTURE, dbPath], { stdio: 'pipe' })
@@ -108,7 +118,7 @@ async function startWriterInstance(
       if (stdout.includes('ready')) resolve()
     })
     void exited.then(() => reject(new Error(`夹具未就绪就退出（dbPath=${dbPath}）：${stderr}`)))
-    child.stdin.write(`${JSON.stringify({ statements })}\n`)
+    child.stdin.write(`${JSON.stringify({ statements, delayMs: options.delayMs ?? 0, readyEarly: options.readyEarly ?? false })}\n`)
   })
 
   return {
@@ -202,7 +212,7 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
     const dbPath = await freshDbPath('half-initialized')
     // 复刻"写者刚建完元数据表就异常退出"的中间态：没有 memory 表，也没有 embedding_dim 键，
     // 所以校验不会提前抛错，必须由只读路径自己判定为未完成初始化（不猜维度、不建表）。
-    const writer = await startWriterInstance(dbPath, 8, [createMetaTableStatement()])
+    const writer = await startWriterInstance(dbPath, 8, { statements: [createMetaTableStatement()] })
     try {
       await expect(openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true }))
         .rejects.toMatchObject({ code: 'schema_mismatch' })
@@ -254,6 +264,23 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
       )
       expect(info).not.toHaveBeenCalled()
       expect(closers).toHaveLength(2)
+    } finally {
+      await writer.stop()
+    }
+  }, 20_000)
+
+  it('写者持锁但库文件尚未落盘时，第二实例有界等待后仍降级只读（启动竞态）', async () => {
+    const dbPath = await freshDbPath('writer-booting')
+    // readyEarly + delayMs：夹具抢到锁就返回父进程，库文件要等 700ms 之后才被 DDL 建出来。
+    // 这正是"两个窗口几乎同时启动"的真实窗口：写者已持锁，但 new Database() 是惰性打开，
+    // 库文件还没落盘；只读方若立刻判 db_open_failed，就失去了降级只读的机会（AC1）。
+    const writer = await startWriterInstance(dbPath, 8, { delayMs: 700, readyEarly: true })
+    try {
+      const db = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true })
+
+      expect(db.readonly).toBe(true)
+      expect(db.dim).toBe(8)
+      await db.close()
     } finally {
       await writer.stop()
     }

@@ -147,15 +147,45 @@ async function createHandle(dbPath: string): Promise<RawHandle> {
 }
 
 /**
+ * 只读实例等待写者把库文件建出来的上限（Story 1.5 / AC1）。
+ *
+ * 只读模式蕴含"另一个存活实例持有写者锁"，而 `new lbug.Database()` 是惰性打开：
+ * 写者拿到锁之后、首次查询（`INSTALL/LOAD` 扩展）之前，库文件还没落盘。两个窗口
+ * 几乎同时启动时，第二实例正好落在这个窗口里——此时立刻抛 `db_open_failed` 会让它
+ * 连降级只读的机会都没有。等待是有界的、安全的：只有"别人持锁"才会走到这里。
+ */
+const READONLY_DB_WAIT_MS = 2_000
+const READONLY_DB_POLL_MS = 50
+
+/**
+ * 只读实例等待写者建完 schema 的上限（Story 1.5 / AC1）。
+ *
+ * 库文件落盘 ≠ schema 就绪：写者建出库文件之后还要建表、写元数据。两个实例几乎同时
+ * 启动时，只读方可能正好读到"库文件已存在、表还没建"的中间态。该等，不该报错。
+ */
+const READONLY_SCHEMA_WAIT_MS = 2_000
+const READONLY_SCHEMA_POLL_MS = 50
+
+/** 有界等待库文件出现；超时返回 false（由调用方决定 fail-loud 文案）。 */
+async function waitForLibraryFile(dbPath: string): Promise<boolean> {
+  const deadline = Date.now() + READONLY_DB_WAIT_MS
+  for (;;) {
+    if (await pathExists(dbPath)) return true
+    if (Date.now() >= deadline) return false
+    await new Promise((wake) => setTimeout(wake, READONLY_DB_POLL_MS))
+  }
+}
+
+/**
  * 只读句柄（Story 1.5 / AC1）：`readOnly` 是 `Database` 构造函数的第 4 个位置参数。
- * 不建目录、不建库——库文件不存在即 fail-loud，只读实例绝不创建空库；也不
- * `INSTALL/LOAD` 扩展（只读打开不做任何写动作）。
+ * 不建目录、不建库——库文件（有界等待后仍）不存在即 fail-loud，只读实例绝不创建空库；
+ * 也不 `INSTALL/LOAD` 扩展（只读打开不做任何写动作）。
  */
 async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
-  if (!(await pathExists(dbPath))) {
+  if (!(await waitForLibraryFile(dbPath))) {
     throw new MemoryDbError(
       'db_open_failed',
-      `只读模式打开失败：记忆库不存在（${dbPath}）。只读实例不创建空库——请先在有写者锁的实例里完成建库。`,
+      `只读模式打开失败：等待 ${READONLY_DB_WAIT_MS}ms 后记忆库仍不存在（${dbPath}）。只读实例不创建空库——请先在有写者锁的实例里完成建库。`,
     )
   }
   const database = new lbug.Database(dbPath, undefined, undefined, true)
@@ -283,13 +313,11 @@ async function initializeReadOnlyDatabase(
   const handle = await acquireHandle(dbPath, true)
   const { connection } = handle
   try {
-    const meta = await readMetaMap(connection)
-    const columns = await readTableColumns(connection, MEMORY_TABLE)
-    const { actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
+    const { meta, actualDim } = await readExistingSchema(connection, dim, dbPath)
     if (actualDim === null) {
       throw new MemoryDbError(
         'schema_mismatch',
-        `只读模式打开失败：库内没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
+        `只读模式打开失败：等待 ${READONLY_SCHEMA_WAIT_MS}ms 后库内仍没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
       )
     }
 
@@ -312,6 +340,27 @@ async function initializeReadOnlyDatabase(
     handles.delete(dbPath)
     closeHandle(handle)
     throw error
+  }
+}
+
+/**
+ * 只读实例读取已有库的结构（Story 1.5 / AC1）：库文件落盘 ≠ schema 就绪——写者建完库
+ * 文件之后还要建表、写元数据，两个实例几乎同时启动时只读方会读到"表还没建"的中间态，
+ * 此时该等而不是报错。只在"memory 表尚不存在"这一种中间态上有界重试，其余不一致
+ * （维度不符、元数据矛盾）立刻 fail-loud。
+ */
+async function readExistingSchema(
+  connection: MemoryConnection,
+  dim: number,
+  dbPath: string,
+): Promise<{ meta: Map<string, string>; actualDim: number | null }> {
+  const deadline = Date.now() + READONLY_SCHEMA_WAIT_MS
+  for (;;) {
+    const meta = await readMetaMap(connection)
+    const columns = await readTableColumns(connection, MEMORY_TABLE)
+    const { actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
+    if (actualDim !== null || Date.now() >= deadline) return { meta, actualDim }
+    await new Promise((wake) => setTimeout(wake, READONLY_SCHEMA_POLL_MS))
   }
 }
 

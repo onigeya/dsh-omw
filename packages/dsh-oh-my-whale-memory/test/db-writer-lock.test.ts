@@ -8,7 +8,7 @@
 import { spawn } from 'node:child_process'
 import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname, basename } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import { READONLY_REASON, acquireWriterLock } from '../src/db/writer-lock'
@@ -147,5 +147,37 @@ describe('写者锁（Story 1.5 / AC1、AC3 / AD-12）', () => {
     // （AD-12 明确禁止的降级失败）。升级 @deepseek-ai/dsh-atomic-write 后必须跑这条。
     await expect(withFileLock(dbPath, async () => {}, { waitMs: 0 }))
       .rejects.toThrow(/timed out waiting for the writer lock/)
+  })
+
+  it('release 未收尾时立即重新申请：仍拿到写者身份（dispose→apply 抖动）', async () => {
+    const dbPath = await freshDbPath('release-race')
+    const first = await acquireWriterLock(dbPath)
+
+    // 故意不 await：模拟宿主 dispose 后立刻 apply（锁文件还在被 rm 的窗口内）。
+    // 没有 releasing 屏障的话，withFileLock 会看到尚未删除的锁文件 + 本进程 pid
+    // （holderExited 拒绝接管），waitMs:0 立即超时→降级只读，AC1 被无声破坏。
+    const release = first.release()
+    const again = await acquireWriterLock(dbPath)
+
+    expect(again.mode).toBe('writer')
+    await release
+    await again.release()
+    await expect(access(lockPathOf(dbPath))).rejects.toThrow()
+  })
+
+  it('同一库文件的不同书写形式视为同一路径：不误判为第二实例', async () => {
+    const dbPath = await freshDbPath('normalized')
+    const first = await acquireWriterLock(dbPath)
+
+    // `/./` 段 + 混合分隔符在 OS 层是同一个文件，但字符串不同。没有 resolve() 的话，
+    // 第二次申请会把本进程写下的锁文件当成"别人的锁"而降级只读。
+    const respelled = `${dirname(dbPath)}/./${basename(dbPath)}`
+    const second = await acquireWriterLock(respelled)
+
+    expect(second.mode).toBe('writer')
+
+    await first.release()
+    await second.release()
+    await expect(access(lockPathOf(dbPath))).rejects.toThrow()
   })
 })
