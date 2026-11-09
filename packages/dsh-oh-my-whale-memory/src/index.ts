@@ -14,6 +14,12 @@
  * （AC5/AD-14 fail-loud，绝不静默降级或重建库）。库句柄用 ctx.effect 注册 close，
  * 宿主 dispose→apply 抖动时按绝对路径复用 registry 中的同一句柄。
  *
+ * Story 1.5（AD-12）：apply 先申请进程级写者锁，拿到才以读写打开库；拿不到（另一个
+ * 存活实例持锁）不抛错，改为 `readOnly: true` 降级打开并记入 `memoryRuntimeState()`
+ * （AC1/AC2）。锁用同一个 ctx.effect 注册释放。**先定角色再开库**是硬性顺序：
+ * LadybugDB 只要存在只读句柄，之后同文件的读写打开必失败 `Error: 33`。
+ * 陈旧锁（前一实例异常退出）由 withFileLock 自身的接管语义处理（AC3）。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -22,8 +28,9 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveRuntimeConfig } from './config.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
-import { resolveMemoryDbPath } from './db/paths.js'
+import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
+import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -34,6 +41,8 @@ export { resolveMemoryDbPath } from './db/paths.js'
 export { openMemoryDatabase } from './db/database.js'
 export type { MemoryDatabase, OpenMemoryDatabaseOptions } from './db/database.js'
 export type { UpsertMemoryInput, UpsertMemoryResult } from './db/memory.js'
+export { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
+export type { MemoryWriterLock } from './db/writer-lock.js'
 
 /** cordis 模块名（AD-2，永不重命名）；与 settings namespace 一致。 */
 export const name = 'dsh-oh-my-whale-memory' as const
@@ -45,8 +54,28 @@ export const name = 'dsh-oh-my-whale-memory' as const
 export const inject = ['settings'] as const
 
 /**
+ * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
+ * 精炼消费者、`memory_remember` 工具与 `/memory status` 直接读到，据此禁用写入。
+ */
+export interface MemoryRuntimeState {
+  /** true = 本窗口没拿到写者锁，已降级只读（AC1）。 */
+  readonly readonly: boolean
+  /** 只读降级原因，取 `READONLY_REASON`（AC2）。 */
+  readonly reason?: string
+  /** 实际使用的库路径。 */
+  readonly dbPath?: string
+}
+
+let runtimeState: MemoryRuntimeState = { readonly: false }
+
+/** 最近一次成功 apply 的记忆库运行态；apply 失败时不更新（插件未激活即无运行态）。 */
+export function memoryRuntimeState(): MemoryRuntimeState {
+  return { ...runtimeState }
+}
+
+/**
  * 插件激活函数。分级校验：硬校验失败抛错（仅阻塞本插件，宿主继续运行）；
- * 降级项（embedding token/model 缺失）走 ctx.logger.warn。
+ * 降级项（embedding token/model 缺失、写者锁被占用）走 warn。
  * config 类型用结构化占位——Loader 在运行时按 Config schema resolve 后传入，
  * 这里保留宽松签名以避免与宿主解析器类型耦合。
  */
@@ -74,14 +103,49 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
-  // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
-  const db: MemoryDatabase = await openMemoryDatabase({
-    dbPath,
-    dim: embedding.dim,
-    modelId: embedding.modelId,
-  })
+  // AC1/AC3：先抢写者锁再开库——第二个实例拿不到锁就降级只读，不阻断宿主启动；
+  // 陈旧锁由 withFileLock 的接管语义处理（waitMs: 0 也不会牺牲它）。
+  // 锁文件是 `<dbPath>.lock`，与库同在 `<profile>/memory/`，所以目录必须先存在；
+  // 只读实例走到这里说明写者尚未建库，建目录本身不产生库文件（不创建空库）。
+  await ensureMemoryDbDirectory(dbPath)
+  const lock = await acquireWriterLock(dbPath)
+  let db: MemoryDatabase
+  try {
+    // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
+    db = await openMemoryDatabase({
+      dbPath,
+      dim: embedding.dim,
+      modelId: embedding.modelId,
+      readOnly: lock.mode === 'readonly',
+    })
+  } catch (error) {
+    // 开库失败就不该占着写者锁——释放引用后把原始错误抛给宿主。
+    await lock.release()
+    throw error
+  }
+
+  runtimeState = { readonly: lock.mode === 'readonly', reason: lock.reason, dbPath }
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
   ctx.effect(() => () => db.close(), 'omw-memory-db')
+  ctx.effect(() => () => lock.release(), 'omw-memory-writer-lock')
+
+  if (lock.mode === 'readonly') {
+    // 只读实例不能改写库级 model id：配置与库内记录不一致时必须显式告知，不静默降级
+    // （AD-14 的 fail-loud 精神：不匹配的 embedding 模型会让召回结果按错的模型解释）。
+    if (db.modelId !== embedding.modelId) {
+      ctx.logger.warn(
+        `只读实例的 embedding 模型与库内记录不一致：库内 ${db.modelId}，配置 ${embedding.modelId}；` +
+        '只读模式不修改库级元数据，请核对配置或由持有写者锁的窗口改写。',
+      )
+    }
+    // AC2：只读实例的标注必须完整可读——后续 story 的 /memory status 直接复用同一文案。
+    ctx.logger.warn(
+      `记忆库以只读模式打开（readonly: true, reason: '${READONLY_REASON}'）：${dbPath}；` +
+      '本窗口不采集、不精炼、拒绝写入。关闭持有写者锁的窗口后重启本窗口可恢复读写。',
+    )
+    return
+  }
+
   ctx.logger.info(`记忆库就绪：${dbPath}（dim=${embedding.dim}，model=${embedding.modelId}）`)
 }

@@ -1,5 +1,6 @@
 /**
- * 记忆库打开/建库（Story 1.4 / AC1、AC2、AC4、AC5 / AD-3、AD-4、AD-13、AD-14）。
+ * 记忆库打开/建库（Story 1.4 / AC1、AC2、AC4、AC5 / AD-3、AD-4、AD-13、AD-14；
+ * Story 1.5 增加只读降级打开 / AC1、AC2、AC4 / AD-12）。
  *
  * 启动顺序（幂等）：
  * 1. 解析绝对路径并创建 `<profile>/memory/`；
@@ -22,7 +23,16 @@
  * 之后永远复用；`close()` 只回收 facade 供宿主 dispose 语义使用，不断开连接。
  * 这也让"维度不符被拒后再次尝试"能稳定复现 `embedding_dim_mismatch`，而不是被
  * 底层锁错误掩盖。Story 1.5 的写者锁需在此基础上设计（跨进程锁才是真正的第二实例判据）。
+ *
+ * 只读降级（Story 1.5 / AD-12）：第二实例拿不到写者锁时由调用方传 `readOnly: true`
+ * 打开同一个库。只读路径**不建库文件、不建表、不写元数据、不 `INSTALL/LOAD` 扩展**；
+ * 库不存在直接 `db_open_failed`（不创建空库），写入口 `upsertMemory` 抛
+ * `readonly_mode`（AC4）。（`apply` 会先为写者锁文件创建 `<profile>/memory/` 目录并在
+ * 其中写 `<dbPath>.lock`——那是进程级锁的载体，不属于库写入。）LadybugDB 的顺序约束
+ * （实测）：只要有只读句柄存在，之后同文件的读写打开必失败 `Error: 33`，所以
+ * **必须先定角色（先拿锁）再打开库**——该顺序由 index.ts 的 apply 保证。
  */
+import { stat } from 'node:fs/promises'
 import * as lbug from '@ladybugdb/core'
 import { MemoryDbError } from './errors.js'
 import {
@@ -40,6 +50,7 @@ import {
   createVectorIndexStatement,
 } from './schema.js'
 import { ensureMemoryDbDirectory } from './paths.js'
+import { READONLY_REASON } from './writer-lock.js'
 import {
   queryAll,
   upsertMemory,
@@ -57,6 +68,11 @@ export interface OpenMemoryDatabaseOptions {
   modelId: string
   /** 现在时刻（测试注入）。 */
   now?: () => Date
+  /**
+   * 只读降级打开（Story 1.5 / AC1 / AD-12）：第二实例没有写者锁时为 true。
+   * 只读实例不建目录/建表/写元数据/装扩展，也不执行任何写语句。
+   */
+  readOnly?: boolean
 }
 
 export interface MemoryDatabase {
@@ -64,8 +80,10 @@ export interface MemoryDatabase {
   readonly dim: number
   /** 当前配置的 embedding 模型 id（baseline 打开时可被新配置更新）。 */
   modelId: string
+  /** 是否为只读降级实例（Story 1.5 / AC2：后续 story 的工具与命令据此禁用写入）。 */
+  readonly readonly: boolean
   readonly connection: MemoryConnection
-  /** 写入/合并一条记忆；embedding 长度必须等于 pin 的 dim。 */
+  /** 写入/合并一条记忆；embedding 长度必须等于 pin 的 dim。只读实例一律抛 `readonly_mode`。 */
   upsertMemory(input: Omit<UpsertMemoryInput, 'embeddingModelId'> & { embeddingModelId?: string }): Promise<UpsertMemoryResult>
   close(): Promise<void>
 }
@@ -73,6 +91,7 @@ export interface MemoryDatabase {
 interface RawHandle {
   database: lbug.Database
   connection: MemoryConnection
+  readonly: boolean
 }
 
 const handles = new Map<string, RawHandle>()
@@ -95,14 +114,17 @@ const openings = new Map<string, Promise<MemoryDatabase>>()
  */
 const openFailures = new Map<string, unknown>()
 
-async function acquireHandle(dbPath: string): Promise<RawHandle> {
+async function acquireHandle(dbPath: string, readOnly: boolean): Promise<RawHandle> {
   const existing = handles.get(dbPath)
-  if (existing) return existing
+  if (existing) {
+    if (existing.readonly !== readOnly) throw createModeMismatchError(dbPath, readOnly, existing.readonly)
+    return existing
+  }
 
   const failure = openFailures.get(dbPath)
   if (failure !== undefined) throw failure
 
-  return createHandle(dbPath)
+  return readOnly ? createReadOnlyHandle(dbPath) : createHandle(dbPath)
 }
 
 async function createHandle(dbPath: string): Promise<RawHandle> {
@@ -116,19 +138,29 @@ async function createHandle(dbPath: string): Promise<RawHandle> {
   } catch (error) {
     // 首次装载就失败：句柄无用，尽力关闭；锁可能仍被占，故记墓碑让重试抛原始错误。
     openFailures.set(dbPath, error)
-    try {
-      connection.closeSync()
-    } catch {
-      /* ignore */
-    }
-    try {
-      database.closeSync()
-    } catch {
-      /* ignore */
-    }
+    closeHandle({ database, connection, readonly: false })
     throw error
   }
-  const handle: RawHandle = { database, connection }
+  const handle: RawHandle = { database, connection, readonly: false }
+  handles.set(dbPath, handle)
+  return handle
+}
+
+/**
+ * 只读句柄（Story 1.5 / AC1）：`readOnly` 是 `Database` 构造函数的第 4 个位置参数。
+ * 不建目录、不建库——库文件不存在即 fail-loud，只读实例绝不创建空库；也不
+ * `INSTALL/LOAD` 扩展（只读打开不做任何写动作）。
+ */
+async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
+  if (!(await pathExists(dbPath))) {
+    throw new MemoryDbError(
+      'db_open_failed',
+      `只读模式打开失败：记忆库不存在（${dbPath}）。只读实例不创建空库——请先在有写者锁的实例里完成建库。`,
+    )
+  }
+  const database = new lbug.Database(dbPath, undefined, undefined, true)
+  const connection = new lbug.Connection(database)
+  const handle: RawHandle = { database, connection, readonly: true }
   handles.set(dbPath, handle)
   return handle
 }
@@ -136,22 +168,25 @@ async function createHandle(dbPath: string): Promise<RawHandle> {
 export async function openMemoryDatabase(options: OpenMemoryDatabaseOptions): Promise<MemoryDatabase> {
   const dim = assertEmbeddingDim(options.dim)
   const dbPath = options.dbPath
+  const readOnly = options.readOnly === true
 
   const existingFacade = facades.get(dbPath)
-  if (existingFacade) return applyFacadeOptions(existingFacade, dim, options.modelId, dbPath)
+  if (existingFacade) return applyFacadeOptions(existingFacade, dim, options.modelId, dbPath, readOnly)
 
   const inFlight = openings.get(dbPath)
   if (inFlight) {
     try {
       const store = await inFlight
-      return await applyFacadeOptions(store, dim, options.modelId, dbPath)
+      return await applyFacadeOptions(store, dim, options.modelId, dbPath, readOnly)
     } catch {
       // 并发方可能因自身配置失败（例如它的维度不符）：按本次 options 重来一次，
       // 让每个调用方拿到属于自己的错误，而不是互相污染。
     }
   }
 
-  const pending = initializeDatabase(dbPath, dim, options)
+  const pending = readOnly
+    ? initializeReadOnlyDatabase(dbPath, dim, options)
+    : initializeDatabase(dbPath, dim, options)
   openings.set(dbPath, pending)
   try {
     return await pending
@@ -165,8 +200,12 @@ async function applyFacadeOptions(
   dim: number,
   modelId: string,
   dbPath: string,
+  readOnly: boolean,
 ): Promise<MemoryDatabase> {
+  if (store.readonly !== readOnly) throw createModeMismatchError(dbPath, readOnly, store.readonly)
   if (store.dim !== dim) throw createDimMismatchError(store.dim, dim, dbPath)
+  // 只读实例不写库级元数据——AC2 要求它不执行任何写语句。
+  if (readOnly) return store
   if (store.modelId !== modelId) {
     await mergeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
     store.modelId = modelId
@@ -179,34 +218,18 @@ async function initializeDatabase(
   dim: number,
   options: OpenMemoryDatabaseOptions,
 ): Promise<MemoryDatabase> {
-  const { connection } = await acquireHandle(dbPath)
+  const { connection } = await acquireHandle(dbPath, false)
   const now = options.now ?? (() => new Date())
 
   const meta = await readMetaMap(connection)
   const columns = await readTableColumns(connection, MEMORY_TABLE)
-  const metaDim = readMetaDim(meta, dbPath)
-
-  if (columns) {
-    const actualDim = readEmbeddingColumnDim(columns, dbPath)
-    if (actualDim !== dim) throw createDimMismatchError(actualDim, dim, dbPath)
-    if (metaDim !== undefined && metaDim !== actualDim) {
-      throw new MemoryDbError(
-        'schema_mismatch',
-        `记忆库元数据与表结构不一致：omw_meta.embedding_dim=${metaDim}，而 memory.embedding 实际为 FLOAT[${actualDim}]（${dbPath}）`,
-      )
-    }
-  } else if (metaDim !== undefined) {
-    throw new MemoryDbError(
-      'schema_mismatch',
-      `记忆库元数据声明 embedding_dim=${metaDim}，但 memory 节点表不存在（${dbPath}）：库文件可能损坏或来自其他版本`,
-    )
-  }
+  const { metaDim, actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
 
   await connection.query(createMetaTableStatement())
   await connection.query(createMemoryTableStatement(dim))
   await connection.query(createL0RawTableStatement())
 
-  if (columns === null) {
+  if (actualDim === null) {
     await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)
     await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
     await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
@@ -226,6 +249,7 @@ async function initializeDatabase(
     dbPath,
     dim,
     modelId: options.modelId,
+    readonly: false,
     connection,
     async upsertMemory(input) {
       const embedding = Array.from(input.embedding)
@@ -246,12 +270,128 @@ async function initializeDatabase(
   return store
 }
 
+/**
+ * 只读 facade（Story 1.5 / AC1、AC2、AC4）：复用与写者路径完全相同的库结构校验
+ * （同一维度/元数据优先级），但**不建表、不写元数据、不建索引**，写入口一律抛
+ * `readonly_mode`。校验失败时回收句柄，不留下半可用的 facade。
+ */
+async function initializeReadOnlyDatabase(
+  dbPath: string,
+  dim: number,
+  options: OpenMemoryDatabaseOptions,
+): Promise<MemoryDatabase> {
+  const handle = await acquireHandle(dbPath, true)
+  const { connection } = handle
+  try {
+    const meta = await readMetaMap(connection)
+    const columns = await readTableColumns(connection, MEMORY_TABLE)
+    const { actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
+    if (actualDim === null) {
+      throw new MemoryDbError(
+        'schema_mismatch',
+        `只读模式打开失败：库内没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
+      )
+    }
+
+    const store: MemoryDatabase = {
+      dbPath,
+      dim: actualDim,
+      modelId: meta.get(META_KEYS.embeddingModelId) ?? options.modelId,
+      readonly: true,
+      connection,
+      async upsertMemory() {
+        throw createReadonlyModeError(dbPath)
+      },
+      async close() {
+        facades.delete(dbPath)
+      },
+    }
+    facades.set(dbPath, store)
+    return store
+  } catch (error) {
+    handles.delete(dbPath)
+    closeHandle(handle)
+    throw error
+  }
+}
+
+/**
+ * 已有库的结构校验（写者与只读路径共用，保证同一个库在两条路径上得到同样的结论）：
+ * 先按配置维度比对表的实际 `FLOAT[n]`，再比对 `omw_meta.embedding_dim` 与表结构；
+ * 缺表时若元数据已声明维度则视为损坏。返回元数据维度与实际维度，缺表时 actualDim 为 null。
+ */
+function verifyExistingSchema(
+  meta: Map<string, string>,
+  columns: Map<string, string> | null,
+  dim: number,
+  dbPath: string,
+): { metaDim: number | undefined; actualDim: number | null } {
+  const metaDim = readMetaDim(meta, dbPath)
+  if (columns === null) {
+    if (metaDim !== undefined) {
+      throw new MemoryDbError(
+        'schema_mismatch',
+        `记忆库元数据声明 embedding_dim=${metaDim}，但 memory 节点表不存在（${dbPath}）：库文件可能损坏或来自其他版本`,
+      )
+    }
+    return { metaDim, actualDim: null }
+  }
+
+  const actualDim = readEmbeddingColumnDim(columns, dbPath)
+  if (actualDim !== dim) throw createDimMismatchError(actualDim, dim, dbPath)
+  if (metaDim !== undefined && metaDim !== actualDim) {
+    throw new MemoryDbError(
+      'schema_mismatch',
+      `记忆库元数据与表结构不一致：omw_meta.embedding_dim=${metaDim}，而 memory.embedding 实际为 FLOAT[${actualDim}]（${dbPath}）`,
+    )
+  }
+  return { metaDim, actualDim }
+}
+
 function createDimMismatchError(storedDim: number, configuredDim: number, dbPath: string): MemoryDbError {
   return new MemoryDbError(
     'embedding_dim_mismatch',
     `记忆库 embedding 维度不符：库内已 pin 为 ${storedDim}，当前配置为 ${configuredDim}（${dbPath}）。` +
     'AD-14 要求 fail-loud 拒绝启动：请恢复原 embedding 模型，或对该库做全量重嵌入 / 迁移到新库；不会静默降级或自动重建。',
   )
+}
+
+function createModeMismatchError(dbPath: string, wanted: boolean, actual: boolean): MemoryDbError {
+  return new MemoryDbError(
+    'db_open_failed',
+    `记忆库已在本进程以${actual ? '只读' : '读写'}模式打开，不能再以${wanted ? '只读' : '读写'}模式打开同一路径（${dbPath}）：` +
+    'LadybugDB 的库文件句柄在进程内不可重入，关闭句柄也不释放文件锁——请重启本窗口后再试。',
+  )
+}
+
+function createReadonlyModeError(dbPath: string): MemoryDbError {
+  return new MemoryDbError(
+    'readonly_mode',
+    `记忆库处于只读模式（${READONLY_REASON}），拒绝写入（${dbPath}）：本窗口不是写者实例。` +
+    '请关闭持有写者锁的窗口后重启本窗口，或在写者窗口中执行写入。',
+  )
+}
+
+function closeHandle(handle: RawHandle): void {
+  try {
+    handle.connection.closeSync()
+  } catch {
+    /* ignore */
+  }
+  try {
+    handle.database.closeSync()
+  } catch {
+    /* ignore */
+  }
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 function escapeSqlString(value: string): string {

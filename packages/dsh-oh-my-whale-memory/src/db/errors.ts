@@ -12,6 +12,7 @@ export type MemoryDbErrorCode =
   | 'empty_fingerprint_text'
   | 'invalid_layer'
   | 'invalid_embedding_dim'
+  | 'readonly_mode'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode

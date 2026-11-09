@@ -105,13 +105,49 @@ describe('memory 插件入口导出形态', () => {
     await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
     expect(warn).not.toHaveBeenCalled()
     await expect(access(resolveMemoryDbPath(dir))).resolves.toBeUndefined()
-    expect(closers).toHaveLength(1)
+    // Story 1.5：apply 注册两个 disposer——库 facade（1.4）与写者锁（AC1/AD-12）。
+    expect(closers).toHaveLength(2)
+    // 写者实例持有锁文件 `<dbPath>.lock`：这是跨进程"第二实例"的判据（AD-12）。
+    await expect(access(`${resolveMemoryDbPath(dir)}.lock`)).resolves.toBeUndefined()
+    expect(plugin.memoryRuntimeState()).toMatchObject({ readonly: false, dbPath: resolveMemoryDbPath(dir) })
     expect(info.mock.calls[0][0]).toMatch(/记忆库就绪/)
     expect(info.mock.calls[0][0]).toContain(resolveMemoryDbPath(dir))
 
-    // dim 不符 → 拒绝启动（AC5），且不再注册新的 closer
+    // dim 不符 → 拒绝启动（AC5），且不再注册新的 closer；刚拿到的锁引用被回滚
     await expect(plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'other', dim: 8 } }))
       .rejects.toThrow(/维度不符/)
-    expect(closers).toHaveLength(1)
+    expect(closers).toHaveLength(2)
+
+    // 回滚必须真的把引用还回去：否则引用计数停在 2，dispose 第一个实例后锁文件仍在，
+    // 一个没有 facade 的窗口会永久占着写者锁，让真正的第二实例被迫降级只读。
+    for (const dispose of closers) await dispose()
+    await expect(access(`${resolveMemoryDbPath(dir)}.lock`)).rejects.toThrow()
+  })
+
+  it('同进程第二次 apply 复用写者锁，不降级只读（Story 1.5 / AC1）', async () => {
+    injectOpenSslPath()
+    const dir = await mkdtemp(join(tmpdir(), 'omw-entry-lock-'))
+    tempDirs.push(dir)
+    const warn = vi.fn()
+    const info = vi.fn()
+    const closers: Array<() => unknown> = []
+    const ctx = {
+      logger: { warn, info },
+      get: (key: string) => (key === 'profileContext' ? { dir } : undefined),
+      effect: (factory: () => () => unknown) => closers.push(factory()),
+    } as unknown as Parameters<typeof plugin.apply>[0]
+    const config = { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } }
+
+    // 宿主 dispose→apply 抖动 / 同进程重复 apply 会走到这里：withFileLock 自己不会接管
+    // 本进程的锁，所以插件必须按路径复用，否则第二个实例会把自己误判成"第二实例"。
+    await plugin.apply(ctx, config)
+    await plugin.apply(ctx, config)
+    expect(warn).not.toHaveBeenCalled()
+    expect(plugin.memoryRuntimeState().readonly).toBe(false)
+    expect(closers).toHaveLength(4)
+
+    // 引用归零后锁文件消失（dispose 语义），且可以重新取得写者锁。
+    for (const dispose of closers) await dispose()
+    await expect(access(`${resolveMemoryDbPath(dir)}.lock`)).rejects.toThrow()
   })
 })
