@@ -18,6 +18,8 @@ const EmbeddingSchema = Schema.object({
   endpoint: Schema.string(),
   token: Schema.string().role('secret'),
   model: Schema.string(),
+  // 建库 pin 的向量维度（Story 1.4 / AD-14）：留空按已知模型表或默认 1024 解析。
+  dim: Schema.number(),
 }).default({}).volatile()
 
 const RerankSchema = Schema.object({
@@ -56,7 +58,7 @@ export const Config = Schema.object({
  * `warnings` 收集降级说明，调用方按需写入日志 / status（本 story 只落日志通道）。
  */
 export interface RuntimeConfig {
-  embedding: { endpoint?: string; token?: string; model?: string }
+  embedding: { endpoint?: string; token?: string; model?: string; dim?: number }
   embeddingMode: 'enabled' | 'disabled'
   captureSteps: number
   inboxRefineConcurrency: number
@@ -116,7 +118,7 @@ function requireUnitWeight(field: string, value: number): number {
  * 凭据字段（token）的错误信息固定只含字段名——值本身是秘密，不得入错误日志（NFR9）。
  */
 export function resolveRuntimeConfig(config: {
-  embedding?: Getter<{ endpoint?: string; token?: string; model?: string }>
+  embedding?: Getter<{ endpoint?: string; token?: string; model?: string; dim?: number }>
   captureSteps?: Getter<number>
   inboxRefineConcurrency?: Getter<number>
   injectOnNewSession?: Getter<boolean>
@@ -130,8 +132,10 @@ export function resolveRuntimeConfig(config: {
   const warnings: string[] = []
 
   // Embedding endpoint：填了就硬校验 http(s)
-  const embeddingRaw = read(config.embedding ?? {}) as { endpoint?: string; token?: string; model?: string }
+  const embeddingRaw = read(config.embedding ?? {}) as { endpoint?: string; token?: string; model?: string; dim?: number }
   const embeddingEndpoint = requireHttpUrl('embedding.endpoint', embeddingRaw.endpoint)
+  // dim 可留空（由 db 层按模型表/默认值解析），填了就必须是正整数（AC2：按配置 pin）。
+  const embeddingDim = embeddingRaw.dim === undefined ? undefined : requirePositiveInt('embedding.dim', embeddingRaw.dim)
 
   // Embedding token / model：任一缺失即降级，不抛错（FR-18）
   const token = embeddingRaw.token?.trim() || ''
@@ -169,6 +173,7 @@ export function resolveRuntimeConfig(config: {
       endpoint: embeddingEndpoint,
       token: token || undefined,
       model: model || undefined,
+      dim: embeddingDim,
     },
     embeddingMode,
     captureSteps,
@@ -189,7 +194,7 @@ export function resolveRuntimeConfig(config: {
  * 每字段对应一个 volatile 节点，读取用 `.get()`。
  */
 export interface ConfigShape {
-  embedding: Volatile<{ endpoint?: string; token?: string; model?: string }>
+  embedding: Volatile<{ endpoint?: string; token?: string; model?: string; dim?: number }>
   rerank: Volatile<{ endpoint?: string; token?: string; model?: string }>
   captureSteps: Volatile<number>
   inboxRefineConcurrency: Volatile<number>

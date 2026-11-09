@@ -140,6 +140,15 @@ describe('硬校验（任一失败即抛错，仅阻塞本插件）', () => {
     expect(() => resolveRuntimeConfig(cfg)).toThrowError(/inboxRefineConcurrency/)
     expect(() => resolveRuntimeConfig(cfg)).toThrowError(/≥ 1/)
   })
+
+  it('embedding.dim 硬校验：0 / -1 / 1.5 抛错，4 通过', () => {
+    for (const bad of [0, -1, 1.5]) {
+      const cfg = { ...validConfig(), embedding: { ...validConfig().embedding, dim: bad } }
+      expect(() => resolveRuntimeConfig(cfg), 'dim=' + bad + ' 应抛错').toThrowError(/embedding\.dim/)
+    }
+    const ok = { ...validConfig(), embedding: { ...validConfig().embedding, dim: 4 } }
+    expect(resolveRuntimeConfig(ok).embedding.dim).toBe(4)
+  })
 })
 
 describe('可降级路径（FR-18：不抛错，warn + disabled）', () => {

@@ -10,8 +10,25 @@
  * `node -e "import('./packages/dsh-oh-my-whale-memory/lib/index.js')..."` 覆盖
  * （spec Verification 第 4 条）。
  */
-import { describe, expect, it, vi } from 'vitest'
+import { access, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
+import { resolveMemoryDbPath } from '../src/db/paths'
+import { injectOpenSslPath } from './openssl'
+
+const tempDirs: string[] = []
+
+afterAll(async () => {
+  for (const dir of tempDirs) {
+    try {
+      await rm(dir, { recursive: true, force: true })
+    } catch {
+      /* ignore */
+    }
+  }
+})
 
 describe('memory 插件入口导出形态', () => {
   it('导出五件套命名导出', () => {
@@ -41,8 +58,10 @@ describe('memory 插件入口导出形态', () => {
     expect(plugin.inject).toContain('settings')
   })
 
-  it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无 warn', async () => {
+  it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无降级 warn', async () => {
     const warn = vi.fn()
+    // 裸 ctx（无 profileContext）：Story 1.4 起除分级校验外还会 warn 一句"跳过建库"，
+    // 因为裸 Context 没有 profile 归属，插件不猜库路径（AC1）。
     const ctx = { logger: { warn } } as unknown as Parameters<typeof plugin.apply>[0]
 
     // token 缺失 → 降级 disabled + warn（I/O 矩阵第 6 行，apply 侧）
@@ -50,21 +69,49 @@ describe('memory 插件入口导出形态', () => {
       embedding: { endpoint: 'https://api.example.com/v1', token: '', model: 'bge-m3' },
     }
     await plugin.apply(ctx, degraded)
-    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalledTimes(2)
     expect(warn.mock.calls[0][0]).toMatch(/^embedding 降级为 disabled：缺少 embedding\.token/)
     expect(warn.mock.calls[0][0]).not.toContain('bge-m3')
+    expect(warn.mock.calls[1][0]).toMatch(/profileContext\.dir/)
 
-    // 全字段合法 → 无 warn（I/O 矩阵第 1 行，apply 侧）
+    // 全字段合法 → 仍只有"跳过建库"这一条 warn，没有降级 warn
     warn.mockClear()
     const valid = {
       embedding: { endpoint: 'https://api.example.com/v1', token: 'sk-test', model: 'bge-m3' },
     }
     await plugin.apply(ctx, valid)
-    expect(warn).not.toHaveBeenCalled()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0][0]).toMatch(/profileContext\.dir/)
 
     // 硬校验失败 → apply 抛错（仅阻塞本插件）
     await expect(plugin.apply(ctx, {
       embedding: { endpoint: 'ftp://x', token: 'sk-test', model: 'bge-m3' },
     })).rejects.toThrow(/embedding\.endpoint/)
+  })
+
+  it('有 profileContext 时 apply 在 <profile>/memory/lbug.db 建库并注册 close effect（AC1）', async () => {
+    injectOpenSslPath()
+    const dir = await mkdtemp(join(tmpdir(), 'omw-entry-'))
+    tempDirs.push(dir)
+    const warn = vi.fn()
+    const info = vi.fn()
+    const closers: Array<() => unknown> = []
+    const ctx = {
+      logger: { warn, info },
+      get: (key: string) => (key === 'profileContext' ? { dir } : undefined),
+      effect: (factory: () => () => unknown) => closers.push(factory()),
+    } as unknown as Parameters<typeof plugin.apply>[0]
+
+    await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
+    expect(warn).not.toHaveBeenCalled()
+    await expect(access(resolveMemoryDbPath(dir))).resolves.toBeUndefined()
+    expect(closers).toHaveLength(1)
+    expect(info.mock.calls[0][0]).toMatch(/记忆库就绪/)
+    expect(info.mock.calls[0][0]).toContain(resolveMemoryDbPath(dir))
+
+    // dim 不符 → 拒绝启动（AC5），且不再注册新的 closer
+    await expect(plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'other', dim: 8 } }))
+      .rejects.toThrow(/维度不符/)
+    expect(closers).toHaveLength(1)
   })
 })
