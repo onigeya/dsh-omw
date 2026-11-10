@@ -4,6 +4,14 @@
  * 建库/写入阶段的失败一律 fail-loud：抛出本类型让宿主看到具体 code，
  * 不做静默降级（AD-14 维度不符、指纹空文本等）。retryable 固定 false——
  * 这些都是语义错误，重试不会变好。
+ *
+ * Story 1.6 新增两个工具层错误码（不抛，由 memory_remember 在 execute 内
+ * catch 后作为 canonical value 返回，见 tools/memory-remember.ts）：
+ * - 'db_unavailable'：库未就绪（无 profile / 句柄缺失）时工具调用不可用；
+ * - 'db_write_failed'：底层驱动抛出非 MemoryDbError 时的兜底写入失败。
+ * 这两个码只作为返回值出现：db/ 层没有任何
+ * `new MemoryDbError('db_unavailable' | 'db_write_failed')` 构造点，
+ * MemoryDbError 的抛出路径不产生它们。
  */
 export type MemoryDbErrorCode =
   | 'db_open_failed'
@@ -12,6 +20,8 @@ export type MemoryDbErrorCode =
   | 'empty_fingerprint_text'
   | 'invalid_layer'
   | 'invalid_embedding_dim'
+  | 'db_unavailable'
+  | 'db_write_failed'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode

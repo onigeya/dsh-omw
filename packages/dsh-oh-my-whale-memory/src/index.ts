@@ -14,6 +14,10 @@
  * （AC5/AD-14 fail-loud，绝不静默降级或重建库）。库句柄用 ctx.effect 注册 close，
  * 宿主 dispose→apply 抖动时按绝对路径复用 registry 中的同一句柄。
  *
+ * Story 1.6：注册模型工具 `memory_remember`（直写 L1，不产 embedding）。
+ * 工具先于建库注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
+ * `db_unavailable`，因此工具可用性不受 profile/建库问题牵连。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -24,6 +28,7 @@ import { resolveRuntimeConfig } from './config.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
+import { createMemoryRememberTool } from './tools/memory-remember.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -34,6 +39,17 @@ export { resolveMemoryDbPath } from './db/paths.js'
 export { openMemoryDatabase } from './db/database.js'
 export type { MemoryDatabase, OpenMemoryDatabaseOptions } from './db/database.js'
 export type { UpsertMemoryInput, UpsertMemoryResult } from './db/memory.js'
+export {
+  MEMORY_REMEMBER_LAYER,
+  MEMORY_REMEMBER_TOOL_DESCRIPTION,
+  MEMORY_REMEMBER_TOOL_NAME,
+} from './tools/memory-remember.js'
+export type {
+  MemoryRememberFailed,
+  MemoryRememberStore,
+  MemoryRememberStored,
+  MemoryRememberValue,
+} from './tools/memory-remember.js'
 
 /** cordis 模块名（AD-2，永不重命名）；与 settings namespace 一致。 */
 export const name = 'dsh-oh-my-whale-memory' as const
@@ -41,8 +57,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
 /**
  * 本插件向宿主注入的能力清单。
  * `'settings'`：/settings 表单投影与后续 /memory status 的设置读取通道（AD-11）。
+ * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
  */
-export const inject = ['settings'] as const
+export const inject = ['settings', 'tools'] as const
 
 /**
  * 插件激活函数。分级校验：硬校验失败抛错（仅阻塞本插件，宿主继续运行）；
@@ -60,6 +77,12 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
+  // Story 1.6：先注册工具、后建库。注册是 effect（自动挂 disposer）；
+  // 工具经闭包 getter 取库——无 profile / 建库失败时调用得到 db_unavailable，
+  // 工具存在本身不依赖库就绪。
+  let db: MemoryDatabase | undefined
+  ctx.tools.register(createMemoryRememberTool(() => db))
+
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
   const profile = (ctx.get?.('profileContext') ?? undefined) as { dir?: string } | undefined
@@ -75,13 +98,14 @@ export async function apply(
   }
 
   // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
-  const db: MemoryDatabase = await openMemoryDatabase({
+  const opened = await openMemoryDatabase({
     dbPath,
     dim: embedding.dim,
     modelId: embedding.modelId,
   })
+  db = opened
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
-  ctx.effect(() => () => db.close(), 'omw-memory-db')
+  ctx.effect(() => () => opened.close(), 'omw-memory-db')
   ctx.logger.info(`记忆库就绪：${dbPath}（dim=${embedding.dim}，model=${embedding.modelId}）`)
 }

@@ -54,15 +54,24 @@ describe('memory 插件入口导出形态', () => {
     expect(plugin.Config.type).toBe('object')
   })
 
-  it('inject 含 \'settings\'（AD-11：/settings 表单投影与 /memory status 通道）', () => {
+  it("inject 含 'settings' 与 'tools'（AD-11 配置通道 / Story 1.6 工具注册表）", () => {
     expect(plugin.inject).toContain('settings')
+    // Story 1.6：memory_remember 经 ctx.tools.register 注册，缺 'tools' 注入
+    // 则 apply 里的 ctx.tools 不可用。
+    expect(plugin.inject).toContain('tools')
   })
 
   it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无降级 warn', async () => {
     const warn = vi.fn()
     // 裸 ctx（无 profileContext）：Story 1.4 起除分级校验外还会 warn 一句"跳过建库"，
     // 因为裸 Context 没有 profile 归属，插件不猜库路径（AC1）。
-    const ctx = { logger: { warn } } as unknown as Parameters<typeof plugin.apply>[0]
+    // Story 1.6：apply 先注册 memory_remember 工具再查 profile，
+    // 因此任何 fake ctx 都必须提供 tools.register，否则 apply 直接 TypeError。
+    const registered: unknown[] = []
+    const ctx = {
+      logger: { warn },
+      tools: { register: (def: unknown) => { registered.push(def); return () => {} } },
+    } as unknown as Parameters<typeof plugin.apply>[0]
 
     // token 缺失 → 降级 disabled + warn（I/O 矩阵第 6 行，apply 侧）
     const degraded = {
@@ -87,6 +96,9 @@ describe('memory 插件入口导出形态', () => {
     await expect(plugin.apply(ctx, {
       embedding: { endpoint: 'ftp://x', token: 'sk-test', model: 'bge-m3' },
     })).rejects.toThrow(/embedding\.endpoint/)
+
+    // 每次成功走到注册步骤的 apply 都注册了一个工具；硬校验在注册之前抛错，不计入。
+    expect(registered).toHaveLength(2)
   })
 
   it('有 profileContext 时 apply 在 <profile>/memory/lbug.db 建库并注册 close effect（AC1）', async () => {
@@ -96,10 +108,12 @@ describe('memory 插件入口导出形态', () => {
     const warn = vi.fn()
     const info = vi.fn()
     const closers: Array<() => unknown> = []
+    const registered: Array<{ name?: string }> = []
     const ctx = {
       logger: { warn, info },
       get: (key: string) => (key === 'profileContext' ? { dir } : undefined),
       effect: (factory: () => () => unknown) => closers.push(factory()),
+      tools: { register: (def: { name?: string }) => { registered.push(def); return () => {} } },
     } as unknown as Parameters<typeof plugin.apply>[0]
 
     await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
@@ -108,6 +122,9 @@ describe('memory 插件入口导出形态', () => {
     expect(closers).toHaveLength(1)
     expect(info.mock.calls[0][0]).toMatch(/记忆库就绪/)
     expect(info.mock.calls[0][0]).toContain(resolveMemoryDbPath(dir))
+    // Story 1.6：工具在库就绪前注册，且只有一个（不按 profile 重复注册）。
+    expect(registered).toHaveLength(1)
+    expect(registered[0].name).toBe('memory_remember')
 
     // dim 不符 → 拒绝启动（AC5），且不再注册新的 closer
     await expect(plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'other', dim: 8 } }))
