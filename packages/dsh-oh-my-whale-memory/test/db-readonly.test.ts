@@ -263,7 +263,8 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
         "readonly: true, reason: 'another instance owns the writer lock'",
       )
       expect(info).not.toHaveBeenCalled()
-      expect(closers).toHaveLength(2)
+      // Story 1.5：库 facade + 写者锁两个 disposer；Story 1.7 追加无条件注册的命令 effect → 3。
+      expect(closers).toHaveLength(3)
     } finally {
       await writer.stop()
     }
