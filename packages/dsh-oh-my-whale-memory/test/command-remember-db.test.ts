@@ -30,7 +30,8 @@ beforeAll(async () => {
   dir = await mkdtemp(join(tmpdir(), 'omw-command-'))
   dbPath = resolveMemoryDbPath(dir)
 
-  // 裸 ctx：effect 收 closer（此处不消费），commands.register 捕获定义。
+  // 裸 ctx：effect 收 closer（此处不消费），commands.register 捕获定义；
+  // tools.register 是 Story 1.6 引入的无条件注册，任何驱动 apply 的 ctx 都必须提供。
   const registeredDefs: MemoryCommandDefinition[] = []
   const ctx = {
     logger: { warn: vi.fn(), info: vi.fn() },
@@ -38,6 +39,7 @@ beforeAll(async () => {
       ? { register: (definition: MemoryCommandDefinition) => { registeredDefs.push(definition); return () => {} } }
       : undefined),
     effect: (factory: () => () => unknown) => factory(),
+    tools: { register: () => () => {} },
   } as unknown as Parameters<typeof plugin.apply>[0]
 
   await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
@@ -125,6 +127,7 @@ describe('库未就绪：无 profileContext 时命令仍可用且明确报错（
         ? { register: (definition: MemoryCommandDefinition) => { registeredDefs.push(definition); return () => {} } }
         : undefined),
       effect: (factory: () => () => unknown) => factory(),
+      tools: { register: () => () => {} },
     } as unknown as Parameters<typeof plugin.apply>[0]
 
     await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })

@@ -100,4 +100,64 @@ describe('记忆写入与 ON CONFLICT 合并（AC6）', () => {
     await expect(store.upsertMemory({ layer: 'L1_INBOX', text: 'bad-vec', embedding: [1, 2] }))
       .rejects.toThrow(/向量长度/)
   })
+
+  it('缺省 embedding（Story 1.6）：三列向量写 NULL，id 幂等、source_refs 仍并集、recorded_at 保留最早', async () => {
+    const first = await store.upsertMemory({
+      layer: 'L1',
+      text: 'no vec fact',
+      sourceRefs: ['msg-1'],
+      recordedAt: '2026-11-09T00:00:00.000Z',
+    })
+    // 同指纹变体：大小写不同 + 多余标点/空白——归一化后命中同一 id。
+    const second = await store.upsertMemory({
+      layer: 'L1',
+      text: '  No Vec Fact!!! ',
+      sourceRefs: ['msg-2'],
+      recordedAt: '2026-11-10T00:00:00.000Z',
+    })
+
+    expect(second.id).toBe(first.id)
+    expect(second.recordedAt).toBe('2026-11-09T00:00:00.000Z') // 保留最早
+
+    const rows = await queryAll(
+      store.connection,
+      `MATCH (m:memory {id: '${first.id}'}) RETURN m.layer AS layer, m.text AS text, m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim, m.source_refs AS refs, m.recorded_at AS recorded_at`,
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]['layer']).toBe('L1')
+    // text 不被 ON MATCH 改写：保留首次写入的原文。
+    expect(rows[0]['text']).toBe('no vec fact')
+    // 三列向量全 NULL（绝不写零向量），embedding 由 Epic 2 补齐。
+    expect(rows[0]['embedding']).toBeNull()
+    expect(rows[0]['model_id']).toBeNull()
+    expect(rows[0]['dim']).toBeNull()
+    expect(rows[0]['refs']).toEqual(['msg-1', 'msg-2'])
+    expect(rows[0]['recorded_at']).toBe('2026-11-09T00:00:00.000Z')
+  })
+
+  it('带 embedding 与缺省 embedding 可交替命中同一节点（ON MATCH 不重写向量列）', async () => {
+    const a = await store.upsertMemory({
+      layer: 'L1',
+      text: 'mixed-vec-fact',
+      embedding: [0.5, 0.5, 0.5, 0.5],
+      sourceRefs: ['msg-a'],
+    })
+    const b = await store.upsertMemory({
+      layer: 'L1',
+      text: 'mixed-vec-fact',
+      sourceRefs: ['msg-b'],
+    })
+
+    expect(b.id).toBe(a.id)
+    const rows = await queryAll(
+      store.connection,
+      `MATCH (m:memory {id: '${a.id}'}) RETURN m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim, m.source_refs AS refs`,
+    )
+    expect(rows).toHaveLength(1)
+    // 首次写入带 embedding：列保持首次值，缺省重写不清空、不补零。
+    expect(rows[0]['embedding']).toEqual([0.5, 0.5, 0.5, 0.5])
+    expect(rows[0]['model_id']).toBe('test-embed-model')
+    expect(rows[0]['dim']).toBe(4)
+    expect(rows[0]['refs']).toEqual(['msg-a', 'msg-b'])
+  })
 })

@@ -20,9 +20,13 @@
  * LadybugDB 只要存在只读句柄，之后同文件的读写打开必失败 `Error: 33`。
  * 陈旧锁（前一实例异常退出）由 withFileLock 自身的接管语义处理（AC3）。
  *
- * Story 1.7：apply 注册宿主命令 `/memory`（子命令 `remember`）把文本写入 L1 收件箱；
- * 命令在 profileContext 早退之前无条件注册（库未就绪时返回明确错误，AC4），`db`
- * 经闭包可变量交给 handler。
+ * Story 1.6：注册模型工具 `memory_remember`（直写 L1，不产 embedding）。
+ * 工具先于建库注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
+ * `db_unavailable`，因此工具可用性不受 profile/建库问题牵连。
+ *
+ * Story 1.7：注册宿主命令 `/memory`（子命令 `remember`）把文本写入 L1 收件箱；
+ * 命令同样在 profileContext 早退之前无条件注册（库未就绪时返回明确错误，AC4），
+ * 与工具共用同一个闭包可变量 `db`。
  *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
@@ -36,6 +40,7 @@ import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 import { createMemoryRememberDefinition, type MemoryCommandsRuntime } from './command.js'
+import { createMemoryRememberTool } from './tools/memory-remember.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -61,6 +66,17 @@ export type {
   MemoryCommandResult,
   MemoryRememberDependencies,
 } from './command.js'
+export {
+  MEMORY_REMEMBER_LAYER,
+  MEMORY_REMEMBER_TOOL_DESCRIPTION,
+  MEMORY_REMEMBER_TOOL_NAME,
+} from './tools/memory-remember.js'
+export type {
+  MemoryRememberFailed,
+  MemoryRememberStore,
+  MemoryRememberStored,
+  MemoryRememberValue,
+} from './tools/memory-remember.js'
 
 /** cordis 模块名（AD-2，永不重命名）；与 settings namespace 一致。 */
 export const name = 'dsh-oh-my-whale-memory' as const
@@ -69,8 +85,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * 本插件向宿主注入的能力清单。
  * `'commands'`：`/memory` 宿主命令（Story 1.7）。
  * `'settings'`：/settings 表单投影与后续 /memory status 的设置读取通道（AD-11）。
+ * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
  */
-export const inject = ['commands', 'settings'] as const
+export const inject = ['commands', 'settings', 'tools'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -108,9 +125,9 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
-  // Story 1.7：命令无条件注册（早于 profileContext 早退），库未就绪时给出明确错误
-  // 而非静默"命令不存在"（AC4 可观测性）。facade 经闭包可变量取当前 db；
-  // effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
+  // Story 1.6 / 1.7：命令与工具都在 profileContext 早退之前无条件注册（注册是 effect，
+  // 自动挂 disposer），两者共用闭包可变量 `db`——库未就绪时命令给出明确错误、
+  // 工具给出 db_unavailable，可用性不受 profile/建库问题牵连。
   let db: MemoryDatabase | undefined
   const writeL1Inbox = async (text: string): Promise<void> => {
     if (!db) {
@@ -120,6 +137,7 @@ export async function apply(
     // 同落 NULL（不写零向量污染 HNSW cosine 索引），Story 2.3 引入客户端后回填。
     await db.upsertMemory({ layer: 'L1_INBOX', text, embedding: null, embeddingModelId: null })
   }
+  // 命令的 effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
   ctx.effect(
     () => {
       const commands = ctx.get?.('commands') as MemoryCommandsRuntime | undefined
@@ -127,6 +145,7 @@ export async function apply(
     },
     'omw-memory-command',
   )
+  ctx.tools.register(createMemoryRememberTool(() => db))
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
@@ -148,10 +167,11 @@ export async function apply(
   // 只读实例走到这里说明写者尚未建库，建目录本身不产生库文件（不创建空库）。
   await ensureMemoryDbDirectory(dbPath)
   const lock = await acquireWriterLock(dbPath)
-  let opened: MemoryDatabase
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
-    opened = await openMemoryDatabase({
+    // 工具与命令经闭包读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
+    // 由 memory_remember / `/memory remember` 收敛为 canonical failed（绝不 throw）。
+    db = await openMemoryDatabase({
       dbPath,
       dim: embedding.dim,
       modelId: embedding.modelId,
@@ -166,12 +186,8 @@ export async function apply(
   runtimeState = { readonly: lock.mode === 'readonly', reason: lock.reason, dbPath }
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
-  ctx.effect(() => () => opened.close(), 'omw-memory-db')
+  ctx.effect(() => () => db?.close(), 'omw-memory-db')
   ctx.effect(() => () => lock.release(), 'omw-memory-writer-lock')
-
-  // Story 1.7：建库成功才把 facade 交给命令闭包；此前 `/memory remember` 得到"记忆库未就绪"。
-  // 只读实例同样赋值——写入由 facade 抛 readonly_mode，命令 handler 转成明确错误（Story 1.5 / AC2）。
-  db = opened
 
   if (lock.mode === 'readonly') {
     // 只读实例不能改写库级 model id：配置与库内记录不一致时必须显式告知，不静默降级

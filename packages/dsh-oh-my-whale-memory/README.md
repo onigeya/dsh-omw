@@ -8,7 +8,8 @@ DSH 记忆插件 function 插件（cordis 模块名 `dsh-oh-my-whale-memory`，A
 
 - `pnpm -r build`：产出 `lib/index.js`（ESM）+ `lib/types/index.d.ts`。
 - `pnpm test`（根执行）：根 vitest 以 `test.projects` 指向本包 `vitest.config.ts`，
-  运行 `abi-smoke`、`config-schema`、`entry-exports` 三组测试。
+  运行 `test/**/*.test.ts` 全部测试（abi-smoke / config-schema / db-* / entry-exports /
+  tool-memory-remember 等）。
 
 ### vitest 摆放（方案 a，根统一）
 
@@ -103,6 +104,30 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
   因此库文件在进程存活期间只在进程内复用、只能靠**跨进程**重开才拿到文件锁；
   同路径不同 dim 直接抛 `embedding_dim_mismatch`。
 
+## 模型工具 `memory_remember`（Story 1.6 / FR-1）
+
+apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此含 `'tools'`），
+定义在 `src/tools/memory-remember.ts`（`defineTool`，`@deepseek-ai/dsh-tools`）。
+
+- **签名**：`memory_remember(content: string, context?: string)`。`content` 必填，`context`
+  可选（来源消息/卡片 id），缺省时 `source_refs = []`；提供时 `source_refs = [context]`。
+- **写入形态**：固定 `layer = 'L1'`，走 `src/db/memory.ts` 的同一套指纹与 MERGE 逻辑
+  （不复制第二份 id/归一化实现）。同 `(layer, 归一化 text)` 重复写入命中同一 id：
+  `source_refs` 并集去重、`recorded_at` 保留最早、`text` 不被改写。
+- **写入不产 embedding（Epic 2 补齐）**：`embedding` / `embedding_model_id` / `embedding_dim`
+  三列保持 `NULL`——绝不写零向量冒充向量；维度校验只在显式带向量时生效，因此本工具
+  不受库 pin 的 dim 影响。向量化与 INBOX 精炼是 Epic 2 的范围。
+- **返回值只可能是两个 canonical 形态**（`output.schema` 用 `oneOf` 钉死）：
+  `{ action: 'stored', id }` 或 `{ action: 'failed', error: { code, message, retryable } }`。
+  **execute 绝不 throw**（宿主把 throw 渲染成 isError）：空文本 / 归一化后为空 →
+  `empty_fingerprint_text`；无 profile 归属或库句柄缺失 → `db_unavailable`；
+  `MemoryDbError` 透传其 code；其余驱动异常兜底 `db_write_failed`。`retryable` 恒 `false`
+  （写入失败是语义错误，重试不会变好）。error.message 只含诊断信息，绝不携带凭据。
+- **库未就绪不影响插件加载**：工具在 `apply` 里**先于建库**注册，经闭包 getter 取库句柄；
+  此时调用得到 `db_unavailable`，而不是让插件启动失败。
+- **描述护栏（FR-1）**：工具 description 明确要求只记长期事实、并显式排除
+  ephemeral / transient content（当前任务进度、一次性中间结果、闲聊等）。
+
 ## /memory 命令（Story 1.7）
 
 代码在 `src/command.ts`（纯工厂 + 解析，不碰 ctx / 库）与 `src/index.ts`（`apply` 中接线）。
@@ -113,14 +138,14 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
   `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`：`/memory remember <内容>`）。
 - **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /
   `embedding_dim` 三列同落 NULL（不写零向量——零向量会污染 HNSW，留待 Story 2.3 回填）。
-  维度校验因此只在 `embedding` 非 null 时生效；非 null 且长度与库 pin 不符仍 fail-loud
-  抛 `embedding_dim_mismatch`。
+  与工具直写共用同一条无向量路径；维度校验因此只在显式带向量时生效，非空且长度与库 pin
+  不符仍 fail-loud 抛 `embedding_dim_mismatch`。
 - **永不抛错**：handler 内 `try/catch` 把所有异常（含写库失败，如归一化后为空
   `empty_fingerprint_text`）收敛为 `{ kind: 'error', text }`——命令失败不打断会话。
 - **无条件注册**：命令在 `apply` 开头、profileContext 早退**之前**注册
   （`ctx.effect(..., 'omw-memory-command')`），因此没有 profile 归属时命令也存在，
   只是写库抛「记忆库未就绪」的明确错误。未注入 `commands` 时注册降级为 no-op；
-  `inject` 因此为 `['commands', 'settings']`。
+  `inject` 因此为 `['commands', 'settings', 'tools']`。
 - 同一 `(layer, 归一化 text)` 重复 remember 由指纹 id 合并，节点数不变（AD-4）。
 
 ## 安装期注意
@@ -129,3 +154,13 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
   `esbuild: true`——`vitest@3` → `vite@7` → `esbuild` 链路会让 pnpm 报
   `ERR_PNPM_IGNORED_BUILDS` 阻断 install。`nodeLinker: hoisted` / `autoInstallPeers: false`
   两个 spec 锁定项未动。
+- **为什么 `@deepseek-ai/dsh-llm` / `@deepseek-ai/dsh-scope` 是 devDependencies**：
+  `dsh-tools` 的 `lib/` 在模块加载期 import 这两个包（以及若干 peer），而本仓
+  `autoInstallPeers: false` + `nodeLinker: hoisted` 不会自动补装传递 peer，所以测试链路
+  必须显式声明它们；它们是**仅测试用**的，不是发布契约——插件运行期只 import
+  `dsh-tools` 本身，由宿主的 profile 依赖解析提供。
+- **为什么钉 `dsh-tools@0.2.2-rc.1` 而不是宿主自带的 `0.2.1-rc.3`**：0.2.1-rc.3 的 `lib`
+  在模块加载期还会 import `@deepseek-ai/dsh-sandbox` 等本工作区解析不到的 peer，
+  直接 import 即以 `Cannot find package '@deepseek-ai/dsh-sandbox'` 失败（已实测）；
+  0.2.2-rc.1 无此引用且 peer 面与工作区 cordis ~4.1.0 一致。宿主侧实际加载哪个版本
+  由 `engines.dsh` 与 profile 解析决定，插件不重复锁定。

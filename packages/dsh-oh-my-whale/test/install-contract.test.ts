@@ -93,7 +93,7 @@ describe('依赖声明契约（AD-1 / publish.md:105）', () => {
     expect(Object.keys(memoryDeps)).not.toContain('dsh-oh-my-whale')
   })
 
-  it('@deepseek-ai/cordis 在 peer+dev 同 SemVer 字符串（两包）', () => {
+  it('@deepseek-ai/cordis 与 @deepseek-ai/dsh-tools 在 peer+dev 同 SemVer 字符串', () => {
     // publish.md:105：必须在两侧同时声明同范围，宿主才在运行时拦截 peer。
     for (const manifest of [pkg, memoryPkg]) {
       const peer = manifest.peerDependencies?.['@deepseek-ai/cordis']
@@ -101,6 +101,12 @@ describe('依赖声明契约（AD-1 / publish.md:105）', () => {
       expect(peer).toBeTruthy()
       expect(dev).toBe(peer)
     }
+    // Story 1.6：memory 包的 @deepseek-ai/dsh-tools（memory_remember 的依赖）
+    // 同样必须 peer+dev 同串，否则 peer/dev 漂移测不出。
+    const toolsPeer = memoryPkg.peerDependencies?.['@deepseek-ai/dsh-tools']
+    const toolsDev = memoryPkg.devDependencies?.['@deepseek-ai/dsh-tools']
+    expect(toolsPeer).toBeTruthy()
+    expect(toolsDev).toBe(toolsPeer)
   })
 
   it('@deepseek-ai/schemastery 在 dependencies（publish.md:105）', () => {
