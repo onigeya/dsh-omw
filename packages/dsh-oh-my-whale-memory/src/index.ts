@@ -20,6 +20,10 @@
  * LadybugDB 只要存在只读句柄，之后同文件的读写打开必失败 `Error: 33`。
  * 陈旧锁（前一实例异常退出）由 withFileLock 自身的接管语义处理（AC3）。
  *
+ * Story 1.6：注册模型工具 `memory_remember`（直写 L1，不产 embedding）。
+ * 工具先于建库注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
+ * `db_unavailable`，因此工具可用性不受 profile/建库问题牵连。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -31,6 +35,7 @@ import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
+import { createMemoryRememberTool } from './tools/memory-remember.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -43,6 +48,17 @@ export type { MemoryDatabase, OpenMemoryDatabaseOptions } from './db/database.js
 export type { UpsertMemoryInput, UpsertMemoryResult } from './db/memory.js'
 export { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 export type { MemoryWriterLock } from './db/writer-lock.js'
+export {
+  MEMORY_REMEMBER_LAYER,
+  MEMORY_REMEMBER_TOOL_DESCRIPTION,
+  MEMORY_REMEMBER_TOOL_NAME,
+} from './tools/memory-remember.js'
+export type {
+  MemoryRememberFailed,
+  MemoryRememberStore,
+  MemoryRememberStored,
+  MemoryRememberValue,
+} from './tools/memory-remember.js'
 
 /** cordis 模块名（AD-2，永不重命名）；与 settings namespace 一致。 */
 export const name = 'dsh-oh-my-whale-memory' as const
@@ -50,8 +66,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
 /**
  * 本插件向宿主注入的能力清单。
  * `'settings'`：/settings 表单投影与后续 /memory status 的设置读取通道（AD-11）。
+ * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
  */
-export const inject = ['settings'] as const
+export const inject = ['settings', 'tools'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -89,6 +106,12 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
+  // Story 1.6：先注册工具、后建库。注册是 effect（自动挂 disposer）；
+  // 工具经闭包 getter 取库——无 profile / 建库失败时调用得到 db_unavailable，
+  // 工具存在本身不依赖库就绪。
+  let db: MemoryDatabase | undefined
+  ctx.tools.register(createMemoryRememberTool(() => db))
+
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
   const profile = (ctx.get?.('profileContext') ?? undefined) as { dir?: string } | undefined
@@ -109,9 +132,10 @@ export async function apply(
   // 只读实例走到这里说明写者尚未建库，建目录本身不产生库文件（不创建空库）。
   await ensureMemoryDbDirectory(dbPath)
   const lock = await acquireWriterLock(dbPath)
-  let db: MemoryDatabase
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
+    // 工具经闭包 getter 读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
+    // 由 memory_remember 收敛为 canonical failed（绝不 throw）。
     db = await openMemoryDatabase({
       dbPath,
       dim: embedding.dim,
@@ -127,7 +151,7 @@ export async function apply(
   runtimeState = { readonly: lock.mode === 'readonly', reason: lock.reason, dbPath }
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
-  ctx.effect(() => () => db.close(), 'omw-memory-db')
+  ctx.effect(() => () => db?.close(), 'omw-memory-db')
   ctx.effect(() => () => lock.release(), 'omw-memory-writer-lock')
 
   if (lock.mode === 'readonly') {

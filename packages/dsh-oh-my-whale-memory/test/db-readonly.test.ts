@@ -249,6 +249,9 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
         logger: { warn, info },
         get: (key: string) => (key === 'profileContext' ? { dir } : undefined),
         effect: (factory: () => () => unknown) => closers.push(factory()),
+        // Story 1.6：memory_remember 经 ctx.tools.register 注册（真实宿主里它是 effect）。
+        // 替身只需可调用；closers 仍只统计 ctx.effect 注册的收尾器。
+        tools: { register: () => () => {} },
       } as unknown as Parameters<typeof plugin.apply>[0]
 
       await plugin.apply(ctx, { embedding: { token: 'sk-test', model: MODEL_ID, dim: 8 } })

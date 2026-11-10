@@ -83,7 +83,7 @@ export interface MemoryDatabase {
   /** 是否为只读降级实例（Story 1.5 / AC2：后续 story 的工具与命令据此禁用写入）。 */
   readonly readonly: boolean
   readonly connection: MemoryConnection
-  /** 写入/合并一条记忆；embedding 长度必须等于 pin 的 dim。只读实例一律抛 `readonly_mode`。 */
+  /** 写入/合并一条记忆；带 embedding 时长度必须等于 pin 的 dim，缺省时不写向量列。只读实例一律抛 `readonly_mode`。 */
   upsertMemory(input: Omit<UpsertMemoryInput, 'embeddingModelId'> & { embeddingModelId?: string }): Promise<UpsertMemoryResult>
   close(): Promise<void>
 }
@@ -282,6 +282,11 @@ async function initializeDatabase(
     readonly: false,
     connection,
     async upsertMemory(input) {
+      if (input.embedding === undefined) {
+        // Story 1.6：memory_remember 直写 L1 不产向量——不校验维度、不补模型 id，
+        // 三列（embedding / embedding_model_id / embedding_dim）保持 NULL，绝不写零向量。
+        return upsertMemory(connection, input, { now })
+      }
       const embedding = Array.from(input.embedding)
       if (embedding.length !== dim) {
         throw new MemoryDbError(
