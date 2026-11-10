@@ -8,22 +8,17 @@
  *
  * 依赖 Windows OpenSSL 3 注入（vector/fts 扩展），同 abi-smoke.test.ts。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { MemoryDbError } from '../src/db/errors'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
-const dirs: string[] = []
 const stores: MemoryDatabase[] = []
 
 async function tempDbPath(label: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `omw-conc-${label}-`))
-  dirs.push(dir)
-  return resolveMemoryDbPath(dir)
+  return resolveMemoryDbPath(await makeTempDir(`omw-conc-${label}-`))
 }
 
 beforeAll(() => {
@@ -38,13 +33,7 @@ afterAll(async () => {
       /* ignore */
     }
   }
-  for (const dir of dirs) {
-    try {
-      await rm(dir, { recursive: true, force: true })
-    } catch {
-      /* ignore */
-    }
-  }
+  await cleanupTempDirs()
 })
 
 describe('并发打开同一库', () => {

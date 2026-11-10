@@ -7,14 +7,12 @@
  *
  * 依赖 Windows OpenSSL 3 注入（vector/fts 扩展），同 abi-smoke.test.ts。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
 let dir: string
 let dbPath: string
@@ -22,7 +20,7 @@ let store: MemoryDatabase
 
 beforeAll(async () => {
   injectOpenSslPath()
-  dir = await mkdtemp(join(tmpdir(), 'omw-upsert-'))
+  dir = await makeTempDir('omw-upsert-')
   dbPath = resolveMemoryDbPath(dir)
   store = await openMemoryDatabase({ dbPath, dim: 4, modelId: 'test-embed-model' })
 })
@@ -33,11 +31,7 @@ afterAll(async () => {
   } catch {
     /* ignore */
   }
-  try {
-    await rm(dir, { recursive: true, force: true })
-  } catch {
-    /* ignore */
-  }
+  await cleanupTempDirs()
 })
 
 describe('记忆写入与 ON CONFLICT 合并（AC6）', () => {

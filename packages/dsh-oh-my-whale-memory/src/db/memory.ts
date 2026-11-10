@@ -90,12 +90,18 @@ const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
 
-/** 单条 query() 的结果归一为行数组（多语句才返回数组，见 lbug.d.ts）。 */
+/**
+ * 单条 query()/execute() 结果归一为行数组：LadybugDB 只在多语句时才返回数组
+ * （见 node_modules/@ladybugdb/core/lbug.d.ts:250/287），本层一律只取第一条结果集。
+ * 抽成单一 helper——"多语句返回数组"这条非显然规则只在一处陈述，写查询与写节点不各自复制。
+ */
+async function collectRows(result: lbug.QueryResult | lbug.QueryResult[]): Promise<Record<string, unknown>[]> {
+  const first = Array.isArray(result) ? result[0]! : result
+  return (await first.getAll()) as Record<string, unknown>[]
+}
+
 export async function queryAll(connection: MemoryConnection, statement: string): Promise<Record<string, unknown>[]> {
-  const result = await connection.query(statement)
-  const single = Array.isArray(result) ? result[0]! : result
-  const rows = await single.getAll()
-  return rows as Record<string, unknown>[]
+  return collectRows(await connection.query(statement))
 }
 
 /** 写入/合并一条记忆。返回节点 id 与最终 recorded_at。 */
@@ -133,8 +139,7 @@ export async function upsertMemory(
     params.embedding_dim = embedding.length
   }
   const result = await connection.execute(statement, params)
-  const single = Array.isArray(result) ? result[0]! : result
-  const rows = (await single.getAll()) as Record<string, unknown>[]
+  const rows = await collectRows(result)
   const row = rows[0]
   if (!row) {
     throw new MemoryDbError('db_open_failed', `记忆写入未返回结果（id=${id}）：${JSON.stringify(input.sourceRefs ?? [])}`)

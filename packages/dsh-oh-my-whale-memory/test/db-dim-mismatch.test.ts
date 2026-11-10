@@ -14,9 +14,7 @@
  * 子进程逐条执行。这样 DDL 始终只有一份事实来源。
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { resolve } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
@@ -27,6 +25,7 @@ import {
   META_KEYS,
 } from '../src/db/schema'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const BUILT_DIM = 1024
 const CONFIGURED_DIM = 768
@@ -36,7 +35,7 @@ let dbPath: string
 
 beforeAll(async () => {
   injectOpenSslPath()
-  dir = await mkdtemp(join(tmpdir(), 'omw-dim-'))
+  dir = await makeTempDir('omw-dim-')
   dbPath = resolveMemoryDbPath(dir)
 
   const statements = JSON.stringify([
@@ -74,13 +73,7 @@ beforeAll(async () => {
   }
 }, 120_000)
 
-afterAll(async () => {
-  try {
-    await rm(dir, { recursive: true, force: true })
-  } catch {
-    /* ignore */
-  }
-})
+afterAll(cleanupTempDirs)
 
 describe('embedding 维度不符 fail-loud（AC5）', () => {
   it('库 pin 为 1024 而以 768 打开 → 抛 embedding_dim_mismatch 且提示迁移路径', async () => {
@@ -99,25 +92,20 @@ describe('embedding 维度不符 fail-loud（AC5）', () => {
 })
 describe('omw_meta 与表列维度不一致（schema_mismatch 分支）', () => {
   it('meta 改写成 8 而列仍为 FLOAT[4] → 重开抛 schema_mismatch 且指向维度不一致', async () => {
-    const dir2 = await mkdtemp(join(tmpdir(), 'omw-meta-dim-'))
-    try {
-      const dbPath2 = resolveMemoryDbPath(dir2)
-      const store = await openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' })
-      // close 只回收 facade，底层 connection 仍在 registry（Windows 上不可同进程重开，
-      // 所以借同一条 connection 篡改元数据来模拟外部版本冲突）。
-      const connection = store.connection
-      await store.close()
-      await connection.query(
-        `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'})`
-        + ` ON CREATE SET m.value = '8' ON MATCH SET m.value = '8'`,
-      )
-      // 表列仍是 FLOAT[4]，与 meta 的 8 冲突 → 抛 schema_mismatch 而非 dim_mismatch
-      await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))
-        .rejects.toMatchObject({ code: 'schema_mismatch' })
-      await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))
-        .rejects.toThrow(/omw_meta\.embedding_dim/)
-    } finally {
-      await rm(dir2, { recursive: true, force: true })
-    }
+    const dbPath2 = resolveMemoryDbPath(await makeTempDir('omw-meta-dim-'))
+    const store = await openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' })
+    // close 只回收 facade，底层 connection 仍在 registry（Windows 上不可同进程重开，
+    // 所以借同一条 connection 篡改元数据来模拟外部版本冲突）。
+    const connection = store.connection
+    await store.close()
+    await connection.query(
+      `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'})`
+      + ` ON CREATE SET m.value = '8' ON MATCH SET m.value = '8'`,
+    )
+    // 表列仍是 FLOAT[4]，与 meta 的 8 冲突 → 抛 schema_mismatch 而非 dim_mismatch
+    await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))
+      .rejects.toMatchObject({ code: 'schema_mismatch' })
+    await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))
+      .rejects.toThrow(/omw_meta\.embedding_dim/)
   })
 })

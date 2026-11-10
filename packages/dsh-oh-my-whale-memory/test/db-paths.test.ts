@@ -4,7 +4,7 @@
  * resolveMemoryDbPath 是唯一路径来源（不自行拼 DSH_HOME）；空 profile 目录必须
  * fail-loud 抛 MemoryDbError('db_open_failed')，否则会静默把库写到 cwd 下。
  */
-import { mkdtemp, rm, stat } from 'node:fs/promises'
+import { stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
@@ -15,18 +15,9 @@ import {
   ensureMemoryDbDirectory,
   resolveMemoryDbPath,
 } from '../src/db/paths'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
-const dirs: string[] = []
-
-afterAll(async () => {
-  for (const dir of dirs) {
-    try {
-      await rm(dir, { recursive: true, force: true })
-    } catch {
-      /* ignore */
-    }
-  }
-})
+afterAll(cleanupTempDirs)
 
 describe('resolveMemoryDbPath 守卫', () => {
   it('空 / 空白 profile 目录抛 MemoryDbError(code=db_open_failed)', () => {
@@ -49,8 +40,7 @@ describe('resolveMemoryDbPath 守卫', () => {
 
 describe('ensureMemoryDbDirectory', () => {
   it('建出嵌套的 <dir>/memory 目录（幂等）', async () => {
-    const root = await mkdtemp(join(tmpdir(), 'omw-paths-'))
-    dirs.push(root)
+    const root = await makeTempDir('omw-paths-')
     const dbPath = resolveMemoryDbPath(join(root, 'nested', 'profile'))
     await ensureMemoryDbDirectory(dbPath)
     const info = await stat(join(root, 'nested', 'profile', MEMORY_DB_DIR))

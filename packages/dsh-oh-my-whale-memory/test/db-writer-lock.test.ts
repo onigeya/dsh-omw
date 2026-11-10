@@ -6,30 +6,19 @@
  * 本文件不需要 LadybugDB，因此不注入 OpenSSL。
  */
 import { spawn } from 'node:child_process'
-import { access, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, readFile, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, dirname, basename } from 'node:path'
 import { afterAll, describe, expect, it } from 'vitest'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
 import { READONLY_REASON, acquireWriterLock } from '../src/db/writer-lock'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
-const tempDirs: string[] = []
-
-afterAll(async () => {
-  for (const dir of tempDirs) {
-    try {
-      await rm(dir, { recursive: true, force: true })
-    } catch {
-      /* ignore */
-    }
-  }
-})
+afterAll(cleanupTempDirs)
 
 async function freshDbPath(label: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `omw-lock-${label}-`))
-  tempDirs.push(dir)
-  const dbPath = resolveMemoryDbPath(dir)
+  const dbPath = resolveMemoryDbPath(await makeTempDir(`omw-lock-${label}-`))
   await ensureMemoryDbDirectory(dbPath)
   return dbPath
 }

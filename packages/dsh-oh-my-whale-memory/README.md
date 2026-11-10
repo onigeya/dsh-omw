@@ -38,7 +38,7 @@ Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
 | `inboxRefineConcurrency` | number | 4 | INBOX 精炼并发上限，硬校验 ≥ 1 |
 | `injectOnNewSession` | boolean | true | 是否开启新会话注入 |
 | `rrfK` | number | 60 | RRF 融合参数 k，硬校验 > 0 |
-| `retrievalTopK` | number | 50 | 两路检索 top-k；v1 仅透传，无硬校验（消费在 1.7 检索落地） |
+| `retrievalTopK` | number | 50 | 两路检索 top-k；v1 仅透传，无硬校验（消费在 Epic 2 检索落地） |
 | `layerWeights.l2` | number | 0.7 | L2 层权重，硬校验 ∈ (0, 1] |
 | `layerWeights.l1` | number | 0.4 | L1 层权重，硬校验 ∈ (0, 1] |
 | `llmProvider` | string | — | 可选；LLM 显式 provider（AD-5） |

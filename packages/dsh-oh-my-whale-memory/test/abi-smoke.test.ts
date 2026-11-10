@@ -12,12 +12,11 @@
  * 五步流程：open → CREATE NODE TABLE → INSERT → QUERY → CREATE_VECTOR_INDEX
  * 任一步失败则测试 fail，Story 1.1 须标 blocked 上报，不迁就失败。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as lbug from '@ladybugdb/core'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
 // OpenSSL 3 PATH 注入见 test/openssl.ts（单一事实来源）；本文件建库前调用。
 
@@ -42,7 +41,7 @@ beforeAll(async () => {
   // 必须在打开数据库连接之前注入，否则 step 5 的 INSTALL vector 会以
   // "Failed to load library: ... libvector.lbug_extension" 失败。
   injectOpenSslPath()
-  dir = await mkdtemp(join(tmpdir(), 'omw-abi-smoke-'))
+  dir = await makeTempDir('omw-abi-smoke-')
   db = new lbug.Database(join(dir, 'lbug.db'))
   conn = new lbug.Connection(db)
 })
@@ -55,11 +54,7 @@ afterAll(async () => {
   } catch {
     /* ignore */
   }
-  try {
-    await rm(dir, { recursive: true, force: true })
-  } catch {
-    /* ignore */
-  }
+  await cleanupTempDirs()
 })
 
 describe('LadybugDB Windows ABI 冒烟', () => {

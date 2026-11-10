@@ -9,15 +9,13 @@
  *   embedding_dim 均为 NULL（Epic 1 无 embedding 客户端的既定状态）；
  * - 同文本重复写入节点数不增（id = uuid5(layer+':'+归一化 text)）。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { openMemoryDatabase } from '../src/db/database'
 import { queryAll, type MemoryConnection } from '../src/db/memory'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 import type { MemoryCommandDefinition, MemoryCommandInvocation } from '../src/command'
 
 let dir: string
@@ -27,7 +25,7 @@ let registered: MemoryCommandDefinition | undefined
 
 beforeAll(async () => {
   injectOpenSslPath()
-  dir = await mkdtemp(join(tmpdir(), 'omw-command-'))
+  dir = await makeTempDir('omw-command-')
   dbPath = resolveMemoryDbPath(dir)
 
   // 裸 ctx：effect 收 closer（此处不消费），commands.register 捕获定义；
@@ -50,13 +48,7 @@ beforeAll(async () => {
   connection = store.connection
 })
 
-afterAll(async () => {
-  try {
-    await rm(dir, { recursive: true, force: true })
-  } catch {
-    /* ignore */
-  }
-})
+afterAll(cleanupTempDirs)
 
 describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
   it('apply 把名为 memory 的命令定义交给 commands.register（AC3）', () => {

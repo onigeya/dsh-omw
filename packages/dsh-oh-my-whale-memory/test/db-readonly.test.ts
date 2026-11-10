@@ -6,9 +6,7 @@
  * 的同一批 DDL 以读写建库并持锁，直到父进程关闭 stdin（或被杀，用于陈旧锁场景）。
  */
 import { spawn } from 'node:child_process'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { access, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { openMemoryDatabase } from '../src/db/database'
@@ -26,30 +24,19 @@ import {
 } from '../src/db/schema'
 import * as plugin from '../src/index'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/hold-db-open.mjs', import.meta.url))
 const MODEL_ID = 'bge-m3'
-
-const tempDirs: string[] = []
 
 beforeAll(() => {
   injectOpenSslPath()
 })
 
-afterAll(async () => {
-  for (const dir of tempDirs) {
-    try {
-      await rm(dir, { recursive: true, force: true })
-    } catch {
-      /* ignore */
-    }
-  }
-})
+afterAll(cleanupTempDirs)
 
 async function freshDbPath(label: string): Promise<string> {
-  const dir = await mkdtemp(join(tmpdir(), `omw-ro-${label}-`))
-  tempDirs.push(dir)
-  const dbPath = resolveMemoryDbPath(dir)
+  const dbPath = resolveMemoryDbPath(await makeTempDir(`omw-ro-${label}-`))
   await ensureMemoryDbDirectory(dbPath)
   return dbPath
 }
@@ -237,8 +224,7 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
   }, 20_000)
 
   it('apply 在第二实例下降级只读并标注 readonly: true / reason（AC1、AC2）', async () => {
-    const dir = await mkdtemp(join(tmpdir(), 'omw-ro-apply-'))
-    tempDirs.push(dir)
+    const dir = await makeTempDir('omw-ro-apply-')
     const dbPath = resolveMemoryDbPath(dir)
     const writer = await startWriterInstance(dbPath, 8)
     try {
@@ -275,10 +261,12 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
 
   it('写者持锁但库文件尚未落盘时，第二实例有界等待后仍降级只读（启动竞态）', async () => {
     const dbPath = await freshDbPath('writer-booting')
-    // readyEarly + delayMs：夹具抢到锁就返回父进程，库文件要等 700ms 之后才被 DDL 建出来。
+    // readyEarly + delayMs：夹具抢到锁就返回父进程，库文件要等 300ms 之后才被 DDL 建出来。
     // 这正是"两个窗口几乎同时启动"的真实窗口：写者已持锁，但 new Database() 是惰性打开，
     // 库文件还没落盘；只读方若立刻判 db_open_failed，就失去了降级只读的机会（AC1）。
-    const writer = await startWriterInstance(dbPath, 8, { delayMs: 700, readyEarly: true })
+    // delayMs 只负责撑开窗口，须给写者的 DDL（INSTALL/LOAD 扩展 + 建表）在
+    // READONLY_SCHEMA_WAIT_MS（2s）等待窗内留足余量——700ms 曾在满载机器上超窗（flaky）。
+    const writer = await startWriterInstance(dbPath, 8, { delayMs: 300, readyEarly: true })
     try {
       const db = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true })
 

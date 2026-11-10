@@ -83,15 +83,14 @@ function read<T>(field: Getter<T>): T {
 /** HTTP(S) URL 硬校验。失败抛 Error，消息含字段名 + 期望格式 + 当前值。 */
 function requireHttpUrl(field: string, raw: string | undefined): string | undefined {
   if (raw === undefined || raw === '') return undefined
-  let parsed: URL
+  let valid = false
   try {
-    parsed = new URL(raw)
+    const protocol = new URL(raw).protocol
+    valid = protocol === 'http:' || protocol === 'https:'
   } catch {
-    throw new Error(`${field}（期望 http(s):// URL，实际 ${JSON.stringify(raw)}）`)
+    valid = false
   }
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-    throw new Error(`${field}（期望 http(s):// URL，实际 ${JSON.stringify(raw)}）`)
-  }
+  if (!valid) throw new Error(`${field}（期望 http(s):// URL，实际 ${JSON.stringify(raw)}）`)
   return raw
 }
 

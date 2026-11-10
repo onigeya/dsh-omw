@@ -10,25 +10,14 @@
  * `node -e "import('./packages/dsh-oh-my-whale-memory/lib/index.js')..."` 覆盖
  * （spec Verification 第 4 条）。
  */
-import { access, mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { access } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
-const tempDirs: string[] = []
-
-afterAll(async () => {
-  for (const dir of tempDirs) {
-    try {
-      await rm(dir, { recursive: true, force: true })
-    } catch {
-      /* ignore */
-    }
-  }
-})
+afterAll(cleanupTempDirs)
 
 describe('memory 插件入口导出形态', () => {
   it('导出五件套命名导出', () => {
@@ -105,8 +94,7 @@ describe('memory 插件入口导出形态', () => {
 
   it('有 profileContext 时 apply 在 <profile>/memory/lbug.db 建库并注册 close effect（AC1）', async () => {
     injectOpenSslPath()
-    const dir = await mkdtemp(join(tmpdir(), 'omw-entry-'))
-    tempDirs.push(dir)
+    const dir = await makeTempDir('omw-entry-')
     const warn = vi.fn()
     const info = vi.fn()
     const closers: Array<() => unknown> = []
@@ -147,8 +135,7 @@ describe('memory 插件入口导出形态', () => {
 
   it('同进程第二次 apply 复用写者锁，不降级只读（Story 1.5 / AC1）', async () => {
     injectOpenSslPath()
-    const dir = await mkdtemp(join(tmpdir(), 'omw-entry-lock-'))
-    tempDirs.push(dir)
+    const dir = await makeTempDir('omw-entry-lock-')
     const warn = vi.fn()
     const info = vi.fn()
     const closers: Array<() => unknown> = []

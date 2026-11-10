@@ -14,9 +14,6 @@
  * 工具定义经 apply → ctx.tools.register 捕获（真实 defineTool 编译产物），
  * execute 走真实 LadybugDB 驱动（依赖 Windows OpenSSL 3 注入，同 abi-smoke）。
  */
-import { mkdtemp, rm } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/index'
 import { MemoryDbError } from '../src/db/errors'
@@ -25,6 +22,7 @@ import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER, MEMORY_REMEMBER_TOOL_NAME } from '../src/tools/memory-remember'
 import { injectOpenSslPath } from './openssl'
+import { cleanupTempDirs, makeTempDir } from './tmp'
 
 /** ctx.tools.register 捕获到的真实 ToolDefinition（defineTool 编译产物）。 */
 interface CapturedTool {
@@ -76,7 +74,7 @@ let tool: CapturedTool
 
 beforeAll(async () => {
   injectOpenSslPath()
-  dir = await mkdtemp(join(tmpdir(), 'omw-tool-remember-'))
+  dir = await makeTempDir('omw-tool-remember-')
   dbPath = resolveMemoryDbPath(dir)
   registered = []
   const { ctx } = fakeCtx({ dir, registered })
@@ -93,11 +91,7 @@ afterAll(async () => {
   } catch {
     /* ignore */
   }
-  try {
-    await rm(dir, { recursive: true, force: true })
-  } catch {
-    /* ignore */
-  }
+  await cleanupTempDirs()
 })
 
 async function rowsFor(id: string) {
