@@ -124,11 +124,15 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
 apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此含 `'tools'`），
 定义在 `src/tools/memory-remember.ts`（`defineTool`，`@deepseek-ai/dsh-tools`）。
 
-- **签名**：`memory_remember(content: string, context?: string)`。`content` 必填，`context`
-  可选（来源消息/卡片 id），缺省时 `source_refs = []`；提供时 `source_refs = [context]`。
+- **签名**：`memory_remember(content: string, context?: string, kind?: string, priority?: number)`。
+  `content` 必填，`context` 可选（来源消息/卡片 id），缺省时 `source_refs = []`；提供时
+  `source_refs = [context]`。`kind` / `priority` 为 Story 1.11 新增的分类入参（FR-15：七类
+  persona|episodic|instruction|work_fact|work_task|work_method|work_artifact；priority 取
+  -1..100，-1 = 全局强规则/恒置顶），透传到写路径；缺省时 kind 为空串、priority 为 0。
 - **写入形态**：固定 `layer = 'L1'`，走 `src/db/memory.ts` 的同一套指纹与 MERGE 逻辑
   （不复制第二份 id/归一化实现）。同 `(layer, 归一化 text)` 重复写入命中同一 id：
-  `source_refs` 并集去重、`recorded_at` 保留最早、`text` 不被改写。
+  `source_refs` 并集去重、`recorded_at` 保留最早、`text` 不被改写；kind / priority 不进指纹，
+  **以最新一次写入为准**（Story 1.11 AC4——同文本换分类仍是同一条记忆）。
 - **写入不产 embedding（Epic 2 补齐）**：`embedding` / `embedding_model_id` / `embedding_dim`
   三列保持 `NULL`——绝不写零向量冒充向量；维度校验只在显式带向量时生效，因此本工具
   不受库 pin 的 dim 影响。向量化与 INBOX 精炼是 Epic 2 的范围。
@@ -147,10 +151,12 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
 
 代码在 `src/command.ts`（纯工厂 + 解析，不碰 ctx / 库）与 `src/index.ts`（`apply` 中接线）。
 
-- `/memory remember <内容>`：把一条文本写入 L1 收件箱（`layer = 'L1_INBOX'`）。
-  参数解析先 `trimStart`，首 token 必须是 `remember`，其余整体 `trim` 后即正文；
-  无正文返回 usage 错误的 `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`：
-  `/memory remember <内容>`）。
+- `/memory remember [--kind=<分类>] [--priority=<整数>] <内容>`：把一条文本写入 L1
+  （`layer = 'L1'`，Story 1.11 层收敛——`L1_INBOX` 从此只是 INBOX 队列标识，不是
+  memory 表的 layer 取值）。参数解析先 `trimStart`，首 token 必须是 `remember`，其余先
+  解析可选前导分类旗标 `--kind=` / `--priority=`（可任意顺序、可缺省），到首个非旗标
+  token 为止的整体 `trim` 后即正文；旗标值非法（如 `--priority=abc`）或无正文返回 usage
+  错误的 `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`）。
 - `/memory list [关键词]`：按 `recorded_at` 倒序列出记忆，每行 `- <id> [<layer>] <摘要>`
   （摘要把空白折叠为单空格、超 60 字符截断加 `…`），默认上限 20 条
   （`MEMORY_LIST_DEFAULT_LIMIT`）。带关键词时按**字面包含**匹配 `text`（两侧小写化、
@@ -164,7 +170,8 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
 - `/memory status`：只读打印记忆库基础状态，全部本地（不调 LLM、不发网络请求）。
   正文逐行钉死：首行 `记忆状态`，随后 `L1: <n>` / `L2: <n>` / `L1_INBOX: <n>` / `L2_INBOX: <n>`、
   `failed: <n>`（计数事实源只有 `memory` 表的 `layer` 列；Epic 1 尚无 failed 存储，
-  故 **`failed:` 恒 0**——`L1_INBOX` / `L2_INBOX` 是该表的 layer 取值，有真实计数）、
+  故 **`failed:` 恒 0**——`L1_INBOX` / `L2_INBOX` 只是 INBOX 队列标识的历史计数位，
+  Story 1.11 收敛后写路径只写 `L1`，仅存量行会命中这两个计数）、
   `embedding: enabled | disabled（降级检索）`（非降级也显式打印）、
   `readonly: false | true, reason: '<原因>'`（只读实例标注 `another instance owns the writer lock`）。
   `status` 带多余参数 → usage 错误且不查库；库未就绪 → 明确报错，绝不静默返回 0。

@@ -5,7 +5,8 @@
  * - ON CREATE 建节点；
  * - ON MATCH 合并 source_refs（`list_distinct(list_concat(...))` 去重并集）、
  *   保留最早 recorded_at（`CASE WHEN ... THEN ... END`，ISO-8601 UTC 可字典序比较）、
- *   不改 text/layer/kind/priority/embedding（首次写入者的内容为准）。
+ *   以**最新写入的分类为准**更新 kind/priority（Story 1.11 AC4——同文本不同分类仍是同一条）；
+ *   text/layer/embedding 仍以首次写入者的内容为准（指纹不含 kind/priority，见 `./id.js`）。
  *
  * 2026-11-09 实测：MERGE ON CREATE/ON MATCH、list_distinct、CASE 表达式、prepare/execute
  * 参数绑定在 LadybugDB 0.22.3 上均可用。
@@ -43,9 +44,9 @@ export type MemoryConnection = lbug.Connection
 export interface UpsertMemoryInput {
   /**
    * 记忆层：spine 枚举 `L0|L1|L2|L3`；禁空、禁冒号。
-   * 现状：Story 1.7 的写路径（`src/index.ts` 的 `writeL1Inbox`）会写入 `'L1_INBOX'`，
-   * 该取值不在 spine 枚举内（FR-15 的 layer 取值收敛属 Story 1.11）；因此本表的读路径
-   * 不做 layer 白名单——`'L1_INBOX'` 存量行必须照常可见（Story 1.8）。
+   * Story 1.11 已收敛写路径：`src/index.ts` 的 `writeL1Inbox` 与 `memory_remember` 都写 `'L1'`
+   * （= `MEMORY_REMEMBER_LAYER`）；`'L1_INBOX'` 从此只是 INBOX 队列标识/表名，不再是本表 layer 取值。
+   * 读路径仍不做 layer 白名单——Story 1.7 存量 `'L1_INBOX'` 行必须照常可见（Story 1.8）。
    */
   layer: string
   /** 记忆原文；参与指纹，归一化后为空即拒绝。 */
@@ -59,9 +60,12 @@ export interface UpsertMemoryInput {
   embedding?: readonly number[] | null
   /** 该向量使用的模型 id（写入节点列）；无向量时必须一并缺省或为 null。 */
   embeddingModelId?: string | null
-  /** 记忆类型，可选（如 note / summary）。 */
+  /**
+   * 记忆类型，可选。FR-15 七类：`persona | episodic | instruction | work_fact |
+   * work_task | work_method | work_artifact`；缺省落库空串。不参与指纹。
+   */
   kind?: string
-  /** 优先级，默认 0。 */
+  /** 优先级，默认 0；FR-15 取值 `-1..100`（-1 = 全局强规则 / 恒置顶）。不参与指纹。 */
   priority?: number
   /** 生效时间，默认 now。 */
   validAt?: string
@@ -82,9 +86,13 @@ export interface UpsertMemoryResult {
 /**
  * ON MATCH 子句：带/不带向量的两条 MERGE 逐字共用。
  * 抽成常量是为了避免只改一条语句导致合并语义静默分叉（Story 1.6 新增了第二条语句）。
+ *
+ * Story 1.11（AC4）：kind / priority 以**最新写入**为准（`m.kind = $kind` / `m.priority = $priority`），
+ * 与 text / layer / embedding（首次写入者为准）有意不同——同文本换分类仍命中同一 id。
  */
 const UPSERT_ON_MATCH_CLAUSE = [
   '  ON MATCH SET m.source_refs = list_distinct(list_concat(m.source_refs, $source_refs)),',
+  '    m.kind = $kind, m.priority = $priority,',
   '    m.recorded_at = CASE WHEN $recorded_at < m.recorded_at THEN $recorded_at ELSE m.recorded_at END',
 ].join('')
 
@@ -99,7 +107,8 @@ const UPSERT_STATEMENT = [
 
 /**
  * 无向量写入变体：ON CREATE 不写 embedding 三列（保持 NULL），也不绑定对应参数。
- * ON MATCH 与带向量版本逐字一致，保证同指纹二次写入仍只合并 source_refs / 保留最早 recorded_at。
+ * ON MATCH 与带向量版本逐字一致，保证同指纹二次写入仍只合并 source_refs / 保留最早 recorded_at，
+ * 并同样以最新写入更新 kind / priority（Story 1.11 AC4）。
  */
 const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
   `MERGE (m:${MEMORY_TABLE} {id: $id})`,
@@ -190,7 +199,7 @@ export async function writeMemoryVersion(
  *
  * 与写路径共用连接与表，但**只读**：
  * - 列表过滤 `invalid_at IS NULL AND expired_at IS NULL`（当前快照语义，FR-14）；`layer`
- *   不做白名单过滤——`L1_INBOX` 等非 spine 枚举值也照常列出；
+ *   不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与其它非枚举值也照常列出；
  * - 排序 `recorded_at DESC` + `$limit` 截断全在库侧完成（LadybugDB 0.22.3 已实测
  *   `ORDER BY`、参数化 `LIMIT`、`lower(...) CONTAINS lower(...)` 均可用）；
  * - 关键词是**字面包含**匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
@@ -276,7 +285,7 @@ export interface MemoryDetail {
 }
 
 /**
- * 最近未失效的记忆（`recorded_at` 倒序、最多 `limit` 条，含 `L1_INBOX` 行）。
+ * 最近未失效的记忆（`recorded_at` 倒序、最多 `limit` 条，含 Story 1.7 存量 `'L1_INBOX'` 行）。
  * 只读：不写库、不改任何行。关键词做两侧小写化的字面包含匹配。
  */
 export async function listMemories(
@@ -327,7 +336,8 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
  * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
  *
  * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
- * 出现即说明有未登记的写路径，`layer` 取值收敛属 Story 1.11。
+ * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`；`'L1_INBOX'` / `'L2_INBOX'`
+ * 现在只作 INBOX 队列标识/表名的历史计数位保留（Story 1.7 存量行仍会命中 `L1_INBOX` 计数）。
  */
 export const COUNTED_MEMORY_LAYERS = ['L1', 'L2', 'L1_INBOX', 'L2_INBOX'] as const
 export type CountedMemoryLayer = (typeof COUNTED_MEMORY_LAYERS)[number]

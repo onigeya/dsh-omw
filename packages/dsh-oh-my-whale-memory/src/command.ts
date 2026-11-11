@@ -6,7 +6,7 @@
  * 永不抛出（宿主契约：thrown handler 会以 `kind: 'error'` 收尾，见 commands.md:172）。
  *
  * 四个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
- * - `remember <内容>`：写入 L1_INBOX（Story 1.7，行为与文案不变）；
+ * - `remember [--kind=..] [--priority=..] <内容>`：写入 L1（Story 1.7 + 1.11 层收敛）；
  * - `list [关键词]`：最近的记忆（文本包含匹配、`recorded_at` 倒序、默认 20 条）；
  * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）；
  * - `status`：层计数 + failed + embedding 降级 + 只读降级（Story 1.9，无参、纯读、无 LLM/网络）。
@@ -17,7 +17,11 @@
  * `@deepseek-ai/dsh-commands` 在本工作区不可解析，故这里只用本地结构化类型描述
  * 命令定义 / 调用 / 结果——运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
  * `CommandResult` 一致（D:\workspace\deepseek-harness\docs\subsystems\commands.md）。
+ *
+ * Story 1.11：`remember` 新增可选分类旗标 `--kind=<分类>` / `--priority=<整数>`
+ * （FR-20 分类写路径，AC2——手动写路径也能产出非空 kind / 非 0 priority，含 -1）。
  */
+import { MEMORY_KINDS } from './tools/memory-remember.js'
 
 /** 宿主命令名（小写、无前导斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
@@ -39,11 +43,13 @@ export const MEMORY_STATUS_SUBCOMMAND = 'status'
  */
 export const MEMORY_LIST_DEFAULT_LIMIT = 20
 
-/** `remember` 子命令 payload 缺失时的 usage 提示。 */
+/** `remember` 子命令 payload 缺失或旗标非法时的 usage 提示。 */
 export const MEMORY_REMEMBER_USAGE = [
   '用法：/memory remember <内容>',
   '',
-  '把一条事实写入记忆（L1_INBOX 收件箱）。示例：/memory remember 我偏好 ESM 不要 CJS',
+  '可选分类旗标：/memory remember [--kind=<分类>] [--priority=<整数>] <内容>',
+  '分类（kind）取 ' + MEMORY_KINDS.join(' / ') + ' 之一；priority 取 -1..100，-1 = 全局强规则（恒置顶）。',
+  '省略旗标时 kind 为空、priority 为 0。示例：/memory remember 我偏好 ESM 不要 CJS',
 ].join('\n')
 
 /** `list` 子命令用法（关键词可选）。 */
@@ -153,10 +159,18 @@ export interface MemoryStatusSnapshot {
   readonly auditGap: number | null
 }
 
+/** remember 的可选分类入参（FR-20，AC2：手动写路径也能产出非空 kind / 非 0 priority）。 */
+export interface MemoryInboxWriteOptions {
+  /** 七类分类之一（缺省不传 → 落库空串）。 */
+  readonly kind?: string
+  /** 优先级 -1..100（缺省不传 → 落库 0）。 */
+  readonly priority?: number
+}
+
 /** 命令依赖（由 `src/index.ts` 惰性绑定到库句柄；读路径不得在库未就绪时静默返回空）。 */
 export interface MemoryCommandDependencies {
-  /** 把一条文本写入 L1_INBOX；抛错由 handler 收敛为 error 结果。 */
-  writeInbox(text: string): Promise<void>
+  /** 把一条文本写入 L1；可选分类旗标经 options 透传；抛错由 handler 收敛为 error 结果。 */
+  writeInbox(text: string, options?: MemoryInboxWriteOptions): Promise<void>
   /** 取最近未失效的记忆（库侧已过滤/倒序/截断）；抛错由 handler 收敛。 */
   listMemories(input: { readonly query?: string; readonly limit: number }): Promise<readonly MemoryCommandListEntry[]>
   /** 按 id 取详情；不存在返回 null（不是抛错）。 */
@@ -167,11 +181,62 @@ export interface MemoryCommandDependencies {
 
 /** 解析结果：四个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
 export type MemoryCommandParseResult =
-  | { kind: 'remember', text: string }
+  | { kind: 'remember', text: string, classification?: MemoryInboxWriteOptions }
   | { kind: 'list', query?: string }
   | { kind: 'show', id: string }
   | { kind: 'status' }
   | { kind: 'invalid', usage: string }
+
+/** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
+const MEMORY_REMEMBER_KIND_FLAG = '--kind='
+/** `--priority=` 旗标名（AC2：手动写路径产出非零 priority，含 -1）。 */
+const MEMORY_REMEMBER_PRIORITY_FLAG = '--priority='
+
+/**
+ * 旗标值的结束偏移：`flag` 之后首个**空白字符**（空格与制表符同等对待，与子命令切分
+ * 用的 `\s+` 保持一致）；-1 表示旗标一直延伸到串尾（如 `--kind=persona` 无正文）。
+ */
+function flagValueEnd(rest: string, flag: string): number {
+  const whitespace = rest.slice(flag.length).search(/\s/)
+  return whitespace === -1 ? -1 : whitespace + flag.length
+}
+
+/**
+ * 解析 `remember` 的 payload：前导 `--kind=<分类>` / `--priority=<整数>` 旗标
+ * 可任意顺序、可缺省，解析到首个非旗标 token 为止，其余（保留内部空白）为正文。
+ * 缺参 → `{ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }`；非法旗标值同样拒绝
+ * （不回显、不静默忽略），保证「可写路径」不会悄悄吞掉错误输入。
+ */
+function parseRememberPayload(payload: string): MemoryCommandParseResult {
+  let rest = payload.trim()
+  let kind: string | undefined
+  let priority: number | undefined
+  for (;;) {
+    if (rest.startsWith(MEMORY_REMEMBER_KIND_FLAG)) {
+      const end = flagValueEnd(rest, MEMORY_REMEMBER_KIND_FLAG)
+      const value = (end === -1 ? rest.slice(MEMORY_REMEMBER_KIND_FLAG.length) : rest.slice(MEMORY_REMEMBER_KIND_FLAG.length, end)).trim()
+      if (!value) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      kind = value
+      rest = end === -1 ? '' : rest.slice(end).trim()
+      continue
+    }
+    if (rest.startsWith(MEMORY_REMEMBER_PRIORITY_FLAG)) {
+      const end = flagValueEnd(rest, MEMORY_REMEMBER_PRIORITY_FLAG)
+      const raw = (end === -1 ? rest.slice(MEMORY_REMEMBER_PRIORITY_FLAG.length) : rest.slice(MEMORY_REMEMBER_PRIORITY_FLAG.length, end)).trim()
+      if (!/^-?\d+$/.test(raw)) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      priority = Number(raw)
+      rest = end === -1 ? '' : rest.slice(end).trim()
+      continue
+    }
+    break
+  }
+  if (!rest) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+  const classification: MemoryInboxWriteOptions = {
+    ...(kind === undefined ? {} : { kind }),
+    ...(priority === undefined ? {} : { priority }),
+  }
+  return { kind: 'remember', text: rest, classification }
+}
 
 /**
  * 解析 `rawInput`：trim 起始空白取首 token（子命令大小写敏感）。
@@ -190,7 +255,7 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
   const payload = firstWhitespace === -1 ? '' : trimmedStart.slice(firstWhitespace).trim()
   switch (subcommand) {
     case MEMORY_REMEMBER_SUBCOMMAND:
-      return payload ? { kind: 'remember', text: payload } : { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      return parseRememberPayload(payload)
     case MEMORY_LIST_SUBCOMMAND:
       return payload ? { kind: 'list', query: payload } : { kind: 'list' }
     case MEMORY_SHOW_SUBCOMMAND:
@@ -301,14 +366,14 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
   return {
     name: MEMORY_COMMAND_NAME,
     description: '记录与浏览长期记忆（remember / list / show / status）',
-    input: { hint: '/memory remember <内容> | list [关键词] | show <id> | status' },
+    input: { hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status' },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
         const parsed = parseMemoryCommand(invocation.rawInput)
         if (parsed.kind === 'invalid') return { kind: 'error', text: parsed.usage }
         switch (parsed.kind) {
           case 'remember':
-            await deps.writeInbox(parsed.text)
+            await deps.writeInbox(parsed.text, parsed.classification)
             return { kind: 'success', text: `已记住：${parsed.text}` }
           case 'list': {
             const input = parsed.query === undefined

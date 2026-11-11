@@ -3,8 +3,10 @@
  *
  * 契约（spec 1.6）：
  * - 工具名 `memory_remember`，参数 `content`（必填）/ `context`（可选，来源引用）；
+ * - Story 1.11：新增 `kind`（七类分类）与 `priority`（-1..100）两个可选入参，
+ *   透传到写路径（FR-20 分类写路径）；缺省保持 kind=''/priority=0；
  * - 固定写 layer='L1'（不是 'L1_INBOX'——spine 的层枚举是 L0|L1|L2|L3，
- *   Epic 2 才引入 INBOX 精炼流水线）；
+ *   Epic 2 才引入 INBOX 精炼流水线；Story 1.11 把全仓写路径收敛为 'L1'）；
  * - 不产 embedding：三列向量保持 NULL（绝不写零向量），向量由 Epic 2 补齐；
  * - 节点 id / 归一化 / 合并语义全部复用 src/db/id.ts + src/db/memory.ts，
  *   本文件不复制第二份指纹逻辑；
@@ -27,6 +29,22 @@ export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
 export const MEMORY_REMEMBER_LAYER = 'L1'
 
 /**
+ * FR-15 七类记忆分类（PRD prd.md:72 / prd.md:298，SPINE:274-275 的同名列枚举）。
+ * 写路径（工具参数 / 命令旗标）的合法 kind 取值就是这个集合；缺省为空串。
+ */
+export const MEMORY_KINDS = [
+  'persona',
+  'episodic',
+  'instruction',
+  'work_fact',
+  'work_task',
+  'work_method',
+  'work_artifact',
+] as const
+
+export type MemoryKind = (typeof MEMORY_KINDS)[number]
+
+/**
  * 模型可见描述——既是能力说明，也是 FR-1 的写入护栏：
  * 只收长期有价值的事实，明确排除 ephemeral/transient 内容。
  */
@@ -36,6 +54,9 @@ export const MEMORY_REMEMBER_TOOL_DESCRIPTION = [
   '不要记录 ephemeral / transient content：当前任务的进度、一次性中间结果、临时变量、闲聊与寒暄都不是长期记忆，不要写入。',
   'content 写记忆原文，保留用户原始措辞与关键参数；同一内容重复调用会命中同一节点（幂等，不会产生重复记忆）。',
   'context 可选，填来源消息 id 或卡片 id，用于溯源；省略则不记来源。',
+  'kind 可选，取七类之一：persona / episodic / instruction / work_fact / work_task / work_method / work_artifact；'
+  + 'priority 可选，取 -1..100 的整数，-1 表示全局强规则（恒置顶）。两者省略时 kind 为空、priority 为 0；'
+  + '同一内容重复写入命中同一节点，分类以最新一次写入为准。',
 ].join('\n')
 
 /**
@@ -48,6 +69,10 @@ export interface MemoryRememberStore {
     text: string
     sourceRefs?: readonly string[]
     actor?: MemoryActor
+    /** FR-15 分类（七类之一）；缺省不传 → 落库空串。 */
+    kind?: string
+    /** 优先级 -1..100（-1 = 全局强规则/恒置顶）；缺省不传 → 落库 0。 */
+    priority?: number
   }): Promise<UpsertMemoryResult>
 }
 
@@ -78,6 +103,15 @@ const PARAMETERS = {
   context: {
     type: 'string',
     description: '来源引用（消息 id 或卡片 id），可选；省略则不记来源。',
+  },
+  kind: {
+    type: 'string',
+    enum: MEMORY_KINDS,
+    description: '记忆分类（FR-15 七类），可选；省略时落库为空串。',
+  },
+  priority: {
+    type: 'integer',
+    description: '优先级，取 -1..100 的整数，-1 表示全局强规则（恒置顶）；可选，省略时落库 0。',
   },
 } as const satisfies ParameterSchemaSpec
 
@@ -167,6 +201,10 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
           actor: 'agent',
           text: args.content,
           sourceRefs: context === undefined || context.length === 0 ? [] : [context],
+          // Story 1.11 / FR-20：分类与优先级必须真的到达写路径——缺省仍由 db 层
+          // 的 `?? ''` / `?? 0` 兜底，因此 undefined 透传等价于"未分类"。
+          kind: args.kind,
+          priority: args.priority,
         })
         const stored: MemoryRememberStored = { action: 'stored', id: result.id }
         return stored

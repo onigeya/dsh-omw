@@ -54,9 +54,10 @@ import {
   createMemoryCommandDefinition,
   type MemoryCommandDependencies,
   type MemoryCommandsRuntime,
+  type MemoryInboxWriteOptions,
   type MemoryStatusSnapshot,
 } from './command.js'
-import { createMemoryRememberTool } from './tools/memory-remember.js'
+import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -95,16 +96,19 @@ export type {
   MemoryStatusSnapshot,
 } from './command.js'
 export {
+  MEMORY_KINDS,
   MEMORY_REMEMBER_LAYER,
   MEMORY_REMEMBER_TOOL_DESCRIPTION,
   MEMORY_REMEMBER_TOOL_NAME,
 } from './tools/memory-remember.js'
 export type {
+  MemoryKind,
   MemoryRememberFailed,
   MemoryRememberStore,
   MemoryRememberStored,
   MemoryRememberValue,
 } from './tools/memory-remember.js'
+export type { MemoryInboxWriteOptions } from './command.js'
 
 /** cordis 模块名（AD-2，永不重命名）；与 settings namespace 一致。 */
 export const name = 'dsh-oh-my-whale-memory' as const
@@ -161,13 +165,24 @@ export async function apply(
   // 同进程再次 apply 会让本实例的命令读到别的实例的锁结果，故 getStatus 只读这份局部值。
   let instanceReadonly = false
   let instanceReadonlyReason: string | undefined
-  const writeL1Inbox = async (text: string): Promise<void> => {
+  // Story 1.11（AC2/AC3）：INBOX 采集写路径。层收敛为唯一枚举——写 `L1`
+  // （= MEMORY_REMEMBER_LAYER），`L1_INBOX` 从此只是 INBOX 队列标识/表名，不是 memory.layer 取值。
+  // 可选分类旗标（kind / priority，含 -1）在此透传到落库，与 memory_remember 同一条写路径。
+  const writeL1Inbox = async (text: string, options?: MemoryInboxWriteOptions): Promise<void> => {
     if (!db) {
-      throw new Error('记忆库未就绪：无 profile 归属或建库未完成，当前无法写入 L1_INBOX')
+      throw new Error('记忆库未就绪：无 profile 归属或建库未完成，当前无法写入 L1')
     }
     // Epic 1 无 embedding 客户端：三列 embedding/embedding_model_id/embedding_dim
     // 同落 NULL（不写零向量污染 HNSW cosine 索引），Story 2.3 引入客户端后回填。
-    await db.upsertMemory({ layer: 'L1_INBOX', text, embedding: null, embeddingModelId: null, actor: 'user' })
+    await db.upsertMemory({
+      layer: MEMORY_REMEMBER_LAYER,
+      text,
+      kind: options?.kind,
+      priority: options?.priority,
+      embedding: null,
+      embeddingModelId: null,
+      actor: 'user',
+    })
   }
   // Story 1.8：读 dep 与写 dep 一样惰性——注册发生在建库之前，闭包在 handler 被调用时
   // 才读 `db`。库未就绪时 throw，由命令层收敛为 error 结果，绝不静默返回空列表。

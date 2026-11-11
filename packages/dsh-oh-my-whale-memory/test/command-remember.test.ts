@@ -9,6 +9,8 @@
  * Story 1.8：工厂改名 `createMemoryCommandDefinition` 并收 3 个 dep；
  * `invalid` 结果携带对应 usage（remember 缺内容仍是 `MEMORY_REMEMBER_USAGE`）。
  * Story 1.9：dep 增至 4 个（新增 `getStatus`），子命令增至 4 个（新增 `status`）。
+ * Story 1.11：`remember` 新增可选分类旗标 `--kind=` / `--priority=`（AC2 手动写路径分类），
+ * 解析结果带 `classification`，handler 经 `writeInbox(text, options)` 透传。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -42,17 +44,17 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
 describe('parseMemoryCommand（remember 分支）', () => {
   it("接受带前导空白的 ' remember X'（rawInput 含宿主分隔空白）", () => {
     expect(parseMemoryCommand(' remember 我偏好 ESM 不要 CJS'))
-      .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS' })
+      .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS', classification: {} })
   })
 
   it("接受不带前导空白的 'remember X'", () => {
     expect(parseMemoryCommand('remember 我偏好 ESM 不要 CJS'))
-      .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS' })
+      .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS', classification: {} })
   })
 
   it('去掉 payload 首尾空白但保留内部空白', () => {
     expect(parseMemoryCommand('   remember    a   b   c   '))
-      .toEqual({ kind: 'remember', text: 'a   b   c' })
+      .toEqual({ kind: 'remember', text: 'a   b   c', classification: {} })
   })
 
   it("'remember' 无 payload → invalid + remember usage（AC2）", () => {
@@ -85,6 +87,30 @@ describe('parseMemoryCommand（remember 分支）', () => {
     expect(MEMORY_COMMAND_USAGE).toContain('/memory show <id>')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory status')
   })
+
+  it('解析 --kind= / --priority= 旗标（Story 1.11 / AC2）', () => {
+    expect(parseMemoryCommand(' remember --kind=persona --priority=-1 恒置顶偏好'))
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'persona', priority: -1 } })
+    // 顺序无关
+    expect(parseMemoryCommand(' remember --priority=7 --kind=work_method 先 复现 再 修'))
+      .toEqual({ kind: 'remember', text: '先 复现 再 修', classification: { priority: 7, kind: 'work_method' } })
+    // 只给一个旗标
+    expect(parseMemoryCommand(' remember --kind=episodic 只有分类'))
+      .toEqual({ kind: 'remember', text: '只有分类', classification: { kind: 'episodic' } })
+    // 旗标后没有正文 → 缺参
+    expect(parseMemoryCommand(' remember --kind=persona'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    // 非法旗标值同样拒绝（不静默忽略用户输入）
+    expect(parseMemoryCommand(' remember --priority=abc 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember --kind= 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    // 旗标与正文之间用制表符等空白分隔时同样成立（与子命令切分的 \s+ 一致）
+    expect(parseMemoryCommand(' remember --kind=persona\t恒置顶偏好'))
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'persona' } })
+    expect(parseMemoryCommand(' remember --priority=-1\t恒置顶偏好'))
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { priority: -1 } })
+  })
 })
 
 describe('createMemoryCommandDefinition（remember 分支）', () => {
@@ -109,9 +135,30 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
     const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
 
     const result = await definition.handler({ rawInput: ' remember 我偏好 ESM 不要 CJS' })
-    expect(writeInbox).toHaveBeenCalledExactlyOnceWith('我偏好 ESM 不要 CJS')
+    expect(writeInbox).toHaveBeenCalledExactlyOnceWith('我偏好 ESM 不要 CJS', {})
     expect(result.kind).toBe('success')
     expect(result.text).toContain('我偏好 ESM 不要 CJS')
+  })
+
+  it('分类旗标：writeInbox 的第二参收到分类（Story 1.11 / AC2）', async () => {
+    const writeInbox = vi.fn(async () => {})
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
+
+    const result = await definition.handler({
+      rawInput: ' remember --kind=persona --priority=-1 恒置顶偏好',
+    })
+    expect(writeInbox).toHaveBeenCalledExactlyOnceWith('恒置顶偏好', { kind: 'persona', priority: -1 })
+    expect(result.kind).toBe('success')
+  })
+
+  it('非法旗标值：返回 usage error，不写库（Story 1.11）', async () => {
+    const writeInbox = vi.fn(async () => {})
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
+
+    const result = await definition.handler({ rawInput: ' remember --priority=abc 文本' })
+    expect(writeInbox).not.toHaveBeenCalled()
+    expect(result.kind).toBe('error')
+    expect(result.text).toContain('memory remember')
   })
 
   it('无 payload：返回 usage error，不写库（AC2）', async () => {
