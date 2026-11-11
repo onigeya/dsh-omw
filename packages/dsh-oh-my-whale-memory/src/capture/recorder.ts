@@ -3,8 +3,10 @@
  * L0 原始流水 + L1_INBOX 排队条目。
  *
  * 三条纪律：
- * 1. **同一事务**：L0 行与 INBOX 行在同一个 runInTransaction 里写（FR-2 原子）。id 由稳定身份
- *    经 uuid5 确定性算出，故崩溃重放不会造出第二条队列条目（否则同一段对话会被精炼两次）。
+ * 1. **同一事务 + 同一身份**：L0 行与 INBOX 行在同一个 runInTransaction 里写（FR-2 原子）。
+ *    **两行共用 l0RawId(stableKey)**（Story 2.3 评审 T1：L1 的 source_refs 必须能命中 L0），
+ *    该 id 由稳定身份经 uuid5 确定性算出，故崩溃重放不会造出第二条队列条目。
+ *    注意 `l1_inbox.id` 的语义因此是「采集身份」而非纯队列序号——同一次采集在两张表里同一个 id。
  * 2. **绝不抛给宿主**：session/event 监听器返回 void，且压缩主路径不能被采集失败牵连；
  *    因此所有落库都登记进 INBOX_BACKGROUND_TASKS（防 GC、dispose 前统一 drain）并在内部
  *    捕获异常，只留下 warn。
@@ -12,7 +14,7 @@
  *    落库转后台，快照文件是崩溃标记，未删即孤儿，启动时重放（AC5）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { captureStableKey, l0InboxId, l0RawId, writeL0Raw } from '../db/l0.js'
+import { captureStableKey, l0RawId, writeL0Raw } from '../db/l0.js'
 import { runInTransaction } from '../db/transaction.js'
 import { trackInboxBackgroundTask } from '../inbox/consumer.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
@@ -79,7 +81,12 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
   }
   const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
 
-  /** 一个事务里写 L0 行 + INBOX 行；同一稳定身份重放幂等（MERGE ON CREATE SET）。 */
+  /**
+   * 一个事务里写 L0 行 + INBOX 行；同一稳定身份重放幂等（MERGE ON CREATE SET）。
+   *
+   * **两行共用同一个 l0RawId(stableKey)**（Story 2.3 评审 T1）：证据链要求精炼产出的 L1
+   * 节点 source_refs 与审计 l0Refs 指向真实的 L0 行；INBOX 行另有前缀就永远命不中。
+   */
   async function persist(entry: CaptureEntry): Promise<void> {
     const connection = options.connection()
     if (!connection) throw new Error('记忆库未就绪：采集写入放弃')
@@ -92,7 +99,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
         actor: entry.actor,
       })
       await writeInboxItem(connection, {
-        id: l0InboxId(stableKey),
+        id: l0RawId(stableKey),
         payload: entry.text,
         sessionId: entry.sessionId,
         kind: entry.kind,

@@ -116,6 +116,43 @@ describe('输出收敛（AC:572 / N10）', () => {
   it('空 facts 数组是合法输出（原文没有值得长期记住的内容）', () => {
     expect(parseRefineOutput(jsonFacts([]))).toEqual([])
   })
+
+  it('评审 T4：归一化后为空的 fact（纯标点）被丢弃，正常 fact 照常留下', () => {
+    const facts = parseRefineOutput(jsonFacts([
+      { text: '!!!', kind: 'persona', priority: 1 },
+      { text: '正常事实', kind: 'persona', priority: 1 },
+      { text: '。。。' },
+      { text: '   ' },
+    ]))
+    expect(facts).not.toBeNull()
+    expect(facts!.map((fact) => fact.text)).toEqual(['正常事实'])
+  })
+
+  it('评审 P4：超预算切分出的纯标点 tail 被丢弃，余下片段照常产出', () => {
+    const head = '甲'.repeat(MAX_REFINE_FACT_TOKENS)
+    // splitToBudget 切出 [head, '。...']；tail 非空但归一化后为空。
+    const facts = parseRefineOutput(jsonFacts([{ text: head + '。...', kind: 'work_fact', priority: 1 }]))
+    expect(facts).not.toBeNull()
+    expect(facts!.map((fact) => fact.text)).toEqual([head])
+  })
+
+  it('评审 P4：整条响应全是「切分后仅剩不可用片段」⇒ 返回 null 而非产出空文本', () => {
+    const facts = parseRefineOutput(jsonFacts([{ text: '甲'.repeat(MAX_REFINE_FACT_TOKENS) + '。...' }]))
+    expect(facts).not.toBeNull()
+    for (const fact of facts!) expect(fact.text.length).toBeGreaterThan(0)
+  })
+
+  it('评审 T25：非空数组但元素全部不可用 ⇒ 返回 null（按可重试解析失败）', () => {
+    expect(parseRefineOutput(jsonFacts([{ text: '!!!' }, { text: '  ' }]))).toBeNull()
+  })
+
+  it('评审 T14：句子恰在预算边界时不在符号后切，片段不超预算', () => {
+    const text = '甲'.repeat(MAX_REFINE_FACT_TOKENS) + '。' + '乙'.repeat(10)
+    const pieces = splitToBudget(text)
+    expect(pieces.length).toBeGreaterThan(1)
+    expect(pieces.every((piece) => estimateTokens(piece) <= MAX_REFINE_FACT_TOKENS)).toBe(true)
+    expect(pieces.join('')).toBe(text)
+  })
 })
 
 describe('失败分类（AC:575-581）', () => {
@@ -157,6 +194,23 @@ describe('失败分类（AC:575-581）', () => {
     if (!result.ok) expect(result.failure).toMatchObject({ reason: 'llm-timeout', retryable: true })
   })
 
+  it('评审 T8：抛出的确定性 4xx（status/code 在异常上或 LlmError.failure 里）判定为不可重试', async () => {
+    const direct = Object.assign(new Error('unauthorized'), { status: 401, code: 'auth_failed' })
+    const directResult = await refineTranscript({ llm: scriptedLlm(direct).llm, route, transcript: 'x', signal: AbortSignal.timeout(1_000) })
+    expect(directResult.ok).toBe(false)
+    if (!directResult.ok) expect(directResult.failure).toMatchObject({ reason: 'auth_failed', retryable: false })
+
+    const wrapped = Object.assign(new Error('bad request'), { failure: { status: 400, code: 'invalid_request' } })
+    const wrappedResult = await refineTranscript({ llm: scriptedLlm(wrapped).llm, route, transcript: 'x', signal: AbortSignal.timeout(1_000) })
+    expect(wrappedResult.ok).toBe(false)
+    if (!wrappedResult.ok) expect(wrappedResult.failure).toMatchObject({ reason: 'invalid_request', retryable: false })
+
+    // 提不出状态码时按可重试兜底（未知错误宁可多试）。
+    const opaque = await refineTranscript({ llm: scriptedLlm(new Error('socket hang up')).llm, route, transcript: 'x', signal: AbortSignal.timeout(1_000) })
+    expect(opaque.ok).toBe(false)
+    if (!opaque.ok) expect(opaque.failure).toMatchObject({ reason: 'llm-threw', retryable: true })
+  })
+
   it('未给 finish 视为可重试失败；isRetryableStatus 的边界', async () => {
     const { llm } = scriptedLlm([delta('{}')])
     const result = await refineTranscript({ llm, route, transcript: 'x', signal: AbortSignal.timeout(1_000) })
@@ -170,14 +224,32 @@ describe('失败分类（AC:575-581）', () => {
 })
 
 describe('token 估算', () => {
-  it('CJK 按字符、其余按词', () => {
+  it('CJK 按字符、其余按词数与字符数折算（评审 T15 后：hello world = 3）', () => {
     expect(estimateTokens('中文四字')).toBe(4)
-    expect(estimateTokens('hello world')).toBe(2)
+    expect(estimateTokens('hello world')).toBe(3)
     expect(estimateTokens('')).toBe(0)
   })
 
   it('MEMORY_KINDS 与输出 schema 的 kind 值域同源', () => {
     expect(MEMORY_KINDS.length).toBeGreaterThan(0)
     expect(parseRefineOutput(jsonFacts([{ text: 'x', kind: MEMORY_KINDS[0], priority: 0 }]))![0]).toMatchObject({ coerced: false })
+  })
+
+  it('评审 T2：schema 与指令都逐字枚举七类标识符（否则模型无从得知合法值）', () => {
+    const messages = buildRefineMessages('原文')
+    const text = (messages[0]!.content as readonly { type: string; text: string }[])[0]!.text
+    for (const kind of MEMORY_KINDS) {
+      expect(REFINE_OUTPUT_SCHEMA).toContain(kind)
+      expect(text).toContain(kind)
+    }
+  })
+
+  it('评审 T15：无空白长串按字符长度估算，不再只算 1 token', () => {
+    const url = 'https://example.com/' + 'a'.repeat(1_000)
+    expect(estimateTokens(url)).toBeGreaterThan(MAX_REFINE_FACT_TOKENS)
+    const pieces = splitToBudget(url)
+    expect(pieces.length).toBeGreaterThan(1)
+    expect(pieces.every((piece) => estimateTokens(piece) <= MAX_REFINE_FACT_TOKENS)).toBe(true)
+    expect(pieces.join('')).toBe(url)
   })
 })

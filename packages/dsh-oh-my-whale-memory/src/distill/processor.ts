@@ -10,16 +10,30 @@
  */
 import type * as lbug from '@ladybugdb/core'
 import { REFINE_INBOX_ACTION, REFINE_KIND, insertGenerationLog } from '../db/audit.js'
-import { writeMemoryVersion } from '../db/memory.js'
+import { memoryNodeId } from '../db/id.js'
+import { getMemoryById, writeMemoryVersion } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
 import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
-import { markInboxItemDone, type InboxItem } from '../inbox/queue.js'
+import {
+  INBOX_STATUS_PENDING,
+  INBOX_STATUS_PROCESSING,
+  markInboxItemDone,
+  readInboxItemStatus,
+  type InboxItem,
+  type InboxStatus,
+} from '../inbox/queue.js'
 import { MEMORY_REMEMBER_LAYER } from '../tools/memory-remember.js'
 import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute } from './llm-refine.js'
 
 /** 单次 `process` 的硬上界（R2：一次尝试 ≤30s，含 embedding；重试不在同一次尝试内）。 */
 export const INBOX_PROCESS_TIMEOUT_MS = 30_000
+
+/**
+ * LLM 调用的子预算（评审 T13）：把总上界 30s 里的后 10s 留给 embedding
+ * （客户端自带 EMBEDDING_TIMEOUT_MS = 10s），即「LLM ≤20s + embedding ≤10s ≤ 30s」。
+ */
+export const INBOX_LLM_TIMEOUT_MS = 20_000
 
 /** 无路由的降级理由（N5 逐字要求）。 */
 export const NO_PROVIDER_ROUTE_REASON = 'no-provider-route'
@@ -81,6 +95,11 @@ async function embedFacts(
   return { vectors, failure }
 }
 
+/** 入口守卫判据：pending（直接调用/未 claim）与 processing（消费者已 claim）都继续；其余一律短路。 */
+function isProcessableStatus(status: InboxStatus | null): boolean {
+  return status === INBOX_STATUS_PENDING || status === INBOX_STATUS_PROCESSING
+}
+
 /** 失败审计行：必须**另开事务**写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
 async function recordRefineFailure(
   connection: lbug.Connection,
@@ -113,6 +132,12 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     const connection = deps.connection()
     if (!connection) throw new Error('INBOX 精炼时数据库连接不可用（id=' + item.id + '）')
 
+    // ⓪ 入口状态守卫（评审 T7）：只有还「待处理」的条目才值得精炼。
+    // 消费者已把它 claim 成 processing（正常路径）；直接对 done/failed/缺失的条目调 process 时
+    // 立刻返回，**不写审计、不调 LLM**——否则会在 markInboxItemDone 守卫之前多写一行 refine 审计。
+    const status = await readInboxItemStatus(connection, item.id)
+    if (!isProcessableStatus(status)) return { completed: true, kinds: [] }
+
     // ① 路由解析闸门（AC:568）：解析失败直接降级，绝不调 LLM。
     const route = deps.resolveRoute(item.sessionId)
     if (!route) {
@@ -125,13 +150,14 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       throw new InboxRefineError(failure.message, { reason: failure.reason, fatal: false })
     }
 
-    // ② 一次尝试 = 一次 ctx.llm.stream（R2：重试不在同一次尝试内）；30s 硬上界。
+    // ② 一次尝试 = 一次 ctx.llm.stream（R2：重试不在同一次尝试内）；总上界 30s，LLM 只吃 20s（T13）。
     const signal = AbortSignal.timeout(timeoutMs)
+    const llmSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.min(timeoutMs, INBOX_LLM_TIMEOUT_MS))])
     const refined = await refineTranscript({
       llm: deps.llm,
       route,
       transcript: item.payload,
-      signal,
+      signal: llmSignal,
     })
     if (!refined.ok) {
       await recordRefineFailure(connection, item, refined.failure, now)
@@ -158,6 +184,13 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       for (let i = 0; i < refined.facts.length; i += 1) {
         const fact = refined.facts[i]!
         const vector = embedded.vectors[i] ?? null
+        // 评审 T3：coerced 表示「模型没判定」，不是一次重新分类。
+        // UPSERT_ON_MATCH 无条件以最新写入为准（Story 1.11 AC4），若直接把缺省值写下去，
+        // 会把先前 memory_remember 写在同指纹节点上的 kind（如 'persona'）静默清空。
+        // 故 coerced 时沿用既有节点的分类；同事务内读，节点不存在才用缺省。
+        const existing = fact.coerced
+          ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
+          : null
         await writeMemoryVersion(
           connection,
           {
@@ -165,8 +198,8 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
             text: fact.text,
             embedding: vector,
             embeddingModelId: vector ? (deps.embeddingModelId ?? null) : null,
-            kind: fact.kind,
-            priority: fact.priority,
+            kind: existing ? existing.kind : fact.kind,
+            priority: existing ? existing.priority : fact.priority,
             sourceRefs: [item.id],
             actor: 'system',
           },

@@ -12,7 +12,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCaptureRecorder, type CaptureRecorder } from '../src/capture/recorder'
 import { listSnapshots } from '../src/capture/snapshot-store'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { captureStableKey, l0InboxId, l0RawId, writeL0Raw } from '../src/db/l0'
+import { captureStableKey, l0RawId, writeL0Raw } from '../src/db/l0'
 import { queryAll } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { runInTransaction } from '../src/db/transaction'
@@ -58,7 +58,7 @@ async function l0Row(kind: string, sessionId: string, ref: string): Promise<Reco
 }
 
 async function inboxRow(sessionId: string, ref: string): Promise<Record<string, unknown> | undefined> {
-  const id = l0InboxId(captureStableKey('compaction', sessionId, ref))
+  const id = l0RawId(captureStableKey('compaction', sessionId, ref))
   const rows = await queryAll(
     store.connection,
     "MATCH (q:l1_inbox) WHERE q.id = '" + id + "' " +
@@ -81,7 +81,7 @@ describe('AC①：step/end 步数阈值', () => {
     expect(typeof l0?.recorded_at).toBe('string')
     expect(String(l0?.recorded_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
 
-    const inboxId = l0InboxId(captureStableKey('step', 'cap-step', '1:2'))
+    const inboxId = l0RawId(captureStableKey('step', 'cap-step', '1:2'))
     const inbox = (await queryAll(
       store.connection,
       "MATCH (q:l1_inbox) WHERE q.id = '" + inboxId + "' RETURN q.status AS status, q.payload AS payload, q.session_id AS session_id, q.kind AS kind",
@@ -271,11 +271,25 @@ describe('评审补丁回归钉（T1/T2 事件信封、P4 去重时序、P9 失�
     const stableKey = captureStableKey('turn', 'cap-atomic', '1')
     await expect(runInTransaction(store.connection, async () => {
       await writeL0Raw(store.connection, { id: l0RawId(stableKey), text: '不该留下', actor: 'cap-atomic' })
-      await writeInboxItem(store.connection, { id: l0InboxId(stableKey), payload: '不该留下', sessionId: 'cap-atomic', kind: 'turn' })
+      await writeInboxItem(store.connection, { id: l0RawId(stableKey), payload: '不该留下', sessionId: 'cap-atomic', kind: 'turn' })
       throw new Error('注入失败：两条语句之间')
     })).rejects.toThrow('注入失败')
     expect(await l0Row('turn', 'cap-atomic', '1')).toBeUndefined()
-    const inbox = await queryAll(store.connection, "MATCH (q:l1_inbox) WHERE q.id = '" + l0InboxId(stableKey) + "' RETURN q.id AS id")
+    const inbox = await queryAll(store.connection, "MATCH (q:l1_inbox) WHERE q.id = '" + l0RawId(stableKey) + "' RETURN q.id AS id")
     expect(inbox).toHaveLength(0)
+  })
+
+  it('评审 T1：同一次采集在 L0 与 INBOX 用同一个 id，该 id 能在 l0_raw 命中', async () => {
+    const recorder = makeRecorder({ captureSteps: 1 })
+    const session = { id: 'cap-unify', deriveMessages: () => [{ role: 'user', content: '统一身份' }] }
+    recorder.recordStepEnd(session, { type: 'step/end', seq: 90, time: 0, data: { turn: 9, step: 1 } })
+    await drainInboxBackgroundTasks()
+
+    const id = l0RawId(captureStableKey('step', 'cap-unify', '9:1'))
+    const l0 = await queryAll(store.connection, "MATCH (l:l0_raw) WHERE l.id = '" + id + "' RETURN l.id AS id")
+    const inbox = await queryAll(store.connection, "MATCH (q:l1_inbox) WHERE q.id = '" + id + "' RETURN q.id AS id")
+    expect(l0).toHaveLength(1)
+    expect(inbox).toHaveLength(1)
+    expect(String(l0[0]?.id)).toBe(String(inbox[0]?.id))
   })
 })

@@ -19,6 +19,7 @@ import { createIdleGate } from '../src/inbox/idle-gate'
 import { createPromotionTracker, type PromotionTrigger } from '../src/inbox/promotion-trigger'
 import {
   INBOX_BACKGROUND_TASKS,
+  InboxRefineError,
   createInboxConsumer,
   drainInboxBackgroundTasks,
   type InboxConsumer,
@@ -279,6 +280,28 @@ describe('AC4：失败不阻塞后续；超 3 轮进死信', () => {
     expect(await consumer.runOnce()).toBe(1)
     expect(await readRow(later)).toMatchObject({ status: 'done' })
     expect(await readRow(dead)).toMatchObject({ status: 'failed', attempts: 4 })
+    consumer.stop()
+  })
+})
+
+describe('AC:581：语义错首次即降级（不占 4 轮重试）', () => {
+  it('InboxRefineError{fatal:true} 第一次失败就进 failed 死信、attempts=1', async () => {
+    const dead = nextId('fatal-first')
+    await enqueueInboxItem(store.connection, { payload: '4xx 语义错', kind: 'work_fact', now: at(24), id: dead })
+    const warning = vi.fn()
+    const consumer = makeConsumer({
+      logger: { warn: warning },
+      process: async (item) => {
+        if (item.id === dead) {
+          throw new InboxRefineError('模型不存在（404）', { reason: 'invalid_request', fatal: true })
+        }
+      },
+    })
+
+    expect(await consumer.runOnce()).toBe(0)
+    // 一次性死信：没有回 pending、没有等 4 轮（AC:581）。
+    expect(await readRow(dead)).toMatchObject({ status: 'failed', attempts: 1, leaseOwner: null })
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('模型不存在（404）'))
     consumer.stop()
   })
 })

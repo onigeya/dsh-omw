@@ -7,6 +7,7 @@
  * 结构化输出统一加 sentinel preamble（§14 / AC:573）。
  */
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
+import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
 import { MEMORY_KINDS } from '../tools/memory-remember.js'
 import { foldStream, type FoldedStream } from './stream-fold.js'
@@ -15,7 +16,13 @@ import { foldStream, type FoldedStream } from './stream-fold.js'
 export const REFINE_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
 
 /** prompt 版本；改 prompt 或 schema 必须同时递增，并同步本文的 REFINE_OUTPUT_SCHEMA。 */
-export const REFINE_PROMPT_VERSION = '1'
+export const REFINE_PROMPT_VERSION = '2'
+
+/**
+ * 七类标识符的枚举串（单一来源 = memory-remember.ts 的 MEMORY_KINDS）。
+ * 评审 T2：模型拿不到标识符清单 ⇒ kind 恒判非法 ⇒ 全部收敛为空、七类分类实际失效。
+ */
+const KIND_ENUM = MEMORY_KINDS.join(' / ')
 
 /** 单条原子卡片 token 上限（AC:572）。 */
 export const MAX_REFINE_FACT_TOKENS = 150
@@ -33,7 +40,7 @@ export const REFINE_OUTPUT_SCHEMA = [
   '  "facts": [',
   '    {',
   '      "text": string,        // 原子事实原文，必填、非空',
-  '      "kind": string|null,   // 七类之一，判定不了填 null',
+  '      "kind": string|null,   // 七类之一：' + KIND_ENUM + '；判定不了填 null',
   '      "priority": number|null // -1..100 的整数，判定不了填 null',
   '    }',
   '  ]',
@@ -47,6 +54,8 @@ export const REFINE_INSTRUCTION = [
   '只保留跨会话仍成立的长期事实：用户偏好与习惯、已确定的决策及其理由、硬约束与禁令、稳定的标识（路径/端点/版本号/ID）、可复用的结论。',
   '丢弃：当前任务进度、一次性中间结果、临时变量、闲聊寒暄，以及原文里没有的事实——不要推测、不要补全。',
   '每条卡片不超过 150 token。原文里没有值得长期记住的内容时返回空数组。',
+  'kind 只能取这七类之一（逐字，别改写）：' + KIND_ENUM + '；判定不了就填 null，不要猜。',
+  'priority 取 -1..100 的整数（-1 = 全局强规则），判定不了就填 null。',
   '严格只输出一个 JSON 对象，不要解释、不要 markdown 代码块。',
 ].join('\n')
 
@@ -117,8 +126,9 @@ const CJK_PATTERN = /[\u2E80-\u303F\u3040-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/u
 const SENTENCE_END_PATTERN = /[。！？!?；;\n]/u
 
 /**
- * 极简 token 估算：CJK 每字符算 1 token，其余按空白切词算 1 token。
- * 只用于「每条 ≤150 token」的本地收敛（AC:572），不做计费。
+ * 极简 token 估算：CJK 每字符算 1 token，其余按空白切词、每词再按字符长度折算
+ * （约 4 字符 1 token，评审 T15：URL/hash/base64/压缩 JSON 这类无空白长串原先只算 1 token，
+ * 会让「每条 ≤150 token」在它们身上失效）。只用于本地收敛，不做计费。
  */
 export function estimateTokens(text: string): number {
   let cjk = 0
@@ -127,12 +137,15 @@ export function estimateTokens(text: string): number {
     if (CJK_PATTERN.test(ch)) cjk += 1
     else rest += ch
   }
-  return cjk + rest.split(/\s+/u).filter((word) => word.length > 0).length
+  const words = rest.split(/\s+/u).filter((word) => word.length > 0)
+  const restChars = words.reduce((total, word) => total + word.length, 0)
+  // 下限取词数（短词至少 1 token），上限按字符数/4（长 URL/hash 不会只算 1 token）。
+  return cjk + Math.max(words.length, Math.ceil(restChars / 4))
 }
 
 /**
  * 把一段超预算文本切成 ≤budget token 的连续片段：优先在句末切，单句超预算则按字符硬切。
- * 各片段按原文顺序拼接后与原文一致（只 trim 首尾空白）。
+ * 各片段**分别 trim 后按原顺序拼接**（不等于原文逐字，首尾空白会被吃掉，评审 T16）。
  */
 export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOKENS): string[] {
   const trimmed = text.trim()
@@ -147,7 +160,11 @@ export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOK
     cursor += ch.length
     if (SENTENCE_END_PATTERN.test(ch)) lastBreak = cursor
     if (estimateTokens(trimmed.slice(start, cursor)) <= budget) continue
-    const cut = lastBreak > start ? lastBreak : before > start ? before : cursor
+    // lastBreak === cursor 表示「当前字符恰是句末符」：切在它之前，否则这一片会多含该符号
+    // （评审 T14：'甲'.repeat(150) + '。' 会切出 151 token 的片段）。
+    const cut = lastBreak > start && lastBreak < cursor
+      ? lastBreak
+      : before > start ? before : cursor
     const piece = trimmed.slice(start, cut).trim()
     if (piece.length > 0) pieces.push(piece)
     start = cut
@@ -158,7 +175,15 @@ export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOK
   return pieces
 }
 
-/** 解析模型输出为原子卡片；无法解析或结构不符返回 null（调用方归为可重试失败）。 */
+/**
+ * 解析模型输出为原子卡片；无法解析、结构不符、或**非空数组但元素全部无用**返回 null
+ * （调用方归为可重试失败，评审 T25）。
+ *
+ * 归一化后为空的文本（纯标点 / 纯空白，评审 T4）在此丢弃：留着它会在写库事务里由
+ * `memoryNodeId` 抛 `empty_fingerprint_text`，把整条 INBOX 的**全部**合格 fact 一起回滚。
+ * 检查落在**每个片段**上而不只是整条：`'甲'.repeat(150) + '。...'` 会被切成
+ * `['甲'x150, '。...']`，tail 整条非空但归一化后为空（评审 P4 追加项）。
+ */
 export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
   const start = text.indexOf('{')
   const end = text.lastIndexOf('}')
@@ -171,6 +196,8 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
   }
   const facts = (parsed as { readonly facts?: unknown } | null)?.facts
   if (!Array.isArray(facts)) return null
+  // 空数组是合法的「原文无可记内容」，保持成功（T25）。
+  if (facts.length === 0) return []
   const out: RefinedFact[] = []
   const kinds: readonly string[] = MEMORY_KINDS
   for (const raw of facts) {
@@ -182,6 +209,8 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
     const priorityOk = Number.isFinite(rawPriority) && rawPriority >= MEMORY_PRIORITY_MIN && rawPriority <= MEMORY_PRIORITY_MAX
     const coerced = !kindOk || !priorityOk
     for (const piece of splitToBudget(factText)) {
+      // 逐片段校验：整条可用不代表每个片段都可用（见上方 parseRefineOutput 的注释）。
+      if (isUnusableFactText(piece)) continue
       out.push({
         text: piece,
         kind: kindOk ? (entry?.kind as string) : DEFAULT_MEMORY_KIND,
@@ -190,7 +219,25 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
       })
     }
   }
+  // 非空数组但一条都没留下：整个响应无法使用 ⇒ 按可重试的解析失败处理（T25）。
+  if (out.length === 0) return null
   return out
+}
+
+/**
+ * 归一化后为空的文本（纯标点 / 纯空白）不是可写入的原子事实：
+ * `memoryNodeId` 对它抛 `empty_fingerprint_text`，故在解析层就丢掉（评审 T4）。
+ *
+ * `normalizeFingerprintText` 对「归一化后为空」**抛错**、永不返回空串（db/id.ts:29-40），
+ * 所以判据就是「是否抛错」，没有长度比较分支。
+ */
+function isUnusableFactText(text: string): boolean {
+  try {
+    normalizeFingerprintText(text)
+    return false
+  } catch {
+    return true
+  }
 }
 
 /** HTTP 状态是否瞬时（AC:575-577）：429 / 5xx / 无状态码算可重试，其余 4xx 是语义错。 */
@@ -200,10 +247,37 @@ export function isRetryableStatus(status: number | undefined): boolean {
   return status >= 500
 }
 
+function numberOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined
+}
+
+/**
+ * 把「流以外」抛出的异常映射为失败分类（评审 T8）。
+ *
+ * 宿主的 LlmFailure 形状（`{ message, code, status, ... }`）既可能直接抛出，也可能挂在
+ * `LlmError.failure` 上。尽力取出 status/code 并复用 {@link isRetryableStatus}——否则确定性
+ * 4xx（鉴权失败 / 模型不存在）会被当成瞬时错重试 4 次才进死信，违反 §14「4xx 直接降级」。
+ * 提不出状态码才按可重试兜底（未知错误宁可多试）。
+ */
 function classifyThrown(error: unknown, signal: AbortSignal): RefineFailure {
   const message = error instanceof Error ? error.message : String(error)
   if (signal.aborted) return { reason: 'llm-timeout', message, retryable: true }
-  return { reason: 'llm-threw', message, retryable: true }
+  const shaped = error as {
+    readonly status?: unknown
+    readonly code?: unknown
+    readonly failure?: { readonly status?: unknown; readonly code?: unknown }
+  } | null | undefined
+  const status = numberOrUndefined(shaped?.status) ?? numberOrUndefined(shaped?.failure?.status)
+  const code = stringOrUndefined(shaped?.code) ?? stringOrUndefined(shaped?.failure?.code)
+  return {
+    reason: code ?? 'llm-threw',
+    message,
+    retryable: status === undefined ? true : isRetryableStatus(status),
+  }
 }
 
 function classifyFinish(folded: FoldedStream, signal: AbortSignal): RefineFailure | null {

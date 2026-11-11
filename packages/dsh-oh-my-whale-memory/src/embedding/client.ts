@@ -3,7 +3,8 @@
  *
  * - `POST {endpoint}/embeddings`（endpoint 已以 /embeddings 结尾则不重复追加）；不写默认 base URL。
  * - 请求头 `Authorization: Bearer {token}` + `Content-Type: application/json`；体 `{ model, input: string[] }`。
- * - 单请求 `input` ≤ 8 条；响应 `{ data: [{ embedding }] }` 按输入 index 对齐。
+ * - 单请求 `input` ≤ 8 条；响应 `{ data: [{ embedding, index }] }` **按 index 落位**（评审 T5：
+ *   提供方乱序返回时不能把向量挂到错误文本上）；缺失 index 才回退位置序，index 重复/越界/缺位即失败。
  * - 超时 ≤10s（AbortSignal，与调用方任务预算的 signal 合并）；失败**不抛错**，返回 ok:false——
  *   调用方必须让 L1 照常写入、只记审计、embedding 两列留空（N4）。
  */
@@ -74,9 +75,23 @@ export function createEmbeddingClient(options: EmbeddingClientOptions): EmbedCli
       if (!Array.isArray(data) || data.length !== input.length) {
         return { ok: false, reason: 'count-mismatch', message: 'embeddings 返回条数与输入不符' }
       }
-      const vectors: number[][] = []
+      // 按 data[i].index 落位（评审 T5）：只按数组位置 push 会把乱序响应静默错配到别的文本上。
+      const slots: (readonly number[] | null)[] = input.map(() => null)
+      let positional = 0
       for (const item of data) {
-        const embedding = (item as { readonly embedding?: unknown } | null)?.embedding
+        const record = item as { readonly embedding?: unknown; readonly index?: unknown } | null
+        const rawIndex = record?.index
+        const slot = typeof rawIndex === 'number' && Number.isFinite(rawIndex)
+          ? Math.trunc(rawIndex)
+          : positional
+        positional += 1
+        if (!Number.isInteger(slot) || slot < 0 || slot >= input.length) {
+          return { ok: false, reason: 'index-out-of-range', message: 'embeddings 返回的 index 越界：' + String(rawIndex) }
+        }
+        if (slots[slot] !== null) {
+          return { ok: false, reason: 'index-duplicate', message: 'embeddings 返回的 index 重复：' + String(slot) }
+        }
+        const embedding = record?.embedding
         if (!Array.isArray(embedding) || embedding.length !== dim || embedding.some((v) => typeof v !== 'number')) {
           return {
             ok: false,
@@ -84,9 +99,12 @@ export function createEmbeddingClient(options: EmbeddingClientOptions): EmbedCli
             message: 'embeddings 向量维度与配置 dim 不符（应 ' + dim + '）',
           }
         }
-        vectors.push((embedding as readonly number[]).map(Number))
+        slots[slot] = (embedding as readonly number[]).map(Number)
       }
-      return { ok: true, vectors }
+      if (slots.some((vector) => vector === null)) {
+        return { ok: false, reason: 'index-missing', message: 'embeddings 返回的 index 未覆盖全部输入' }
+      }
+      return { ok: true, vectors: slots as (readonly number[])[] }
     },
   }
 }

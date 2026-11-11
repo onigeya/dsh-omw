@@ -57,6 +57,28 @@ describe('请求形态', () => {
     expect(calls[0]!.url).toBe('http://host/v1/embeddings')
   })
 
+  it('评审 T5：乱序返回按 data[].index 落位（不错配到别的文本上）', async () => {
+    const { fetch } = capturingFetch(jsonResponse({
+      data: [{ index: 1, embedding: [0, 1, 0, 0] }, { index: 0, embedding: [1, 0, 0, 0] }],
+    }))
+    const result = await client({ fetch }).embed('m', ['甲', '乙'], AbortSignal.timeout(1_000))
+    expect(result).toEqual({ ok: true, vectors: [[1, 0, 0, 0], [0, 1, 0, 0]] })
+  })
+
+  it('评审 T5：index 重复 / 越界 ⇒ ok:false（宁可无向量也不错配）', async () => {
+    const dup = capturingFetch(jsonResponse({
+      data: [{ index: 0, embedding: [1, 0, 0, 0] }, { index: 0, embedding: [0, 1, 0, 0] }],
+    }))
+    expect(await client({ fetch: dup.fetch }).embed('m', ['甲', '乙'], AbortSignal.timeout(1_000)))
+      .toMatchObject({ ok: false, reason: 'index-duplicate' })
+
+    const outOfRange = capturingFetch(jsonResponse({
+      data: [{ index: 9, embedding: [1, 0, 0, 0] }, { index: 0, embedding: [0, 1, 0, 0] }],
+    }))
+    expect(await client({ fetch: outOfRange.fetch }).embed('m', ['甲', '乙'], AbortSignal.timeout(1_000)))
+      .toMatchObject({ ok: false, reason: 'index-out-of-range' })
+  })
+
   it('空输入不发请求', async () => {
     const spy = vi.fn()
     const { fetch } = capturingFetch(jsonResponse({ data: [] }))

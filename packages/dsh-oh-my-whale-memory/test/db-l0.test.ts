@@ -8,7 +8,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { captureStableKey, l0InboxId, l0RawId, writeL0Raw } from '../src/db/l0'
+import { captureStableKey, l0RawId, writeL0Raw } from '../src/db/l0'
 import { queryAll } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { runInTransaction } from '../src/db/transaction'
@@ -67,14 +67,12 @@ describe('AC①④：L0 append-only 写入', () => {
 })
 
 describe('采集 id 确定性（崩溃重放不重复的根据）', () => {
-  it('同一稳定身份算出同一对 id；不同身份不撞；L0 与 INBOX 前缀不同', () => {
+  it('同一稳定身份算出同一 id；不同身份不撞（评审 T1：L0 与 INBOX 共用该 id）', () => {
     const a = captureStableKey('turn', 's1', 3)
     const b = captureStableKey('turn', 's1', 3)
     const c = captureStableKey('turn', 's1', 4)
     expect(l0RawId(a)).toBe(l0RawId(b))
-    expect(l0InboxId(a)).toBe(l0InboxId(b))
     expect(l0RawId(a)).not.toBe(l0RawId(c))
-    expect(l0RawId(a)).not.toBe(l0InboxId(a))
     expect(l0RawId(a)).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
   })
 })

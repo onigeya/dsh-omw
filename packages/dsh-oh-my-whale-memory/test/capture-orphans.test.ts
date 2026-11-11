@@ -10,7 +10,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCaptureRecorder } from '../src/capture/recorder'
 import { listSnapshots, writeSnapshot, type SnapshotRecord } from '../src/capture/snapshot-store'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { captureStableKey, l0InboxId, l0RawId } from '../src/db/l0'
+import { captureStableKey, l0RawId } from '../src/db/l0'
 import { queryAll } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { cleanupTempDirs, makeTempDir } from './tmp'
@@ -70,7 +70,7 @@ describe('AC⑤：启动扫描孤儿快照并重放', () => {
     expect(l0?.raw_text).toBe('assistant: 孤儿')
     expect(l0?.recorded_at).toBe('2026-11-11T00:00:00.000Z')
 
-    const inboxId = l0InboxId(captureStableKey('compaction', 'orph-1', 'c-orph'))
+    const inboxId = l0RawId(captureStableKey('compaction', 'orph-1', 'c-orph'))
     const inbox = (await queryAll(store.connection, "MATCH (q:l1_inbox) WHERE q.id = '" + inboxId + "' RETURN q.status AS status, q.payload AS payload"))[0]
     expect(inbox?.status).toBe('pending')
     expect(inbox?.payload).toBe('assistant: 孤儿')
@@ -85,7 +85,7 @@ describe('AC⑤：启动扫描孤儿快照并重放', () => {
     await recorder.replayOrphanSnapshots()
 
     // 模拟该条目已被取走并在重试中：重放不得把它打回 pending、不得清 attempts。
-    const inboxId = l0InboxId(record.stableKey)
+    const inboxId = l0RawId(record.stableKey)
     await store.connection.query(
       "MATCH (q:l1_inbox) WHERE q.id = '" + inboxId + "' SET q.status = 'processing', q.attempts = 2",
     )

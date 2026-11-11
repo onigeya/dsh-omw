@@ -70,6 +70,7 @@ import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
+import { routeFromSession } from './distill/session-route.js'
 import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
@@ -409,24 +410,13 @@ export async function apply(
     resolved.llmProvider && resolved.llmModel
       ? { provider: resolved.llmProvider, model: resolved.llmModel }
       : null
+  // 回退链与解析规则在 distill/session-route.ts（纯函数，评审 T21 要求可单测）。
   const sessionRoute = (sessionId: string): RefineRoute | null => {
     const sessions = (ctx as unknown as {
       sessions?: { get?: (id: string) => unknown }
     }).sessions
     const session = typeof sessions?.get === 'function' ? sessions.get(sessionId) : undefined
-    // 优先 requestHeader（log 中最后一个 header 的折叠值），退 requestContext（仅 provider/model 变化时追加）。
-    const header = (session as { requestHeader?: () => unknown } | undefined)?.requestHeader?.()
-    const headerConfig = (header as { config?: { provider?: unknown; model?: unknown } } | undefined)?.config
-    if (typeof headerConfig?.provider === 'string' && typeof headerConfig.model === 'string' &&
-      headerConfig.provider.length > 0 && headerConfig.model.length > 0) {
-      return { provider: headerConfig.provider, model: headerConfig.model }
-    }
-    const recorded = (session as { requestContext?: () => unknown } | undefined)?.requestContext?.()
-    const provider = (recorded as { provider?: unknown } | undefined)?.provider
-    const model = (recorded as { model?: unknown } | undefined)?.model
-    return typeof provider === 'string' && typeof model === 'string' && provider.length > 0 && model.length > 0
-      ? { provider, model }
-      : null
+    return routeFromSession(session)
   }
   const inboxProcessor = createInboxProcessor({
     connection: () => db?.connection ?? null,

@@ -16,8 +16,8 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
-import { queryAll } from '../src/db/memory'
-import { claimNextInboxItem, enqueueInboxItem, reclaimProcessingInboxItems, type InboxItem } from '../src/inbox/queue'
+import { queryAll, upsertMemory } from '../src/db/memory'
+import { claimNextInboxItem, completeInboxItem, enqueueInboxItem, reclaimProcessingInboxItems, type InboxItem } from '../src/inbox/queue'
 import { InboxRefineError, createInboxConsumer } from '../src/inbox/consumer'
 import { createIdleGate } from '../src/inbox/idle-gate'
 import type { PromotionTracker } from '../src/inbox/promotion-trigger'
@@ -28,8 +28,9 @@ import {
   createInboxProcessor,
   type InboxProcessorDeps,
 } from '../src/distill/processor'
-import type { EmbedClient } from '../src/embedding/client'
-import type { LlmPort } from '../src/distill/llm-refine'
+import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../src/embedding/client'
+import { MAX_REFINE_FACT_TOKENS, type LlmPort } from '../src/distill/llm-refine'
+import { MEMORY_REMEMBER_LAYER } from '../src/tools/memory-remember'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
@@ -154,7 +155,10 @@ describe('成功路径（AC:560、R1、R4①）', () => {
     expect(nodes.map((node) => String(node.kind)).sort()).toEqual(['persona', 'work_fact'])
     expect(nodes.every((node) => String(node.layer) === 'L1')).toBe(true)
     expect(nodes.every((node) => refsOf(node, 'source_refs').includes(item.id))).toBe(true)
-    expect(Number(nodes[0]!.embedding_dim)).toBe(0)
+    // T24：未产向量时三列是 NULL（不是 0），后续重嵌入才识别得出来。
+    expect(nodes[0]!.embedding).toBeNull()
+    expect(nodes[0]!.embedding_model_id).toBeNull()
+    expect(nodes[0]!.embedding_dim).toBeNull()
 
     const logs = refineLogsFor(await allLogs(), item.id)
     expect(logs).toHaveLength(1)
@@ -195,12 +199,116 @@ describe('成功路径（AC:560、R1、R4①）', () => {
   })
 })
 
+describe('评审补钉（T3 / T7 / T20 / P4 追加项）', () => {
+  it('评审 T20：facts 超过单请求上限时按 EMBEDDING_MAX_BATCH 分批（客户端被调 2 次）', async () => {
+    const item = await claimFixture('embed-batch', '原文')
+    const batches: number[] = []
+    const counting: EmbedClient = {
+      embed: async (_model, input) => {
+        batches.push(input.length)
+        return { ok: true, vectors: input.map(() => [1, 0, 0, 0]) }
+      },
+    }
+    const facts = Array.from({ length: EMBEDDING_MAX_BATCH + 1 }, (_unused, index) => ({
+      text: '事实' + index, kind: 'work_fact', priority: 0,
+    }))
+    await makeProcessor(scriptedLlm(okOutput(facts)).llm, {
+      embedding: counting, embeddingModel: 'BAAI/bge-m3', embeddingModelId: 'BAAI/bge-m3',
+    })(item)
+
+    expect(batches).toEqual([EMBEDDING_MAX_BATCH, 1])
+    const nodes = await nodesFor(item.id)
+    expect(nodes).toHaveLength(EMBEDDING_MAX_BATCH + 1)
+    expect(nodes.every((node) => node.embedding !== null)).toBe(true)
+  })
+
+  it('评审 P4：切分出的纯标点 tail 不再拖垮整条 INBOX（不抛错、不产死信、正常片段入库）', async () => {
+    const item = await claimFixture('tail', '原文')
+    const text = '甲'.repeat(MAX_REFINE_FACT_TOKENS) + '。...'
+    const result = await makeProcessor(scriptedLlm(okOutput([{ text, kind: 'work_fact', priority: 1 }])).llm)(item)
+
+    expect(result.completed).toBe(true)
+    const nodes = await nodesFor(item.id)
+    expect(nodes.length).toBeGreaterThan(0)
+    expect(nodes.every((node) => String(node.text).includes('甲'))).toBe(true)
+    expect(await inboxStatus(item.id)).toBe('done')
+  })
+
+  it('评审 T3：coerced 不覆盖既有节点的分类与优先级（同指纹已有 persona/9）', async () => {
+    const item = await claimFixture('keep-kind', '原文')
+    await upsertMemory(store.connection, {
+      layer: MEMORY_REMEMBER_LAYER, text: '偏好中文', kind: 'persona', priority: 9,
+    })
+    await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'not-a-kind', priority: 0 }])).llm)(item)
+
+    const nodes = await nodesFor(item.id)
+    expect(nodes).toHaveLength(1)
+    expect(String(nodes[0]!.kind)).toBe('persona')
+    expect(Number(nodes[0]!.priority)).toBe(9)
+  })
+
+  it('评审 T7：已 done 的条目直接 process ⇒ 不调 LLM、不写审计、不抛错', async () => {
+    const item = await claimFixture('done-guard', '原文')
+    await completeInboxItem(store.connection, item.id, { now: NOW })
+    const { llm, calls } = scriptedLlm(okOutput([{ text: '不应产出', kind: 'work_fact', priority: 0 }]))
+
+    const result = await makeProcessor(llm, { resolveRoute: () => null })(item)
+
+    expect(result).toEqual({ completed: true, kinds: [] })
+    expect(calls).toHaveLength(0)
+    expect(refineLogsFor(await allLogs(), item.id)).toHaveLength(0)
+    expect(await nodesFor(item.id)).toHaveLength(0)
+    expect(await inboxStatus(item.id)).toBe('done')
+  })
+  it('评审 T12/T13：不返回的 LLM 被 LLM 子预算截断 ⇒ llm-timeout 可重试，第 4 次进死信', async () => {
+    const item = await claimFixture('llm-timeout', '原文')
+    // 永不产出 chunk、只在 signal 中止时 reject 的端口：模拟 provider 卡住。
+    const hanging: LlmPort = {
+      stream(options) {
+        return (async function* generate() {
+          await new Promise<never>((_resolve, reject) => {
+            options.signal?.addEventListener('abort', () => reject(new Error('aborted by llm budget')), { once: true })
+          })
+        })()
+      },
+    }
+
+    // 夹具已把条目 claim 成 processing，而消费者只取 pending：先按启动回收语义放回队头。
+    expect(await reclaimProcessingInboxItems(store.connection, { now: NOW })).toBe(1)
+
+    let clock = NOW
+    const consumer = createInboxConsumer({
+      connection: () => store.connection,
+      gate: createIdleGate(),
+      owner: 'test-owner',
+      now: () => clock,
+      // timeoutMs 收紧到 60ms，等价地验证「LLM 只吃 min(timeoutMs, 20s)」这条子预算。
+      process: makeProcessor(hanging, { timeoutMs: 60 }),
+    })
+
+    for (let round = 0; round < 4; round += 1) {
+      await consumer.runOnce()
+      clock = new Date(clock.getTime() + 30_000)
+    }
+    consumer.stop()
+
+    expect(await inboxStatus(item.id)).toBe('failed')
+    const logs = refineLogsFor(await allLogs(), item.id)
+    expect(logs.length).toBeGreaterThan(0)
+    expect(logs.every((log) => String(log.reason) === 'llm-timeout')).toBe(true)
+  })
+})
+
 describe('① 崩溃重放（U12）', () => {
   it('事务内抛错 ⇒ 三不变；回收重放只产一份', async () => {
     const item = await claimFixture('txabort', '原文')
-    // 文本 '!!!' 归一化后为空 → memoryNodeId 在**写库事务内**抛 empty_fingerprint_text。
-    await expect(makeProcessor(scriptedLlm(okOutput([{ text: '!!!', kind: 'work_fact', priority: 0 }])).llm)(item))
-      .rejects.toThrow()
+    // 事务内注入崩溃：now() 在 runInTransaction 的回调里才被求值（markInboxItemDone 的参数），
+    // 抛错即触发 ROLLBACK。原先靠「归一化后为空的文本」制造事务内抛错，但 T4/P4 之后
+    // 这类文本在解析层已被丢弃（那正是 T4 要消灭的路径），故改在时钟上注入。
+    const crashing = makeProcessor(scriptedLlm(okOutput([{ text: '事务内崩溃', kind: 'work_fact', priority: 0 }])).llm, {
+      now: () => { throw new Error('crash-inside-transaction') },
+    })
+    await expect(crashing(item)).rejects.toThrow('crash-inside-transaction')
 
     expect(await nodesFor(item.id)).toHaveLength(0)
     expect(refineLogsFor(await allLogs(), item.id)).toHaveLength(0)

@@ -369,6 +369,22 @@ export async function completeInboxItem(
   return runInTransaction(connection, () => markInboxItemDone(connection, id, options))
 }
 
+/**
+ * 读一条条目的当前状态；条目不存在返回 null（不抛错）。
+ *
+ * 供精炼处理器的入口守卫用（评审 T7）：失败分支的记账在 `markInboxItemDone` 之前，
+ * 对已 done 的条目再跑一次 process 会多写审计行，违反 DONE_REPLAY 契约。
+ * 只读，不开事务。
+ */
+export async function readInboxItemStatus(
+  connection: InboxConnection,
+  id: string,
+): Promise<InboxStatus | null> {
+  const rows = await queryRows(connection, READ_ONE, { id })
+  const row = rows[0]
+  return row ? (String(row.status ?? '') as InboxStatus) : null
+}
+
 export interface FailInboxResult {
   /** 落库后的状态；条目本就不在 processing 时原样返回其当前状态（N8 no-op）。 */
   readonly status: InboxStatus

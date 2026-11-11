@@ -2,7 +2,7 @@
  * 流折叠单测（Story 2.3 / N1）。
  *
  * 运行期不 import 宿主 llm 值，所以折叠自己实现；契约：只累加 text-delta、
- * 只认最后一个 finish 块、其余 chunk（reasoning/tool-call/usage/block）一律忽略。
+ * **见到首个 finish 即停止**（评审 T10）、其余 chunk（reasoning/tool-call/usage/block）一律忽略。
  */
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -27,21 +27,24 @@ describe('foldChunks', () => {
     expect(foldChunks([chunk({ type: 'text-delta', index: 0, text: 'x' })])).toEqual({ text: 'x', finish: undefined })
   })
 
-  it('多个 finish 取最后一个（错误终态带 failure）', () => {
+  it('评审 T10：首个 finish 生效，其后的 text-delta 与第二个 finish 都不再计入', () => {
     const failure = { message: 'boom', code: 'provider_error', status: 503 }
     expect(foldChunks([
+      chunk({ type: 'text-delta', index: 0, text: '甲' }),
       chunk({ type: 'finish', reason: { kind: 'stop' } }),
+      chunk({ type: 'text-delta', index: 0, text: '不应计入' }),
       chunk({ type: 'finish', reason: { kind: 'error', failure } }),
-    ])).toEqual({ text: '', finish: { kind: 'error', failure } })
+    ])).toEqual({ text: '甲', finish: { kind: 'stop' } })
   })
 })
 
 describe('foldStream', () => {
-  it('异步流与同步内核同形（adapter 契约保证 finish 之后不再有 chunk，故不额外设守卫）', async () => {
+  it('异步流与同步内核同形；见到 finish 即止（评审 T10）', async () => {
     const stream = (async function* generate() {
       yield chunk({ type: 'text-delta', index: 0, text: '甲' })
       yield chunk({ type: 'text-delta', index: 0, text: '乙' })
       yield chunk({ type: 'finish', reason: { kind: 'stop' } })
+      yield chunk({ type: 'text-delta', index: 0, text: '不应计入' })
     })()
     expect(await foldStream(stream)).toEqual({ text: '甲乙', finish: { kind: 'stop' } })
   })

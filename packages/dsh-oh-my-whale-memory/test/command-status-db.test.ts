@@ -34,7 +34,10 @@ import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
 const MODEL_ID = 'bge-m3'
-const EMBEDDING_CONFIG = { embedding: { token: 'sk-test', model: MODEL_ID, dim: DIM } }
+// P6 起 endpoint 也是 enabled 的必要项：本夹具的本意是「配置齐全 ⇒ status 打印 embedding: enabled」。
+const EMBEDDING_CONFIG = {
+  embedding: { endpoint: 'http://127.0.0.1:1/v1', token: 'sk-test', model: MODEL_ID, dim: DIM },
+}
 const FIXTURE = fileURLToPath(new URL('./fixtures/hold-db-open.mjs', import.meta.url))
 const TS = (seconds: number): string => `2026-11-01T00:00:${String(seconds).padStart(2, '0')}.000Z`
 

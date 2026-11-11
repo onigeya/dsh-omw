@@ -14,33 +14,38 @@ export interface FoldedStream {
   readonly finish: FinishReason | undefined
 }
 
-/** 折叠一个已物化的 chunk 序列（也是 {@link foldStream} 的同步内核）。 */
+/**
+ * 折叠一个已物化的 chunk 序列（也是 {@link foldStream} 的同步内核）。
+ *
+ * 见到首个 `finish` 即停止累加（评审 T10）：终止块之后的内容不属于本次回答文本。
+ * adapter 契约本就不会在 finish 之后再发 chunk，这里是防御性收敛，保证实现与文档一致。
+ */
 export function foldChunks(chunks: Iterable<StreamChunk>): FoldedStream {
   let text = ''
   let finish: FinishReason | undefined
   for (const chunk of chunks) {
-    if (chunk.type === 'text-delta') {
-      text += chunk.text
-    } else if (chunk.type === 'finish') {
+    if (chunk.type === 'finish') {
       finish = chunk.reason
+      break
     }
+    if (chunk.type === 'text-delta') text += chunk.text
   }
   return { text, finish }
 }
 
 /**
- * 把异步 chunk 流抽干为 {@link FoldedStream}。终止 `finish` 之后的 chunk 一律忽略
- * （adapter 契约保证不会再有）。
+ * 把异步 chunk 流抽干为 {@link FoldedStream}。终止 `finish` 之后不再累加文本、
+ * 只保留首个 finish（评审 T10；adapter 契约保证不会再有 chunk，这里是防御性收敛）。
  */
 export async function foldStream(stream: AsyncIterable<StreamChunk>): Promise<FoldedStream> {
   let text = ''
   let finish: FinishReason | undefined
   for await (const chunk of stream) {
-    if (chunk.type === 'text-delta') {
-      text += chunk.text
-    } else if (chunk.type === 'finish') {
+    if (chunk.type === 'finish') {
       finish = chunk.reason
+      break
     }
+    if (chunk.type === 'text-delta') text += chunk.text
   }
   return { text, finish }
 }
