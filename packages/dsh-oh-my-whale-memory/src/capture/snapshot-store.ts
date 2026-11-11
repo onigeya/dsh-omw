@@ -67,19 +67,22 @@ function snapshotInvalidReason(record: SnapshotRecord): string | null {
   return null
 }
 
+/** 读目录名；目录不存在 / 不可读一律当作空（首次启动时快照目录还不存在是常态）。 */
+function readDirNames(dir: string): string[] {
+  try {
+    return readdirSync(dir)
+  } catch {
+    return []
+  }
+}
+
 /**
  * 启动扫描时清理陈旧临时文件（评审 P10）：只删 SNAPSHOT_TEMP_SUFFIX 结尾的文件。
  * rename 是原子的，所以 .tmp 只可能来自「写到一半进程死了」；清理幂等且安全。返回清理条数。
  */
 export function cleanStaleSnapshotTemps(dir: string): number {
-  let names: string[]
-  try {
-    names = readdirSync(dir)
-  } catch {
-    return 0
-  }
   let removed = 0
-  for (const name of names) {
+  for (const name of readDirNames(dir)) {
     if (!name.endsWith(SNAPSHOT_TEMP_SUFFIX)) continue
     try {
       unlinkSync(join(dir, name))
@@ -98,14 +101,8 @@ export function listSnapshots(
   dir: string,
   onInvalid?: (file: string, reason: string) => void,
 ): SnapshotRecord[] {
-  let names: string[]
-  try {
-    names = readdirSync(dir)
-  } catch {
-    return []
-  }
   const records: SnapshotRecord[] = []
-  for (const name of names) {
+  for (const name of readDirNames(dir)) {
     if (!name.endsWith(SNAPSHOT_SUFFIX)) continue
     let parsed: unknown
     try {
