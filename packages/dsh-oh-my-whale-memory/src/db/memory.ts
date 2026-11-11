@@ -17,6 +17,9 @@
  *
  * Story 1.7：显式 `embedding: null`（手动写入无 embedding 客户端）与缺省走同一条
  * 无向量路径——两条 story 的"无向量"语义必须一致，否则同指纹节点会因写法不同而分叉。
+ *
+ * Story 1.8：本文件同时承载**只读**浏览路径（`listMemories` / `getMemoryById`）——
+ * 过滤/排序/截断全部在库侧完成，参数一律 prepare+execute 绑定，见文件末尾。
  */
 import type * as lbug from '@ladybugdb/core'
 import { MemoryDbError } from './errors.js'
@@ -28,7 +31,9 @@ export type MemoryConnection = lbug.Connection
 export interface UpsertMemoryInput {
   /**
    * 记忆层：spine 枚举 `L0|L1|L2|L3`；禁空、禁冒号。
-   * 注意 `'L1_INBOX'` 不是本表 layer 的取值——INBOX 是 Epic 2 引入的另一张表。
+   * 现状：Story 1.7 的写路径（`src/index.ts` 的 `writeL1Inbox`）会写入 `'L1_INBOX'`，
+   * 该取值不在 spine 枚举内（FR-15 的 layer 取值收敛属 Story 1.11）；因此本表的读路径
+   * 不做 layer 白名单——`'L1_INBOX'` 存量行必须照常可见（Story 1.8）。
    */
   layer: string
   /** 记忆原文；参与指纹，归一化后为空即拒绝。 */
@@ -145,4 +150,137 @@ export async function upsertMemory(
     throw new MemoryDbError('db_open_failed', `记忆写入未返回结果（id=${id}）：${JSON.stringify(input.sourceRefs ?? [])}`)
   }
   return { id: String(row.id), recordedAt: String(row.recorded_at) }
+}
+
+/**
+ * Story 1.8 读路径：列表 / 详情。
+ *
+ * 与写路径共用连接与表，但**只读**：
+ * - 列表过滤 `invalid_at IS NULL AND expired_at IS NULL`（当前快照语义，FR-14）；`layer`
+ *   不做白名单过滤——`L1_INBOX` 等非 spine 枚举值也照常列出；
+ * - 排序 `recorded_at DESC` + `$limit` 截断全在库侧完成（LadybugDB 0.22.3 已实测
+ *   `ORDER BY`、参数化 `LIMIT`、`lower(...) CONTAINS lower(...)` 均可用）；
+ * - 关键词是**字面包含**匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
+ * - 详情 `getMemoryById` **不做有效性过滤**：已失效/已过期的墓碑也要能 show 出来，
+ *   与列表的隐藏语义不对称是有意的（Story 1.8 AC3）。
+ *
+ * 参数（关键词 / id / limit）一律经 prepare+execute 绑定，绝不把用户输入拼进语句。
+ */
+const LIST_MEMORIES_PROJECTION = [
+  'RETURN m.id AS id, m.layer AS layer, m.text AS text',
+  'ORDER BY m.recorded_at DESC',
+  'LIMIT $limit',
+].join(' ')
+
+const LIST_MEMORIES_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL',
+  LIST_MEMORIES_PROJECTION,
+].join(' ')
+
+const LIST_MEMORIES_WITH_KEYWORD_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL AND lower(m.text) CONTAINS lower($query)',
+  LIST_MEMORIES_PROJECTION,
+].join(' ')
+
+/** 详情投影：显式列出字段，**不含 `m.embedding`**（向量列不回显给命令层）。 */
+const GET_MEMORY_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.id = $id',
+  'RETURN m.id AS id, m.layer AS layer, m.kind AS kind, m.priority AS priority, m.text AS text,',
+  'm.valid_at AS valid_at, m.recorded_at AS recorded_at, m.invalid_at AS invalid_at,',
+  'm.expired_at AS expired_at, m.source_refs AS source_refs, m.embedding_model_id AS embedding_model_id',
+].join(' ')
+
+/** 参数化读查询：绑定值一律走 prepare+execute（与写路径同一套 execute 形态）。 */
+async function queryRows(
+  connection: MemoryConnection,
+  statement: string,
+  params: Record<string, lbug.LbugValue>,
+): Promise<Record<string, unknown>[]> {
+  const prepared = await connection.prepare(statement)
+  return collectRows(await connection.execute(prepared, params))
+}
+
+/** NULL/undefined 归一为 null（列里的 null 是「未设置」，与空串不同）。 */
+function nullishToString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value)
+}
+
+/** STRING[] 列归一为字符串数组；NULL 归一为 `[]`。 */
+function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : []
+}
+
+export interface ListMemoriesOptions {
+  /** 关键词（字面包含匹配，两侧小写化）；省略 = 不过滤。 */
+  query?: string
+  /** 返回条数上限（非负整数；命令层传 `MEMORY_LIST_DEFAULT_LIMIT`）。 */
+  limit: number
+}
+
+/** 列表项：只取渲染需要的三列（排序与截断已在库侧完成）。 */
+export interface MemoryListEntry {
+  id: string
+  layer: string
+  text: string
+}
+
+/** 单条记忆详情（字段顺序即 `show` 渲染顺序；不含 embedding 向量列）。 */
+export interface MemoryDetail {
+  id: string
+  layer: string
+  kind: string
+  priority: number
+  text: string
+  validAt: string | null
+  recordedAt: string
+  invalidAt: string | null
+  expiredAt: string | null
+  sourceRefs: string[]
+  embeddingModelId: string | null
+}
+
+/**
+ * 最近未失效的记忆（`recorded_at` 倒序、最多 `limit` 条，含 `L1_INBOX` 行）。
+ * 只读：不写库、不改任何行。关键词做两侧小写化的字面包含匹配。
+ */
+export async function listMemories(
+  connection: MemoryConnection,
+  options: ListMemoriesOptions,
+): Promise<MemoryListEntry[]> {
+  const limit = Math.max(0, Math.trunc(options.limit))
+  const keyword = options.query?.trim()
+  const rows = keyword
+    ? await queryRows(connection, LIST_MEMORIES_WITH_KEYWORD_STATEMENT, { query: keyword, limit })
+    : await queryRows(connection, LIST_MEMORIES_STATEMENT, { limit })
+  return rows.map((row) => ({
+    id: String(row.id),
+    layer: String(row.layer ?? ''),
+    text: String(row.text ?? ''),
+  }))
+}
+
+/**
+ * 按 id 取一条记忆的完整字段；不存在返回 `null`（不抛错，由命令层渲染「未找到」）。
+ * 不做有效性过滤——已失效 / 已过期的墓碑照样返回，且 `invalid_at` / `expired_at` 原样带回。
+ */
+export async function getMemoryById(connection: MemoryConnection, id: string): Promise<MemoryDetail | null> {
+  const rows = await queryRows(connection, GET_MEMORY_STATEMENT, { id })
+  const row = rows[0]
+  if (!row) return null
+  return {
+    id: String(row.id),
+    layer: String(row.layer ?? ''),
+    kind: String(row.kind ?? ''),
+    priority: Number(row.priority ?? 0),
+    text: String(row.text ?? ''),
+    validAt: nullishToString(row.valid_at),
+    recordedAt: String(row.recorded_at ?? ''),
+    invalidAt: nullishToString(row.invalid_at),
+    expiredAt: nullishToString(row.expired_at),
+    sourceRefs: toStringArray(row.source_refs),
+    embeddingModelId: nullishToString(row.embedding_model_id),
+  }
 }

@@ -1,74 +1,99 @@
 /**
  * `/memory remember` 解析与 handler 分支测试（Story 1.7 / AC2、AC3、AC4 的库外部分）。
  *
- * 覆盖：`parseRememberInput` 的各分支（带/不带前导空白、无 payload、空输入、
+ * 覆盖：`parseMemoryCommand` 的 `remember` 分支（带/不带前导空白、无 payload、空输入、
  * 未知子命令），以及 handler 的 success / usage-error / writeInbox 抛错转 error
  * 三条路径。命令定义是纯工厂，不依赖宿主 ctx 与真实库；落库事实由
- * command-remember-db.test.ts 覆盖。
+ * command-remember-db.test.ts 覆盖，`list` / `show` 分支由 command-list-show.test.ts 覆盖。
+ *
+ * Story 1.8：工厂改名 `createMemoryCommandDefinition` 并收 3 个 dep；
+ * `invalid` 结果携带对应 usage（remember 缺内容仍是 `MEMORY_REMEMBER_USAGE`）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
   MEMORY_COMMAND_NAME,
+  MEMORY_COMMAND_USAGE,
   MEMORY_REMEMBER_SUBCOMMAND,
   MEMORY_REMEMBER_USAGE,
-  createMemoryRememberDefinition,
-  parseRememberInput,
+  createMemoryCommandDefinition,
+  parseMemoryCommand,
+  type MemoryCommandDependencies,
 } from '../src/command'
 
-describe('parseRememberInput', () => {
+/** 三个 dep 都能被单测替换；未覆盖的读 dep 给默认空实现。 */
+function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCommandDependencies {
+  return {
+    writeInbox: async () => {},
+    listMemories: async () => [],
+    getMemoryById: async () => null,
+    ...overrides,
+  }
+}
+
+describe('parseMemoryCommand（remember 分支）', () => {
   it("接受带前导空白的 ' remember X'（rawInput 含宿主分隔空白）", () => {
-    expect(parseRememberInput(' remember 我偏好 ESM 不要 CJS'))
+    expect(parseMemoryCommand(' remember 我偏好 ESM 不要 CJS'))
       .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS' })
   })
 
   it("接受不带前导空白的 'remember X'", () => {
-    expect(parseRememberInput('remember 我偏好 ESM 不要 CJS'))
+    expect(parseMemoryCommand('remember 我偏好 ESM 不要 CJS'))
       .toEqual({ kind: 'remember', text: '我偏好 ESM 不要 CJS' })
   })
 
   it('去掉 payload 首尾空白但保留内部空白', () => {
-    expect(parseRememberInput('   remember    a   b   c   '))
+    expect(parseMemoryCommand('   remember    a   b   c   '))
       .toEqual({ kind: 'remember', text: 'a   b   c' })
   })
 
-  it("'remember' 无 payload → invalid（AC2）", () => {
-    expect(parseRememberInput(' remember')).toEqual({ kind: 'invalid' })
-    expect(parseRememberInput('remember')).toEqual({ kind: 'invalid' })
-    expect(parseRememberInput(' remember   ')).toEqual({ kind: 'invalid' })
+  it("'remember' 无 payload → invalid + remember usage（AC2）", () => {
+    expect(parseMemoryCommand(' remember')).toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand('remember')).toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember   ')).toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
   })
 
-  it('空 rawInput / 仅空白 → invalid（无子命令）', () => {
-    expect(parseRememberInput('')).toEqual({ kind: 'invalid' })
-    expect(parseRememberInput('   \t\n ')).toEqual({ kind: 'invalid' })
+  it('空 rawInput / 仅空白 → invalid + 总 usage（无子命令）', () => {
+    expect(parseMemoryCommand('')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
+    expect(parseMemoryCommand('   \t\n ')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
   })
 
-  it("未知子命令 'status' → invalid（AC3）", () => {
-    expect(parseRememberInput(' status')).toEqual({ kind: 'invalid' })
+  it("未知子命令 'status' → invalid + 总 usage（AC3）", () => {
+    expect(parseMemoryCommand(' status')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
   })
 
   it('子命令大小写敏感：REMEMBER 不算 remember', () => {
-    expect(parseRememberInput(' Remember x')).toEqual({ kind: 'invalid' })
+    expect(parseMemoryCommand(' Remember x')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
   })
 
   it('子命令常量与命令名符合契约', () => {
     expect(MEMORY_COMMAND_NAME).toBe('memory')
     expect(MEMORY_REMEMBER_SUBCOMMAND).toBe('remember')
     expect(MEMORY_REMEMBER_USAGE).toContain('/memory remember <内容>')
+    // 总 usage 必须同时给出三个子命令（Story 1.8）。
+    expect(MEMORY_COMMAND_USAGE).toContain('/memory remember <内容>')
+    expect(MEMORY_COMMAND_USAGE).toContain('/memory list [关键词]')
+    expect(MEMORY_COMMAND_USAGE).toContain('/memory show <id>')
   })
 })
 
-describe('createMemoryRememberDefinition', () => {
+describe('createMemoryCommandDefinition（remember 分支）', () => {
   it('定义名为 memory，且带 description / input hint（宿主发现契约）', () => {
-    const definition = createMemoryRememberDefinition({ writeInbox: async () => {} })
+    const definition = createMemoryCommandDefinition(makeDeps())
     expect(definition.name).toBe('memory')
     expect(typeof definition.description).toBe('string')
     expect(definition.description.length).toBeGreaterThan(0)
+    // Story 1.8：description / hint 必须同时反映三个子命令，否则文案回归无人发现。
+    expect(definition.description).toContain('remember')
+    expect(definition.description).toContain('list')
+    expect(definition.description).toContain('show')
     expect(definition.input?.hint).toContain('/memory remember')
+    expect(definition.input?.hint).toContain('list [关键词]')
+    expect(definition.input?.hint).toContain('show <id>')
   })
 
   it('有效输入：writeInbox 收到 payload，返回 success', async () => {
     const writeInbox = vi.fn(async () => {})
-    const definition = createMemoryRememberDefinition({ writeInbox })
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
 
     const result = await definition.handler({ rawInput: ' remember 我偏好 ESM 不要 CJS' })
     expect(writeInbox).toHaveBeenCalledExactlyOnceWith('我偏好 ESM 不要 CJS')
@@ -78,7 +103,7 @@ describe('createMemoryRememberDefinition', () => {
 
   it('无 payload：返回 usage error，不写库（AC2）', async () => {
     const writeInbox = vi.fn(async () => {})
-    const definition = createMemoryRememberDefinition({ writeInbox })
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
 
     const result = await definition.handler({ rawInput: ' remember' })
     expect(writeInbox).not.toHaveBeenCalled()
@@ -88,7 +113,7 @@ describe('createMemoryRememberDefinition', () => {
 
   it('未知子命令：返回 usage error，不写库（AC3）', async () => {
     const writeInbox = vi.fn(async () => {})
-    const definition = createMemoryRememberDefinition({ writeInbox })
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
 
     const result = await definition.handler({ rawInput: ' status' })
     expect(writeInbox).not.toHaveBeenCalled()
@@ -97,27 +122,27 @@ describe('createMemoryRememberDefinition', () => {
   })
 
   it('writeInbox 抛错 → 收敛为 error 结果而非抛出（AC4）', async () => {
-    const definition = createMemoryRememberDefinition({
+    const definition = createMemoryCommandDefinition(makeDeps({
       writeInbox: async () => { throw new Error('库写入失败：disk full') },
-    })
+    }))
 
     await expect(definition.handler({ rawInput: ' remember x' }))
       .resolves.toEqual({ kind: 'error', text: '库写入失败：disk full' })
   })
 
   it('writeInbox 抛非 Error 值也收敛为 error 结果', async () => {
-    const definition = createMemoryRememberDefinition({
+    const definition = createMemoryCommandDefinition(makeDeps({
       writeInbox: async () => { throw 'plain-string-failure' },
-    })
+    }))
 
     const result = await definition.handler({ rawInput: ' remember x' })
     expect(result).toEqual({ kind: 'error', text: 'plain-string-failure' })
   })
 
   it('MemoryDbError(empty_fingerprint_text) 被收敛为 error（AC4）', async () => {
-    const definition = createMemoryRememberDefinition({
+    const definition = createMemoryCommandDefinition(makeDeps({
       writeInbox: async () => { throw new Error('记忆文本归一化后为空（只含标点或空白），拒绝建节点') },
-    })
+    }))
 
     const result = await definition.handler({ rawInput: ' remember ！！！' })
     expect(result.kind).toBe('error')

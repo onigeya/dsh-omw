@@ -128,14 +128,26 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
 - **描述护栏（FR-1）**：工具 description 明确要求只记长期事实、并显式排除
   ephemeral / transient content（当前任务进度、一次性中间结果、闲聊等）。
 
-## /memory 命令（Story 1.7）
+## /memory 命令（Story 1.7 / 1.8）
 
 代码在 `src/command.ts`（纯工厂 + 解析，不碰 ctx / 库）与 `src/index.ts`（`apply` 中接线）。
 
 - `/memory remember <内容>`：把一条文本写入 L1 收件箱（`layer = 'L1_INBOX'`）。
   参数解析先 `trimStart`，首 token 必须是 `remember`，其余整体 `trim` 后即正文；
-  无正文、空输入、未知子命令（如 `/memory status`）一律返回 usage 错误的
-  `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`：`/memory remember <内容>`）。
+  无正文返回 usage 错误的 `{ kind: 'error', text }`（正文见 `MEMORY_REMEMBER_USAGE`：
+  `/memory remember <内容>`）。
+- `/memory list [关键词]`：按 `recorded_at` 倒序列出记忆，每行 `- <id> [<layer>] <摘要>`
+  （摘要把空白折叠为单空格、超 60 字符截断加 `…`），默认上限 20 条
+  （`MEMORY_LIST_DEFAULT_LIMIT`）。带关键词时按**字面包含**匹配 `text`（两侧小写化、
+  大小写不敏感；不做语义检索），仍倒序 + 上限。默认只列「有效」记忆
+  （`invalid_at` 与 `expired_at` 均为空），`layer` 不做白名单。
+- `/memory show <id>`：按 AC 字段顺序逐行输出该记忆的完整字段（layer / kind / priority /
+  text / valid_at / recorded_at / invalid_at / expired_at / source_refs /
+  embedding_model_id），NULL 与空值渲染 `(空)`、空数组渲染 `[]`，不回显 embedding 向量。
+  **有意非对称**：已失效（墓碑）记忆不在 `list` 里出现，但 `show <id>` 仍返回并展示
+  `invalid_at` / `expired_at`。id 不存在时返回 `{ kind: 'error', text: '未找到 id 为 … 的记忆。' }`。
+- 无子命令 / 未知子命令（如 `/memory status`）→ usage 错误，正文见 `MEMORY_COMMAND_USAGE`
+  （同时给出 remember / list / show 三条用法）。
 - **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /
   `embedding_dim` 三列同落 NULL（不写零向量——零向量会污染 HNSW，留待 Story 2.3 回填）。
   与工具直写共用同一条无向量路径；维度校验因此只在显式带向量时生效，非空且长度与库 pin

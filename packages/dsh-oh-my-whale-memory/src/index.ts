@@ -28,6 +28,10 @@
  * 命令同样在 profileContext 早退之前无条件注册（库未就绪时返回明确错误，AC4），
  * 与工具共用同一个闭包可变量 `db`。
  *
+ * Story 1.8：同一命令扩展出 `list [关键词]` 与 `show <id>` 两个**只读**子命令（仍只有
+ * 一处 `register`）。两个读 dep 同样惰性绑定 `db.connection`——库未就绪时 throw 明确
+ * 错误，由命令层收敛成 `{kind:'error'}`，绝不静默返回空列表。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -39,7 +43,12 @@ import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
-import { createMemoryRememberDefinition, type MemoryCommandsRuntime } from './command.js'
+import { getMemoryById as readMemoryById, listMemories as readMemories } from './db/memory.js'
+import {
+  createMemoryCommandDefinition,
+  type MemoryCommandDependencies,
+  type MemoryCommandsRuntime,
+} from './command.js'
 import { createMemoryRememberTool } from './tools/memory-remember.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
@@ -55,16 +64,25 @@ export { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 export type { MemoryWriterLock } from './db/writer-lock.js'
 export {
   MEMORY_COMMAND_NAME,
+  MEMORY_COMMAND_USAGE,
+  MEMORY_LIST_DEFAULT_LIMIT,
+  MEMORY_LIST_SUBCOMMAND,
+  MEMORY_LIST_USAGE,
   MEMORY_REMEMBER_SUBCOMMAND,
   MEMORY_REMEMBER_USAGE,
-  createMemoryRememberDefinition,
-  parseRememberInput,
+  MEMORY_SHOW_SUBCOMMAND,
+  MEMORY_SHOW_USAGE,
+  createMemoryCommandDefinition,
+  parseMemoryCommand,
 } from './command.js'
 export type {
   MemoryCommandDefinition,
+  MemoryCommandDetail,
+  MemoryCommandDependencies,
   MemoryCommandInvocation,
+  MemoryCommandListEntry,
+  MemoryCommandParseResult,
   MemoryCommandResult,
-  MemoryRememberDependencies,
 } from './command.js'
 export {
   MEMORY_REMEMBER_LAYER,
@@ -137,11 +155,27 @@ export async function apply(
     // 同落 NULL（不写零向量污染 HNSW cosine 索引），Story 2.3 引入客户端后回填。
     await db.upsertMemory({ layer: 'L1_INBOX', text, embedding: null, embeddingModelId: null })
   }
+  // Story 1.8：读 dep 与写 dep 一样惰性——注册发生在建库之前，闭包在 handler 被调用时
+  // 才读 `db`。库未就绪时 throw，由命令层收敛为 error 结果，绝不静默返回空列表。
+  const readConnection = (): MemoryDatabase => {
+    if (!db) {
+      throw new Error('记忆库未就绪：无 profile 归属或建库未完成，当前无法读取记忆')
+    }
+    return db
+  }
+  const listMemories = (input: { query?: string; limit: number }) =>
+    readMemories(readConnection().connection, input)
+  const getMemoryById = (id: string) => readMemoryById(readConnection().connection, id)
+  const commandDependencies: MemoryCommandDependencies = {
+    writeInbox: writeL1Inbox,
+    listMemories,
+    getMemoryById,
+  }
   // 命令的 effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
   ctx.effect(
     () => {
       const commands = ctx.get?.('commands') as MemoryCommandsRuntime | undefined
-      return commands?.register(createMemoryRememberDefinition({ writeInbox: writeL1Inbox })) ?? (() => {})
+      return commands?.register(createMemoryCommandDefinition(commandDependencies)) ?? (() => {})
     },
     'omw-memory-command',
   )

@@ -1,13 +1,17 @@
 /**
- * `/memory` 宿主命令（Story 1.7 / AC1-AC4）。
+ * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show`）。
  *
  * 命令定义是可脱离宿主单测的纯工厂：解析与错误收敛不依赖 ctx。handler 只读
- * `invocation.rawInput`，把任何写库异常收敛为 `{ kind: 'error', text }`——命令
+ * `invocation.rawInput`，把任何读/写库异常收敛为 `{ kind: 'error', text }`——命令
  * 永不抛出（宿主契约：thrown handler 会以 `kind: 'error'` 收尾，见 commands.md:172）。
  *
- * 写入层固定 `layer='L1_INBOX'`；Epic 1 无 embedding 客户端，embedding /
- * embedding_model_id / embedding_dim 三列一并以 NULL 写入（Story 2.3 的既定状态，
- * 供后续重嵌入任务识别），绝不写零向量污染 HNSW。
+ * 三个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
+ * - `remember <内容>`：写入 L1_INBOX（Story 1.7，行为与文案不变）；
+ * - `list [关键词]`：最近的记忆（文本包含匹配、`recorded_at` 倒序、默认 20 条）；
+ * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）。
+ *
+ * `list [关键词]` 是**字面包含匹配**（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
+ * 过滤、排序、截断都由 db 层在库侧完成，命令层只做渲染。
  *
  * `@deepseek-ai/dsh-commands` 在本工作区不可解析，故这里只用本地结构化类型描述
  * 命令定义 / 调用 / 结果——运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
@@ -18,11 +22,50 @@
 export const MEMORY_COMMAND_NAME = 'memory'
 /** `remember` 子命令：`rawInput` 的首个 token。 */
 export const MEMORY_REMEMBER_SUBCOMMAND = 'remember'
-/** 子命令 / payload 缺失、未知子命令时的 usage 提示。 */
+/** `list` 子命令：浏览最近的记忆。 */
+export const MEMORY_LIST_SUBCOMMAND = 'list'
+/** `show` 子命令：按 id 取一条记忆的完整字段。 */
+export const MEMORY_SHOW_SUBCOMMAND = 'show'
+
+/**
+ * `list` 默认返回条数。
+ *
+ * 无既有常量可复用（`src/config.ts` 无列表条数字段，PRD FR-14 / FR-11 也没给数字）；
+ * 取 20 是与 FR-12 已存在的「结果上限 20 条」同量级，避免同一产品里 20/50 两种口径
+ * 并存。**这是本 story 的取舍，不是 PRD 要求**（见 spec Design Notes）。
+ */
+export const MEMORY_LIST_DEFAULT_LIMIT = 20
+
+/** `remember` 子命令 payload 缺失时的 usage 提示。 */
 export const MEMORY_REMEMBER_USAGE = [
   '用法：/memory remember <内容>',
   '',
   '把一条事实写入记忆（L1_INBOX 收件箱）。示例：/memory remember 我偏好 ESM 不要 CJS',
+].join('\n')
+
+/** `list` 子命令用法（关键词可选）。 */
+export const MEMORY_LIST_USAGE = [
+  '用法：/memory list [关键词]',
+  '',
+  '列出最近的记忆（关键词为字面包含匹配，最近优先，默认 20 条）。示例：/memory list RRF',
+].join('\n')
+
+/** `show` 子命令缺少 id 时的 usage 提示。 */
+export const MEMORY_SHOW_USAGE = [
+  '用法：/memory show <id>',
+  '',
+  '查看一条记忆的完整字段（含已失效记忆）。id 取自 /memory list 的输出。',
+].join('\n')
+
+/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show 三条）。 */
+export const MEMORY_COMMAND_USAGE = [
+  '用法：/memory <子命令>',
+  '',
+  MEMORY_REMEMBER_USAGE,
+  '',
+  MEMORY_LIST_USAGE,
+  '',
+  MEMORY_SHOW_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -50,28 +93,69 @@ export interface MemoryCommandsRuntime {
 /** 命令定义（交给 `ctx.commands.register` 的对象）。 */
 export type MemoryCommandDefinition = Parameters<MemoryCommandsRuntime['register']>[0]
 
-export interface MemoryRememberDependencies {
-  /** 把一条文本写入 L1_INBOX；抛错由 handler 收敛为 error 结果。 */
-  writeInbox(text: string): Promise<void>
+/** 列表项（db 层 `listMemories` 的返回形状；命令层不 import db 模块）。 */
+export interface MemoryCommandListEntry {
+  readonly id: string
+  readonly layer: string
+  readonly text: string
 }
 
+/** 单条记忆详情（db 层 `getMemoryById` 的返回形状；字段与 show 渲染顺序一致）。 */
+export interface MemoryCommandDetail {
+  readonly id: string
+  readonly layer: string
+  readonly kind: string
+  readonly priority: number
+  readonly text: string
+  readonly validAt: string | null
+  readonly recordedAt: string
+  readonly invalidAt: string | null
+  readonly expiredAt: string | null
+  readonly sourceRefs: readonly string[]
+  readonly embeddingModelId: string | null
+}
+
+/** 命令依赖（由 `src/index.ts` 惰性绑定到库句柄；读路径不得在库未就绪时静默返回空）。 */
+export interface MemoryCommandDependencies {
+  /** 把一条文本写入 L1_INBOX；抛错由 handler 收敛为 error 结果。 */
+  writeInbox(text: string): Promise<void>
+  /** 取最近未失效的记忆（库侧已过滤/倒序/截断）；抛错由 handler 收敛。 */
+  listMemories(input: { readonly query?: string; readonly limit: number }): Promise<readonly MemoryCommandListEntry[]>
+  /** 按 id 取详情；不存在返回 null（不是抛错）。 */
+  getMemoryById(id: string): Promise<MemoryCommandDetail | null>
+}
+
+/** 解析结果：三个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
+export type MemoryCommandParseResult =
+  | { kind: 'remember', text: string }
+  | { kind: 'list', query?: string }
+  | { kind: 'show', id: string }
+  | { kind: 'invalid', usage: string }
+
 /**
- * 解析 `rawInput`：trim 起始空白取首 token。
- * - 首个 token 为 `remember` → 其余 trim 后为 payload；payload 为空仍算 invalid。
- * - 其它 token / 空 `rawInput` / `remember` 无 payload 一律 invalid。
+ * 解析 `rawInput`：trim 起始空白取首 token（子命令大小写敏感）。
+ * - `remember` → 其余 trim 后为 payload；payload 为空给 `MEMORY_REMEMBER_USAGE`；
+ * - `list` → 其余 trim 后为可选关键词（可为空，表示不过滤）；
+ * - `show` → 其余 trim 后为 id；为空给 `MEMORY_SHOW_USAGE`；
+ * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
-export function parseRememberInput(
-  rawInput: string,
-): { kind: 'remember', text: string } | { kind: 'invalid' } {
+export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
   const trimmedStart = rawInput.trimStart()
-  if (!trimmedStart) return { kind: 'invalid' }
+  if (!trimmedStart) return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   const firstWhitespace = trimmedStart.search(/\s+/)
   const subcommand = firstWhitespace === -1 ? trimmedStart : trimmedStart.slice(0, firstWhitespace)
-  if (subcommand !== MEMORY_REMEMBER_SUBCOMMAND) return { kind: 'invalid' }
   const payload = firstWhitespace === -1 ? '' : trimmedStart.slice(firstWhitespace).trim()
-  if (!payload) return { kind: 'invalid' }
-  return { kind: 'remember', text: payload }
+  switch (subcommand) {
+    case MEMORY_REMEMBER_SUBCOMMAND:
+      return payload ? { kind: 'remember', text: payload } : { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+    case MEMORY_LIST_SUBCOMMAND:
+      return payload ? { kind: 'list', query: payload } : { kind: 'list' }
+    case MEMORY_SHOW_SUBCOMMAND:
+      return payload ? { kind: 'show', id: payload } : { kind: 'invalid', usage: MEMORY_SHOW_USAGE }
+    default:
+      return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
+  }
 }
 
 /** 异常转可读文本：Error 取 message，其它取字符串。绝不携带凭据（只含用法/字段名）。 */
@@ -79,20 +163,101 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 构造 `/memory remember` 命令定义。纯工厂：不读 ctx、不持有 db。 */
-export function createMemoryRememberDefinition(deps: MemoryRememberDependencies): MemoryCommandDefinition {
+/** 列表摘要长度上限：超过则截断并加省略号（spec 钉死的输出格式）。 */
+const MEMORY_LIST_SUMMARY_LIMIT = 60
+
+/** 列表摘要：空白折叠为单空格并 trim，超 60 个 code point 截断加 `…`。 */
+function summarizeMemoryText(text: string): string {
+  const collapsed = text.replace(/\s+/g, ' ').trim()
+  const codePoints = [...collapsed]
+  return codePoints.length > MEMORY_LIST_SUMMARY_LIMIT
+    ? `${codePoints.slice(0, MEMORY_LIST_SUMMARY_LIMIT).join('')}…`
+    : collapsed
+}
+
+/** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，绝不出现 `undefined`。 */
+function renderValue(value: unknown): string {
+  if (value === null || value === undefined) return '(空)'
+  const text = String(value)
+  return text === '' ? '(空)' : text
+}
+
+/** 详情里的 `text`：内容照旧，但把换行转义，避免破坏「每行一个字段」的钉死格式。 */
+function renderSingleLine(value: unknown): string {
+  return renderValue(value).replace(/\r/g, '\\r').replace(/\n/g, '\\n')
+}
+
+/** 详情里的字符串数组：NULL → `(空)`；空数组 → `[]`；否则 `[a, b]`。 */
+function renderRefs(refs: readonly string[] | null | undefined): string {
+  if (refs === null || refs === undefined) return '(空)'
+  return refs.length === 0 ? '[]' : `[${refs.join(', ')}]`
+}
+
+/**
+ * 列表渲染（spec 钉死格式）：
+ * - 空库（无关键词）→ `暂无记忆。`；有关键词但无命中 → `没有匹配「<关键词>」的记忆。`；
+ * - 有命中的首行恒为 `记忆列表（共 N 条，最近优先）：`——spec 的「输出格式钉死（可断言）」
+ *   枚举了列表首行的三种形态，其中不带关键词的变体，故不回显关键词；
+ *   命中行本身都含该关键词（大小写不敏感匹配的后果），「成功文案含该关键词」由命中内容满足。
+ *   其后每行 `- <id> [<layer>] <text摘要>`。
+ */
+function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: string | undefined): string {
+  if (entries.length === 0) {
+    return query === undefined ? '暂无记忆。' : `没有匹配「${query}」的记忆。`
+  }
+  return [
+    `记忆列表（共 ${entries.length} 条，最近优先）：`,
+    ...entries.map((entry) => `- ${entry.id} [${entry.layer}] ${summarizeMemoryText(entry.text)}`),
+  ].join('\n')
+}
+
+/**
+ * 详情渲染（spec 钉死格式）：首行 `记忆 <id>：`，其后按 AC 字段顺序每行 `<字段>: <值>`。
+ * 不回显 `embedding` 向量列（体积与可读性）。
+ */
+function renderMemoryDetail(detail: MemoryCommandDetail): string {
+  return [
+    `记忆 ${detail.id}：`,
+    `layer: ${renderValue(detail.layer)}`,
+    `kind: ${renderValue(detail.kind)}`,
+    `priority: ${renderValue(detail.priority)}`,
+    `text: ${renderSingleLine(detail.text)}`,
+    `valid_at: ${renderValue(detail.validAt)}`,
+    `recorded_at: ${renderValue(detail.recordedAt)}`,
+    `invalid_at: ${renderValue(detail.invalidAt)}`,
+    `expired_at: ${renderValue(detail.expiredAt)}`,
+    `source_refs: ${renderRefs(detail.sourceRefs)}`,
+    `embedding_model_id: ${renderValue(detail.embeddingModelId)}`,
+  ].join('\n')
+}
+
+/** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
+export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '记录一条长期记忆（写入 L1 收件箱，后续精炼进知识图谱）',
-    input: { hint: '/memory remember <内容>' },
+    description: '记录与浏览长期记忆（remember / list / show）',
+    input: { hint: '/memory remember <内容> | list [关键词] | show <id>' },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
-        const parsed = parseRememberInput(invocation.rawInput)
-        if (parsed.kind === 'invalid') {
-          return { kind: 'error', text: MEMORY_REMEMBER_USAGE }
+        const parsed = parseMemoryCommand(invocation.rawInput)
+        if (parsed.kind === 'invalid') return { kind: 'error', text: parsed.usage }
+        switch (parsed.kind) {
+          case 'remember':
+            await deps.writeInbox(parsed.text)
+            return { kind: 'success', text: `已记住：${parsed.text}` }
+          case 'list': {
+            const input = parsed.query === undefined
+              ? { limit: MEMORY_LIST_DEFAULT_LIMIT }
+              : { query: parsed.query, limit: MEMORY_LIST_DEFAULT_LIMIT }
+            const entries = await deps.listMemories(input)
+            return { kind: 'success', text: renderMemoryList(entries, parsed.query) }
+          }
+          case 'show': {
+            const detail = await deps.getMemoryById(parsed.id)
+            if (!detail) return { kind: 'error', text: `未找到 id 为 ${parsed.id} 的记忆。` }
+            return { kind: 'success', text: renderMemoryDetail(detail) }
+          }
         }
-        await deps.writeInbox(parsed.text)
-        return { kind: 'success', text: `已记住：${parsed.text}` }
       } catch (error) {
         return { kind: 'error', text: errorText(error) }
       }
