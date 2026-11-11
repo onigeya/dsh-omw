@@ -37,6 +37,7 @@ const STATUS_BASE: MemoryStatusSnapshot = {
   failed: 0,
   embeddingMode: 'enabled',
   readonly: false,
+  auditGap: 0,
 }
 
 describe('parseMemoryCommand（status 分支）', () => {
@@ -82,6 +83,7 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'L1_INBOX: 3',
       'L2_INBOX: 0',
       'failed: 0',
+      'audit_gap: 0',
       'embedding: enabled',
       'readonly: false',
     ].join('\n'))
@@ -92,6 +94,12 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
     expect(text).toContain('embedding: disabled（降级检索）')
     expect(text).toContain('readonly: false')
     expect(text).not.toContain('embedding: enabled')
+  })
+
+  it('audit_gap 未知（审计表缺失）：显式标注而不是印 0', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, auditGap: null })
+    expect(text).toContain('audit_gap: 未知（审计表缺失）')
+    expect(text).not.toContain('audit_gap: 0')
   })
 
   it('enabled × 只读：原因逐字渲染', () => {
@@ -118,6 +126,7 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'L1_INBOX: 3',
       'L2_INBOX: 0',
       'failed: 0',
+      'audit_gap: 0',
       'embedding: disabled（降级检索）',
       "readonly: true, reason: 'another instance owns the writer lock'",
     ])

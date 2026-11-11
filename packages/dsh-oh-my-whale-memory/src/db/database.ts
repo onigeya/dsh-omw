@@ -34,6 +34,7 @@
  */
 import { stat } from 'node:fs/promises'
 import * as lbug from '@ladybugdb/core'
+import { ensureAuditTables } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import {
   META_KEYS,
@@ -263,6 +264,7 @@ async function initializeDatabase(
   await connection.query(createMetaTableStatement())
   await connection.query(createMemoryTableStatement(dim))
   await connection.query(createL0RawTableStatement())
+  await ensureAuditTables(connection)
 
   if (actualDim === null) {
     await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)

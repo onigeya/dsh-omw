@@ -22,9 +22,21 @@
  * 过滤/排序/截断全部在库侧完成，参数一律 prepare+execute 绑定，见文件末尾。
  */
 import type * as lbug from '@ladybugdb/core'
+import {
+  CAPTURE_KIND,
+  DEFAULT_CAPTURE_POLICY,
+  UPSERT_MEMORY_ACTION,
+  insertGenerationLog,
+  type MemoryActor,
+} from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
+import { collectRows, queryAll } from './rows.js'
 import { MEMORY_TABLE } from './schema.js'
+import { runInTransaction } from './transaction.js'
+
+/** 行归一 helper 已移到 ./rows.ts（审计层同样要用，避免模块环）；这里保留同名 re-export 不动既有导入面。 */
+export { queryAll } from './rows.js'
 
 export type MemoryConnection = lbug.Connection
 
@@ -57,6 +69,8 @@ export interface UpsertMemoryInput {
   recordedAt?: string
   /** 来源引用（消息 id / 卡片 id），默认 []。 */
   sourceRefs?: readonly string[]
+  /** 发起写入的主体（AD-21 三档），只进 generation_log 的 actor 列，不参与节点指纹；缺省 system。 */
+  actor?: MemoryActor
 }
 
 export interface UpsertMemoryResult {
@@ -96,21 +110,29 @@ const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
 ].join('')
 
 /**
- * 单条 query()/execute() 结果归一为行数组：LadybugDB 只在多语句时才返回数组
- * （见 node_modules/@ladybugdb/core/lbug.d.ts:250/287），本层一律只取第一条结果集。
- * 抽成单一 helper——"多语句返回数组"这条非显然规则只在一处陈述，写查询与写节点不各自复制。
+ * 写入/合并一条记忆，并在**同一事务**内追加一条溯源行（AD-10）。
+ * 返回节点 id 与最终 recorded_at。
  */
-async function collectRows(result: lbug.QueryResult | lbug.QueryResult[]): Promise<Record<string, unknown>[]> {
-  const first = Array.isArray(result) ? result[0]! : result
-  return (await first.getAll()) as Record<string, unknown>[]
-}
-
-export async function queryAll(connection: MemoryConnection, statement: string): Promise<Record<string, unknown>[]> {
-  return collectRows(await connection.query(statement))
-}
-
-/** 写入/合并一条记忆。返回节点 id 与最终 recorded_at。 */
 export async function upsertMemory(
+  connection: MemoryConnection,
+  input: UpsertMemoryInput,
+  options?: { now?: () => Date },
+): Promise<UpsertMemoryResult> {
+  return runInTransaction(connection, () => writeMemoryVersion(connection, input, options))
+}
+
+/**
+ * 在**调用方已开启的事务**内写入一次记忆版本：MERGE 节点 + 追加 generation_log 溯源行。
+ *
+ * 单独导出是因为 AD-10 的置序要求（先写从属记录、后写指针/发布点）只对**多步**操作有
+ * 意义：L1→L2 精炼、版本替换、级联作废等下游路径要在自己的事务里把本步骤与其它从属写
+ * 放在一起。闭环写路径（upsertMemory）只是它包一层事务的退化情形。
+ *
+ * 记账行只承载 id / 引用 / 策略 / 结果枚举——**绝不写记忆原文、向量或任何凭据**（NFR9）。
+ * 行时间用本次**操作时间**，不是节点最终 recorded_at：同指纹二次写入时节点保留更早的
+ * recorded_at，而账本记的是「这次操作发生在何时」。
+ */
+export async function writeMemoryVersion(
   connection: MemoryConnection,
   input: UpsertMemoryInput,
   options?: { now?: () => Date },
@@ -149,6 +171,17 @@ export async function upsertMemory(
   if (!row) {
     throw new MemoryDbError('db_open_failed', `记忆写入未返回结果（id=${id}）：${JSON.stringify(input.sourceRefs ?? [])}`)
   }
+  // AD-10 置序：节点的 source_refs 是「从属记录」、随上面的 MERGE 一起落齐；本行是同
+  // 一事务里的账目追加。写日志失败 → 引擎回滚整个事务，节点也留不下。
+  await insertGenerationLog(connection, {
+    recordedAt: now.toISOString(),
+    actor: input.actor ?? 'system',
+    kind: CAPTURE_KIND,
+    action: UPSERT_MEMORY_ACTION,
+    policy: DEFAULT_CAPTURE_POLICY,
+    l0Refs: sourceRefs,
+    outcome: 'success',
+  })
   return { id: String(row.id), recordedAt: String(row.recorded_at) }
 }
 

@@ -44,6 +44,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveRuntimeConfig } from './config.js'
+import { computeAuditGap } from './db/audit.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
@@ -166,7 +167,7 @@ export async function apply(
     }
     // Epic 1 无 embedding 客户端：三列 embedding/embedding_model_id/embedding_dim
     // 同落 NULL（不写零向量污染 HNSW cosine 索引），Story 2.3 引入客户端后回填。
-    await db.upsertMemory({ layer: 'L1_INBOX', text, embedding: null, embeddingModelId: null })
+    await db.upsertMemory({ layer: 'L1_INBOX', text, embedding: null, embeddingModelId: null, actor: 'user' })
   }
   // Story 1.8：读 dep 与写 dep 一样惰性——注册发生在建库之前，闭包在 handler 被调用时
   // 才读 `db`。库未就绪时 throw，由命令层收敛为 error 结果，绝不静默返回空列表。
@@ -184,6 +185,7 @@ export async function apply(
   // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
   const getStatus = async (): Promise<MemoryStatusSnapshot> => {
     const counts = await countMemoriesByLayer(readConnection().connection)
+    const auditGap = await computeAuditGap(readConnection().connection)
     return {
       layers: { L1: counts.L1, L2: counts.L2 },
       inboxes: { L1: counts.L1_INBOX, L2: counts.L2_INBOX },
@@ -191,6 +193,7 @@ export async function apply(
       embeddingMode: resolved.embeddingMode,
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
+      auditGap,
     }
   }
   const commandDependencies: MemoryCommandDependencies = {

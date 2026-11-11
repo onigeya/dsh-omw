@@ -251,4 +251,30 @@ describe('memory_remember 工具（Story 1.6）', () => {
     expect(failedText[0].text).toContain('db_unavailable')
     expect(failedText[0].text).toContain('retryable=false')
   })
+
+  it('工具写路径的溯源行 actor=agent，kind/action/outcome 与节点写入一致（Story 1.10 / AD-10）', async () => {
+    const before = await queryAll(
+      store.connection,
+      "MATCH (g:generation_log) WHERE g.actor = 'agent' RETURN count(g) AS total",
+    )
+    const value = await tool.execute({ content: '工具溯源行 actor 用例' })
+    expect(value.action).toBe('stored')
+
+    const after = await queryAll(
+      store.connection,
+      "MATCH (g:generation_log) WHERE g.actor = 'agent' RETURN count(g) AS total",
+    )
+    expect(Number(after[0]!['total'])).toBe(Number(before[0]!['total']) + 1)
+
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (g:generation_log) WHERE g.actor = 'agent' RETURN g.kind AS kind, g.action AS action, g.outcome AS outcome",
+    )
+    expect(rows.length).toBeGreaterThan(0)
+    for (const row of rows) {
+      expect(row['kind']).toBe('capture')
+      expect(row['action']).toBe('upsert_memory')
+      expect(row['outcome']).toBe('success')
+    }
+  })
 })

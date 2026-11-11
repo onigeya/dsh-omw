@@ -18,6 +18,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
 import type { UpsertMemoryResult } from '../db/memory.js'
+import type { MemoryActor } from '../db/audit.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
 export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
@@ -46,6 +47,7 @@ export interface MemoryRememberStore {
     layer: string
     text: string
     sourceRefs?: readonly string[]
+    actor?: MemoryActor
   }): Promise<UpsertMemoryResult>
 }
 
@@ -162,6 +164,7 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
         const context = args.context?.trim()
         const result = await store.upsertMemory({
           layer: MEMORY_REMEMBER_LAYER,
+          actor: 'agent',
           text: args.content,
           sourceRefs: context === undefined || context.length === 0 ? [] : [context],
         })

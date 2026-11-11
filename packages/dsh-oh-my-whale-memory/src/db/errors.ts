@@ -23,6 +23,7 @@ export type MemoryDbErrorCode =
   | 'readonly_mode'
   | 'db_unavailable'
   | 'db_write_failed'
+  | 'audit_record_missing'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode

@@ -97,7 +97,11 @@ async function setTombstone(column: 'invalid_at' | 'expired_at', id: string, at:
   await queryAll(connection, `MATCH (m:memory) WHERE m.id = '${id}' SET m.${column} = '${at}' RETURN m.id AS id`)
 }
 
-function statusText(overrides: Partial<Record<string, number>> = {}): string {
+/** auditGap 缺省 1：主夹具里那条 L1 墓碑没有 keyed 裁决记录（AD-21 的差额）。 */
+function statusText(
+  overrides: Partial<Record<string, number>> = {},
+  auditGap: number = 1,
+): string {
   return [
     '记忆状态',
     `L1: ${overrides.L1 ?? 3}`,
@@ -105,6 +109,7 @@ function statusText(overrides: Partial<Record<string, number>> = {}): string {
     `L1_INBOX: ${overrides.L1_INBOX ?? 3}`,
     `L2_INBOX: ${overrides.L2_INBOX ?? 0}`,
     'failed: 0',
+    `audit_gap: ${auditGap}`,
     'embedding: enabled',
     'readonly: false',
   ].join('\n')
@@ -175,7 +180,7 @@ describe('AC4：空库不是「库未就绪」', () => {
     const result = await registeredDefs[0]!.handler({ rawInput: ' status' })
 
     expect(result.kind).toBe('success')
-    expect(result.text).toBe(statusText({ L1: 0, L2: 0, L1_INBOX: 0 }))
+    expect(result.text).toBe(statusText({ L1: 0, L2: 0, L1_INBOX: 0 }, 0))
     expect(result.text).not.toContain('记忆库未就绪')
   }, 30_000)
 })
@@ -318,6 +323,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'L1_INBOX: 1',
         'L2_INBOX: 0',
         'failed: 0',
+        // 只读实例只读到既有三表，审计表不在（夹具不建）→ 差额不可用。
+        'audit_gap: 未知（审计表缺失）',
         'embedding: enabled',
         `readonly: true, reason: '${READONLY_REASON}'`,
       ].join('\n'))
