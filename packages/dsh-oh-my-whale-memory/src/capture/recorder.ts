@@ -18,11 +18,26 @@ import { trackInboxBackgroundTask } from '../inbox/consumer.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import { writeInboxItem } from '../inbox/queue.js'
 import { createStepCounter, type StepCounter } from './step-counter.js'
-import { listSnapshots, removeSnapshot, writeSnapshot } from './snapshot-store.js'
+import { cleanStaleSnapshotTemps, listSnapshots, removeSnapshot, writeSnapshot } from './snapshot-store.js'
 import { renderTranscript, sessionMessages } from './transcript.js'
 
 /** 宿主合成、非 live 发射的 turn/end：不是真实轮末，跳过（Spec Change Log 第 1 条）。 */
 const SYNTHETIC_TURN_END = ['interrupted', 'forked']
+
+/**
+ * 宿主 SessionEvent 的形状是 { type, seq, time, data }（宿主 packages/core/session/src/types.ts:501-508，
+ * 官方范例读 event.data.stream 见 docs/cookbook/extension-cookbook.md:79-86）：payload 在 **data** 里，
+ * 读顶层字段会静默拿到 undefined（2026-11-11 评审 T1）。这里不做顶层回退，回退会让回归钉失效。
+ */
+function eventPayload(event: unknown): Record<string, unknown> {
+  const data = (event as { readonly data?: unknown } | null | undefined)?.data
+  return typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : {}
+}
+
+/** 空文本不是可采集事实：不写 L0、compaction 连快照也不落（评审 P5）。 */
+function hasText(text: string): boolean {
+  return text.trim().length > 0
+}
 
 export interface CaptureRecorderOptions {
   /** 惰性取连接：建库完成前为 null（那一次采集直接放弃，不抛）。 */
@@ -57,7 +72,7 @@ interface CaptureEntry {
 export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureRecorder {
   const now = options.now ?? (() => new Date())
   const steps: StepCounter = createStepCounter({ limit: options.captureSteps })
-  /** 每会话已采集的最大 turn：turn 号单调，故 turn <= 已采集值即重复（每轮至多一次）。 */
+  /** 每会话**落库成功**的最大 turn：turn 号单调，故 turn <= 该值即重复（每轮至多一次，评审 P4）。 */
   const lastTurn = new Map<string, number>()
   const warn = (message: string): void => {
     options.logger?.warn(message)
@@ -107,21 +122,32 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
 
   return {
     recordStepEnd(session, event) {
-      const data = event as { readonly turn?: unknown; readonly step?: unknown } | null | undefined
+      const payload = eventPayload(event)
       const sessionId = inboxSessionKey(session)
       if (!steps.recordStep(sessionId)) return
-      const ref = String(data?.turn ?? '?') + ':' + String(data?.step ?? '?')
-      background(persist(entryFor('step', session, ref)), 'step/end')
+      const ref = String(payload.turn ?? '?') + ':' + String(payload.step ?? '?')
+      const entry = entryFor('step', session, ref)
+      if (!hasText(entry.text)) {
+        warn('step/end 采集跳过：会话文本为空（' + entry.sessionId + ' @ ' + ref + '）')
+        return
+      }
+      background(persist(entry), 'step/end')
     },
 
     recordCompactionStart(session, event) {
-      const data = event as { readonly compactionId?: unknown; readonly turn?: unknown } | null | undefined
+      const payload = eventPayload(event)
       const sessionId = inboxSessionKey(session)
       steps.reset(sessionId)
-      const ref = typeof data?.compactionId === 'string' && data.compactionId.length > 0
-        ? data.compactionId
-        : 'turn-' + String(data?.turn ?? 'manual')
+      const compactionId = payload.compactionId
+      const ref = typeof compactionId === 'string' && compactionId.length > 0
+        ? compactionId
+        : 'turn-' + String(payload.turn ?? 'manual')
       const entry = entryFor('compaction', session, ref)
+      if (!hasText(entry.text)) {
+        // P5：空文本连快照也不落，否则会造出「重放也写不出内容」的空孤儿。
+        warn('compaction/start 采集跳过：会话文本为空（' + entry.sessionId + ' @ ' + ref + '）')
+        return
+      }
       try {
         // 同步路径：entryFor 已取完文本（deriveMessages 同步缓存），这里只落文件。
         const file = writeSnapshot(options.snapshotDir, {
@@ -146,17 +172,22 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     },
 
     recordTurnEnd(session, event) {
-      const data = event as { readonly turn?: unknown; readonly reason?: unknown } | null | undefined
+      const payload = eventPayload(event)
       const sessionId = inboxSessionKey(session)
-      const reason = data?.reason
+      const reason = payload.reason
       const reasonKind = typeof reason === 'string'
         ? reason
         : (reason as { readonly kind?: unknown } | null | undefined)?.kind
       if (typeof reasonKind === 'string' && SYNTHETIC_TURN_END.includes(reasonKind)) return
-      const turn = typeof data?.turn === 'number' && Number.isFinite(data.turn) ? data.turn : -1
+      const turn = typeof payload.turn === 'number' && Number.isFinite(payload.turn) ? payload.turn : -1
       const seen = lastTurn.get(sessionId)
       if (seen !== undefined && turn <= seen) return
-      lastTurn.set(sessionId, turn)
+      // P3：文本与 recorded_at 必须在 flush 之前取——flush 之后 deriveMessages 可能已被下一轮推进。
+      const entry = entryFor('turn', session, String(turn))
+      if (!hasText(entry.text)) {
+        warn('turn/end 采集跳过：会话文本为空（' + entry.sessionId + ' @ turn ' + turn + '）')
+        return
+      }
       steps.reset(sessionId)
       background((async () => {
         if (options.flush) {
@@ -167,12 +198,18 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
             warn('turn/end 采集前的 session flush 失败（继续采集）：' + errorText(error))
           }
         }
-        await persist(entryFor('turn', session, String(turn)))
+        await persist(entry)
+        // P4：只有落库成功才推进「已采集的最大 turn」——失败的内容会被下一次采集重新带上。
+        lastTurn.set(sessionId, Math.max(seen ?? turn, turn))
       })(), 'turn/end')
     },
 
     async replayOrphanSnapshots() {
-      const records = listSnapshots(options.snapshotDir)
+      // P10：启动扫描先清掉「写一半就崩掉」的临时文件；P8：畸形记录跳过 + warn + 保留文件。
+      cleanStaleSnapshotTemps(options.snapshotDir)
+      const records = listSnapshots(options.snapshotDir, (file, reason) => {
+        warn('孤儿快照跳过（' + reason + '）：' + file + '（保留文件待人工排查）')
+      })
       if (records.length === 0) return 0
       if (!options.connection()) {
         // 文件不是可丢弃的垃圾：留着下次启动再试，并留下可见信号（不然孤儿会静默堆着）。

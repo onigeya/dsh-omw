@@ -4,7 +4,7 @@
  * 关键前提（Lead 裁决）：同一快照必须算出同一 id，否则重放会造出第二条队列条目，
  * 同一段对话被精炼两次——本文件第二条用例把这一点钉死。
  */
-import { writeFileSync } from 'node:fs'
+import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCaptureRecorder } from '../src/capture/recorder'
@@ -123,5 +123,37 @@ describe('AC⑤：启动扫描孤儿快照并重放', () => {
     expect(replayed).toBe(0)
     expect(warn).toHaveBeenCalled()
     expect(await countL0('orph-4')).toBe(0)
+  })
+
+  it('P8：形态不合法的 .snap（kind 空 / 文件名不是 stableKey 的 sha1）跳过 + warn + 保留文件，L0 不增行', async () => {
+    const warn = vi.fn()
+    const p8Dir = join(dir, 'memory', 'capture-p8')
+    const recorder = makeRecorder({ snapshotDir: p8Dir, logger: { warn, info: () => {} } })
+    mkdirSync(p8Dir, { recursive: true })
+    const badKind = { ...recordFor('orph-bad1', 'c-bad1', 'x'), kind: '' }
+    writeFileSync(join(p8Dir, 'bad-kind.snap'), JSON.stringify(badKind), 'utf8')
+    const badName = recordFor('orph-bad2', 'c-bad2', 'x')
+    writeFileSync(join(p8Dir, 'bad-name.snap'), JSON.stringify(badName), 'utf8')
+
+    expect(await recorder.replayOrphanSnapshots()).toBe(0)
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(await countL0('orph-bad1')).toBe(0)
+    expect(await countL0('orph-bad2')).toBe(0)
+    // 文件必须原样保留（人工排查），只是不被当作可重放事实。
+    const kept = readdirSync(p8Dir).filter((name) => name.endsWith('.snap'))
+    expect(kept).toHaveLength(2)
+  })
+
+  it('P10：启动扫描清理陈旧 *.snap.tmp（幂等），不误删 .snap', async () => {
+    const p10Dir = join(dir, 'memory', 'capture-p10')
+    const recorder = makeRecorder({ snapshotDir: p10Dir })
+    mkdirSync(p10Dir, { recursive: true })
+    writeFileSync(join(p10Dir, 'half-written.snap.tmp'), '{"partial":', 'utf8')
+    writeSnapshot(p10Dir, recordFor('orph-p10', 'c-p10', 'x'))
+
+    expect(await recorder.replayOrphanSnapshots()).toBe(1)
+    expect(await countL0('orph-p10')).toBe(1)
+    expect(readdirSync(p10Dir).filter((name) => name.endsWith('.tmp'))).toHaveLength(0)
+    expect(await recorder.replayOrphanSnapshots()).toBe(0)
   })
 })

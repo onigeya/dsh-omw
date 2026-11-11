@@ -55,7 +55,7 @@ interface Harness {
 }
 
 /** apply 级最小 ctx：profileContext + commands + effect + tools.register + session/event 捕获。 */
-function makeCtx(profileDir: string): Harness {
+function makeCtx(profileDir: string, options: { readonly flush?: () => Promise<unknown> } = {}): Harness {
   const listeners: Array<(session: unknown, event: unknown) => void> = []
   const registeredDefs: MemoryCommandDefinition[] = []
   const disposers: Array<{ name: string | undefined; dispose: () => unknown }> = []
@@ -63,6 +63,8 @@ function makeCtx(profileDir: string): Harness {
   const warn = vi.fn()
   const ctx = {
     logger: { warn, info },
+    // P6：index.ts 用 ctx.sessions.flush 做 turn/end 的持久化屏障（真宿主由 inject 'sessions' 提供）。
+    sessions: options.flush ? { flush: options.flush } : undefined,
     get: (key: string) => {
       if (key === 'profileContext') return { dir: profileDir }
       if (key === 'commands') {
@@ -200,7 +202,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(listeners).toHaveLength(1)
 
     const session = { id: 'apply-capture', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
-    listeners[0](session, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+    listeners[0](session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
     await drainInboxBackgroundTasks()
 
     const stableKey = captureStableKey('turn', 'apply-capture', '1')
@@ -215,7 +217,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(inbox.status).toBe('pending')
 
     // 确定性 id + 每轮至多一次：同一 (session, turn) 再回放不新增第二行队列条目。
-    listeners[0](session, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+    listeners[0](session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
     await drainInboxBackgroundTasks()
     const rows = await queryAll(
       store.connection,
@@ -224,3 +226,31 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(rows).toHaveLength(1)
   }, 60_000)
 })
+
+  it('P6：turn/end 的采集在 flush 未结算前不落库，结算后才落库（屏障真的接在 collect 前）', async () => {
+    let release: () => void = () => {}
+    const barrier = new Promise<void>((resolve) => { release = resolve })
+    const flush = vi.fn(() => barrier)
+    const dir = await makeTempDir('omw-inbox-flush-')
+    const dbPath = resolveMemoryDbPath(dir)
+    await ensureMemoryDbDirectory(dbPath)
+    const store: MemoryDatabase = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL_ID })
+
+    // 注意：这里必须真的把 sessions.flush 接进 ctx —— 若 index.ts 查错服务名（例如只查 ctx.get('sessions')），
+    // 闭包会静默退化成 no-op，本用例就会在“结算后才有行”这一步之外失败。
+    const { ctx, listeners } = makeCtx(dir, { flush })
+    await plugin.apply(ctx, EMBEDDING_CONFIG)
+
+    const session = { id: 'apply-flush', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
+    listeners[0](session, { type: 'turn/end', seq: 70, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(flush).toHaveBeenCalledTimes(1)
+    const before = await queryAll(store.connection, "MATCH (l:l0_raw) WHERE l.actor = 'apply-flush' RETURN l.id AS id")
+    expect(before).toHaveLength(0)
+
+    release()
+    await drainInboxBackgroundTasks()
+    const after = await queryAll(store.connection, "MATCH (l:l0_raw) WHERE l.actor = 'apply-flush' RETURN l.id AS id")
+    expect(after).toHaveLength(1)
+  }, 60_000)

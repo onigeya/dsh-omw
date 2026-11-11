@@ -79,7 +79,10 @@ export interface InboxItemInput {
   readonly payload: string
   /** 归属会话 id（提升触发按会话聚合，Story 2.5 用）。 */
   readonly sessionId?: string
-  /** 七类分类之一，缺省空串。 */
+  /**
+   * 条目生产者的标签：Story 2.1 写采集来源（step|turn|compaction）；七类记忆 kind 是
+   * **写路径**（工具/命令）的合法域，精炼后由写路径决定节点 kind（评审 P7）。
+   */
   readonly kind?: string
   /** 入队时间，默认 now。 */
   readonly now?: Date

@@ -109,11 +109,11 @@ describe('Story 2.1：三钩子采集分派', () => {
       },
     })
 
-    handle({ id: 's1' }, { type: 'step/end', turn: 1, step: 2 })
-    handle({ id: 's1' }, { type: 'compaction/start', compactionId: 'c1', turn: null })
+    handle({ id: 's1' }, { type: 'step/end', seq: 1, time: 0, data: { turn: 1, step: 2 } })
+    handle({ id: 's1' }, { type: 'compaction/start', seq: 2, time: 0, data: { compactionId: 'c1', turn: null } })
     handle({ id: 's1' }, { type: 'turn/start', turn: 1 })
     expect(gate.isIdle()).toBe(false)
-    handle({ id: 's1' }, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+    handle({ id: 's1' }, { type: 'turn/end', seq: 3, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
 
     expect(calls).toEqual(['step', 'compaction', 'turn'])
     expect(idleAtTurnEnd).toBe(true)
@@ -130,7 +130,7 @@ describe('Story 2.1：三钩子采集分派', () => {
     expect(calls).toEqual([])
 
     const plain = createSessionEventHandler({ gate, promotion })
-    expect(() => plain({ id: 's2' }, { type: 'step/end', turn: 1, step: 1 })).not.toThrow()
-    expect(() => plain({ id: 's2' }, { type: 'compaction/start', turn: null })).not.toThrow()
+    expect(() => plain({ id: 's2' }, { type: 'step/end', seq: 4, time: 0, data: { turn: 1, step: 1 } })).not.toThrow()
+    expect(() => plain({ id: 's2' }, { type: 'compaction/start', seq: 5, time: 0, data: { turn: null } })).not.toThrow()
   })
 })
