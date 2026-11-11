@@ -1,14 +1,15 @@
 /**
- * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show`）。
+ * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show` / Story 1.9 `status`）。
  *
  * 命令定义是可脱离宿主单测的纯工厂：解析与错误收敛不依赖 ctx。handler 只读
  * `invocation.rawInput`，把任何读/写库异常收敛为 `{ kind: 'error', text }`——命令
  * 永不抛出（宿主契约：thrown handler 会以 `kind: 'error'` 收尾，见 commands.md:172）。
  *
- * 三个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
+ * 四个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
  * - `remember <内容>`：写入 L1_INBOX（Story 1.7，行为与文案不变）；
  * - `list [关键词]`：最近的记忆（文本包含匹配、`recorded_at` 倒序、默认 20 条）；
- * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）。
+ * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）；
+ * - `status`：层计数 + failed + embedding 降级 + 只读降级（Story 1.9，无参、纯读、无 LLM/网络）。
  *
  * `list [关键词]` 是**字面包含匹配**（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
  * 过滤、排序、截断都由 db 层在库侧完成，命令层只做渲染。
@@ -26,6 +27,8 @@ export const MEMORY_REMEMBER_SUBCOMMAND = 'remember'
 export const MEMORY_LIST_SUBCOMMAND = 'list'
 /** `show` 子命令：按 id 取一条记忆的完整字段。 */
 export const MEMORY_SHOW_SUBCOMMAND = 'show'
+/** `status` 子命令：记忆规模与运行态（Story 1.9）。 */
+export const MEMORY_STATUS_SUBCOMMAND = 'status'
 
 /**
  * `list` 默认返回条数。
@@ -57,7 +60,15 @@ export const MEMORY_SHOW_USAGE = [
   '查看一条记忆的完整字段（含已失效记忆）。id 取自 /memory list 的输出。',
 ].join('\n')
 
-/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show 三条）。 */
+/**
+ * `status` 子命令的 usage（spec 钉死值：`/memory status`）。
+ *
+ * `status` 无参数：解析到多余 payload 时返回本常量作为错误正文（不静默忽略输入），
+ * 但**不回显**用户输入的 payload——错误正文恒为命令形态本身。
+ */
+export const MEMORY_STATUS_USAGE = '/memory status'
+
+/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status 四条）。 */
 export const MEMORY_COMMAND_USAGE = [
   '用法：/memory <子命令>',
   '',
@@ -66,6 +77,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_LIST_USAGE,
   '',
   MEMORY_SHOW_USAGE,
+  '',
+  MEMORY_STATUS_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -115,6 +128,29 @@ export interface MemoryCommandDetail {
   readonly embeddingModelId: string | null
 }
 
+/**
+ * `/memory status` 的运行态快照（Story 1.9）。命令层不 import db 模块，形状在此镜像——
+ * 计数事实源是 `memory` 表的 `layer` 列（db 层 `countMemoriesByLayer`）。
+ *
+ * `failed` 在 Epic 1 恒为 0：库内没有任何失败存储（`schema.ts` 只有 memory / l0_raw /
+ * omw_meta），PRD 的条目状态机属 Epic 2 Story 2.2。本 story 只放占位，2.2 建队列后由
+ * 真实计数替换——别把这个字段读成「系统健康」。
+ */
+export interface MemoryStatusSnapshot {
+  /** L1 / L2 计数（按全部行聚合，不套失效过滤）。 */
+  readonly layers: { readonly L1: number; readonly L2: number }
+  /** 两路 INBOX 的排队量。 */
+  readonly inboxes: { readonly L1: number; readonly L2: number }
+  /** 失败条目计数（Epic 1 恒 0——无失败存储）。 */
+  readonly failed: number
+  /** embedding 可用性：token 或 model 缺失即 'disabled'（降级检索）。 */
+  readonly embeddingMode: 'enabled' | 'disabled'
+  /** 本窗口是否降级只读（写者锁被另一实例持有）。 */
+  readonly readonly: boolean
+  /** 只读原因，逐字取 `READONLY_REASON`；非只读时缺省。 */
+  readonly readonlyReason?: string
+}
+
 /** 命令依赖（由 `src/index.ts` 惰性绑定到库句柄；读路径不得在库未就绪时静默返回空）。 */
 export interface MemoryCommandDependencies {
   /** 把一条文本写入 L1_INBOX；抛错由 handler 收敛为 error 结果。 */
@@ -123,13 +159,16 @@ export interface MemoryCommandDependencies {
   listMemories(input: { readonly query?: string; readonly limit: number }): Promise<readonly MemoryCommandListEntry[]>
   /** 按 id 取详情；不存在返回 null（不是抛错）。 */
   getMemoryById(id: string): Promise<MemoryCommandDetail | null>
+  /** 读层计数与运行态（Story 1.9）；抛错由 handler 收敛为 error 结果。 */
+  getStatus(): Promise<MemoryStatusSnapshot>
 }
 
-/** 解析结果：三个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
+/** 解析结果：四个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
 export type MemoryCommandParseResult =
   | { kind: 'remember', text: string }
   | { kind: 'list', query?: string }
   | { kind: 'show', id: string }
+  | { kind: 'status' }
   | { kind: 'invalid', usage: string }
 
 /**
@@ -137,6 +176,7 @@ export type MemoryCommandParseResult =
  * - `remember` → 其余 trim 后为 payload；payload 为空给 `MEMORY_REMEMBER_USAGE`；
  * - `list` → 其余 trim 后为可选关键词（可为空，表示不过滤）；
  * - `show` → 其余 trim 后为 id；为空给 `MEMORY_SHOW_USAGE`；
+ * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
@@ -153,6 +193,8 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return payload ? { kind: 'list', query: payload } : { kind: 'list' }
     case MEMORY_SHOW_SUBCOMMAND:
       return payload ? { kind: 'show', id: payload } : { kind: 'invalid', usage: MEMORY_SHOW_USAGE }
+    case MEMORY_STATUS_SUBCOMMAND:
+      return payload ? { kind: 'invalid', usage: MEMORY_STATUS_USAGE } : { kind: 'status' }
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -231,12 +273,32 @@ function renderMemoryDetail(detail: MemoryCommandDetail): string {
   ].join('\n')
 }
 
+/**
+ * 状态渲染（spec「输出格式钉死（可断言）」逐行照抄）：
+ * 首行 `记忆状态`，其后固定顺序的 `键: 值` 行，计数为十进制。
+ *
+ * 非降级也显式打印 `embedding: enabled` 与 `readonly: false`——「不静默 no-op」要求降级
+ * 可见，显式打印非降级态让两种模式都可断言，也避免把「字段缺失」误读成健康。
+ */
+export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
+  return [
+    '记忆状态',
+    `L1: ${snapshot.layers.L1}`,
+    `L2: ${snapshot.layers.L2}`,
+    `L1_INBOX: ${snapshot.inboxes.L1}`,
+    `L2_INBOX: ${snapshot.inboxes.L2}`,
+    `failed: ${snapshot.failed}`,
+    snapshot.embeddingMode === 'disabled' ? 'embedding: disabled（降级检索）' : 'embedding: enabled',
+    snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
+  ].join('\n')
+}
+
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
 export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '记录与浏览长期记忆（remember / list / show）',
-    input: { hint: '/memory remember <内容> | list [关键词] | show <id>' },
+    description: '记录与浏览长期记忆（remember / list / show / status）',
+    input: { hint: '/memory remember <内容> | list [关键词] | show <id> | status' },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
         const parsed = parseMemoryCommand(invocation.rawInput)
@@ -256,6 +318,10 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
             const detail = await deps.getMemoryById(parsed.id)
             if (!detail) return { kind: 'error', text: `未找到 id 为 ${parsed.id} 的记忆。` }
             return { kind: 'success', text: renderMemoryDetail(detail) }
+          }
+          case 'status': {
+            const snapshot = await deps.getStatus()
+            return { kind: 'success', text: renderMemoryStatus(snapshot) }
           }
         }
       } catch (error) {

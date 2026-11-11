@@ -8,6 +8,7 @@
  *
  * Story 1.8：工厂改名 `createMemoryCommandDefinition` 并收 3 个 dep；
  * `invalid` 结果携带对应 usage（remember 缺内容仍是 `MEMORY_REMEMBER_USAGE`）。
+ * Story 1.9：dep 增至 4 个（新增 `getStatus`），子命令增至 4 个（新增 `status`）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -20,12 +21,19 @@ import {
   type MemoryCommandDependencies,
 } from '../src/command'
 
-/** 三个 dep 都能被单测替换；未覆盖的读 dep 给默认空实现。 */
+/** 四个 dep 都能被单测替换；未覆盖的读 dep 给默认空实现。 */
 function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCommandDependencies {
   return {
     writeInbox: async () => {},
     listMemories: async () => [],
     getMemoryById: async () => null,
+    getStatus: async () => ({
+      layers: { L1: 0, L2: 0 },
+      inboxes: { L1: 0, L2: 0 },
+      failed: 0,
+      embeddingMode: 'enabled',
+      readonly: false,
+    }),
     ...overrides,
   }
 }
@@ -57,8 +65,9 @@ describe('parseMemoryCommand（remember 分支）', () => {
     expect(parseMemoryCommand('   \t\n ')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
   })
 
-  it("未知子命令 'status' → invalid + 总 usage（AC3）", () => {
-    expect(parseMemoryCommand(' status')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
+  it("' status' 不再是未知子命令（Story 1.9 起是真子命令）；' bogus' 仍是总 usage（AC3）", () => {
+    expect(parseMemoryCommand(' status')).toEqual({ kind: 'status' })
+    expect(parseMemoryCommand(' bogus')).toEqual({ kind: 'invalid', usage: MEMORY_COMMAND_USAGE })
   })
 
   it('子命令大小写敏感：REMEMBER 不算 remember', () => {
@@ -69,10 +78,11 @@ describe('parseMemoryCommand（remember 分支）', () => {
     expect(MEMORY_COMMAND_NAME).toBe('memory')
     expect(MEMORY_REMEMBER_SUBCOMMAND).toBe('remember')
     expect(MEMORY_REMEMBER_USAGE).toContain('/memory remember <内容>')
-    // 总 usage 必须同时给出三个子命令（Story 1.8）。
+    // 总 usage 必须同时给出四个子命令（Story 1.9 起含 status）。
     expect(MEMORY_COMMAND_USAGE).toContain('/memory remember <内容>')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory list [关键词]')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory show <id>')
+    expect(MEMORY_COMMAND_USAGE).toContain('/memory status')
   })
 })
 
@@ -82,13 +92,15 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
     expect(definition.name).toBe('memory')
     expect(typeof definition.description).toBe('string')
     expect(definition.description.length).toBeGreaterThan(0)
-    // Story 1.8：description / hint 必须同时反映三个子命令，否则文案回归无人发现。
+    // Story 1.8 / 1.9：description / hint 必须同时反映四个子命令，否则文案回归无人发现。
     expect(definition.description).toContain('remember')
     expect(definition.description).toContain('list')
     expect(definition.description).toContain('show')
+    expect(definition.description).toContain('status')
     expect(definition.input?.hint).toContain('/memory remember')
     expect(definition.input?.hint).toContain('list [关键词]')
     expect(definition.input?.hint).toContain('show <id>')
+    expect(definition.input?.hint).toContain('status')
   })
 
   it('有效输入：writeInbox 收到 payload，返回 success', async () => {
@@ -111,14 +123,32 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
     expect(result.text).toContain('memory remember')
   })
 
-  it('未知子命令：返回 usage error，不写库（AC3）', async () => {
+  it('status 走正常路径：调 getStatus 渲染状态，不写库（Story 1.9 改契约，不再 usage error）', async () => {
     const writeInbox = vi.fn(async () => {})
-    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox }))
+    const getStatus = vi.fn(async () => ({
+      layers: { L1: 2, L2: 1 },
+      inboxes: { L1: 3, L2: 0 },
+      failed: 0,
+      embeddingMode: 'enabled' as const,
+      readonly: false,
+    }))
+    const definition = createMemoryCommandDefinition(makeDeps({ writeInbox, getStatus }))
 
     const result = await definition.handler({ rawInput: ' status' })
+
+    expect(getStatus).toHaveBeenCalledTimes(1)
     expect(writeInbox).not.toHaveBeenCalled()
-    expect(result.kind).toBe('error')
-    expect(result.text).toContain('memory remember')
+    expect(result.kind).toBe('success')
+    expect(result.text).toBe([
+      '记忆状态',
+      'L1: 2',
+      'L2: 1',
+      'L1_INBOX: 3',
+      'L2_INBOX: 0',
+      'failed: 0',
+      'embedding: enabled',
+      'readonly: false',
+    ].join('\n'))
   })
 
   it('writeInbox 抛错 → 收敛为 error 结果而非抛出（AC4）', async () => {

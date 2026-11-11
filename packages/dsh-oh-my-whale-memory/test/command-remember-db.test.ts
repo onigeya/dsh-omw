@@ -1,7 +1,7 @@
 /**
  * `/memory remember` 命令落库集成测试（Story 1.7 / AC1-AC4 的库内部分）。
  *
- * 沿用 db-upsert.test.ts 范式：injectOpenSslPath → mkdtemp → 真实库（dim=4）。
+ * 沿用 db-upsert.test.ts 范式：mkdtemp → 真实库（dim=4）。
  * 用裸 ctx 驱动 apply，捕获交给 commands.register 的定义，再以
  * `{ rawInput: ' remember 我偏好 ESM 不要 CJS' }` 调 definition.handler，
  * 在最外层表面（命令返回值 + 落库事实）上验证：
@@ -14,7 +14,6 @@ import * as plugin from '../src/index'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { openMemoryDatabase } from '../src/db/database'
 import { queryAll, type MemoryConnection } from '../src/db/memory'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 import type { MemoryCommandDefinition, MemoryCommandInvocation } from '../src/command'
 
@@ -24,7 +23,6 @@ let connection: MemoryConnection
 let registered: MemoryCommandDefinition | undefined
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-command-')
   dbPath = resolveMemoryDbPath(dir)
 
@@ -97,10 +95,24 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     expect(Number(after[0]!['total'])).toBe(totalBefore)
   })
 
-  it('未知子命令 status：返回 usage error（AC3）', async () => {
+  it('status 走正常路径：真实库上返回 success 与四层计数（Story 1.9，不再是 usage error）', async () => {
+    // 本文件只写 L1_INBOX，故 L1 / L2 / L2_INBOX 恒 0；L1_INBOX 取实时计数保证与用例顺序无关。
+    const rows = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
+    const l1Inbox = Number(rows[0]!['total'])
+
     const result = await registered?.handler({ rawInput: ' status' })
-    expect(result?.kind).toBe('error')
-    expect(result?.text).toContain('memory remember')
+
+    expect(result?.kind).toBe('success')
+    expect(result?.text).toBe([
+      '记忆状态',
+      'L1: 0',
+      'L2: 0',
+      `L1_INBOX: ${l1Inbox}`,
+      'L2_INBOX: 0',
+      'failed: 0',
+      'embedding: enabled',
+      'readonly: false',
+    ].join('\n'))
   })
 
   it('空指纹文本：收敛为 error 而非抛出（AC4）', async () => {

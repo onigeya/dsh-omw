@@ -284,3 +284,63 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
     embeddingModelId: nullishToString(row.embedding_model_id),
   }
 }
+
+/**
+ * Story 1.9 读路径：`/memory status` 的层计数。
+ *
+ * 计数事实源只有 `memory` 表的 `layer` 列——Epic 1 无 INBOX 表、无 failed 存储
+ * （`schema.ts` 只有 memory / l0_raw / omw_meta），队列与状态机属 Epic 2 Story 2.2。
+ * 口径（spec Design Notes）：按 `layer` 聚合**全部行**，不套 `invalid_at` / `expired_at`
+ * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
+ *
+ * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
+ * 出现即说明有未登记的写路径，`layer` 取值收敛属 Story 1.11。
+ */
+export const COUNTED_MEMORY_LAYERS = ['L1', 'L2', 'L1_INBOX', 'L2_INBOX'] as const
+export type CountedMemoryLayer = (typeof COUNTED_MEMORY_LAYERS)[number]
+export type MemoryLayerCounts = Record<CountedMemoryLayer, number>
+
+/**
+ * 库侧聚合：一条语句同时给出四层，避免 4 次查询。
+ * 2026-11-11 实测 @ladybugdb/core 0.22.3 支持 `RETURN m.layer AS layer, count(m) AS total`
+ * （按非聚合投影列分组，`total` 为 number）。但聚合支持度属数据库实现细节，故仍保留
+ * `LIST_MEMORY_LAYERS_STATEMENT` 的 JS 侧退化路径——两条路径返回同一形状。
+ */
+const COUNT_MEMORIES_BY_LAYER_STATEMENT = `MATCH (m:${MEMORY_TABLE}) RETURN m.layer AS layer, count(m) AS total`
+const LIST_MEMORY_LAYERS_STATEMENT = `MATCH (m:${MEMORY_TABLE}) RETURN m.layer AS layer`
+
+/** 四个已知层的零值基座（缺省补 0，绝不出现 `undefined`）。 */
+function emptyMemoryLayerCounts(): MemoryLayerCounts {
+  return { L1: 0, L2: 0, L1_INBOX: 0, L2_INBOX: 0 }
+}
+
+function isCountedMemoryLayer(value: unknown): value is CountedMemoryLayer {
+  return typeof value === 'string' && (COUNTED_MEMORY_LAYERS as readonly string[]).includes(value)
+}
+
+/** 累加一个层计数：未知层与非有限 total 一律忽略（不生成未登记的口径）。 */
+function addLayerCount(counts: MemoryLayerCounts, layer: unknown, amount: number): void {
+  if (!isCountedMemoryLayer(layer)) return
+  if (!Number.isFinite(amount)) return
+  counts[layer] += amount
+}
+
+/**
+ * 按 `layer` 统计四个已知层的行数。**先探针**库侧聚合；聚合不可用时退化为
+ * `RETURN m.layer AS layer` + JS 侧 tally。两路径返回同一形状（已知层缺省补 0）。
+ * 只读：不写库、不加写语句。
+ */
+export async function countMemoriesByLayer(connection: MemoryConnection): Promise<MemoryLayerCounts> {
+  const counts = emptyMemoryLayerCounts()
+  let rows: Record<string, unknown>[]
+  try {
+    rows = await queryAll(connection, COUNT_MEMORIES_BY_LAYER_STATEMENT)
+  } catch {
+    // 库侧聚合不可用：退化为逐行取 layer，再在 JS 侧累加（同一返回形状）。
+    rows = await queryAll(connection, LIST_MEMORY_LAYERS_STATEMENT)
+    for (const row of rows) addLayerCount(counts, row.layer, 1)
+    return counts
+  }
+  for (const row of rows) addLayerCount(counts, row.layer, Number(row.total))
+  return counts
+}

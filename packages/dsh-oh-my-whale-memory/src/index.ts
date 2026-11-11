@@ -32,6 +32,11 @@
  * 一处 `register`）。两个读 dep 同样惰性绑定 `db.connection`——库未就绪时 throw 明确
  * 错误，由命令层收敛成 `{kind:'error'}`，绝不静默返回空列表。
  *
+ * Story 1.9：同一命令再扩展出 `status`（只读、无参）——层计数走 db 层
+ * `countMemoriesByLayer`（四条计数一条语句），运行态复用 `memoryRuntimeState()` 的
+ * readonly/reason，配置态用闭包捕获的 `resolved.embeddingMode`。仍是同一 definition、
+ * 同一 register 点，不新增 `ctx.effect`、不新增网络/LLM 调用（AC5）。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -43,11 +48,12 @@ import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
-import { getMemoryById as readMemoryById, listMemories as readMemories } from './db/memory.js'
+import { countMemoriesByLayer, getMemoryById as readMemoryById, listMemories as readMemories } from './db/memory.js'
 import {
   createMemoryCommandDefinition,
   type MemoryCommandDependencies,
   type MemoryCommandsRuntime,
+  type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool } from './tools/memory-remember.js'
 
@@ -72,6 +78,8 @@ export {
   MEMORY_REMEMBER_USAGE,
   MEMORY_SHOW_SUBCOMMAND,
   MEMORY_SHOW_USAGE,
+  MEMORY_STATUS_SUBCOMMAND,
+  MEMORY_STATUS_USAGE,
   createMemoryCommandDefinition,
   parseMemoryCommand,
 } from './command.js'
@@ -83,6 +91,7 @@ export type {
   MemoryCommandListEntry,
   MemoryCommandParseResult,
   MemoryCommandResult,
+  MemoryStatusSnapshot,
 } from './command.js'
 export {
   MEMORY_REMEMBER_LAYER,
@@ -147,6 +156,10 @@ export async function apply(
   // 自动挂 disposer），两者共用闭包可变量 `db`——库未就绪时命令给出明确错误、
   // 工具给出 db_unavailable，可用性不受 profile/建库问题牵连。
   let db: MemoryDatabase | undefined
+  // Story 1.9：本实例自身的只读态。模块级 `runtimeState` 只表示「最近一次成功 apply」，
+  // 同进程再次 apply 会让本实例的命令读到别的实例的锁结果，故 getStatus 只读这份局部值。
+  let instanceReadonly = false
+  let instanceReadonlyReason: string | undefined
   const writeL1Inbox = async (text: string): Promise<void> => {
     if (!db) {
       throw new Error('记忆库未就绪：无 profile 归属或建库未完成，当前无法写入 L1_INBOX')
@@ -166,10 +179,25 @@ export async function apply(
   const listMemories = (input: { query?: string; limit: number }) =>
     readMemories(readConnection().connection, input)
   const getMemoryById = (id: string) => readMemoryById(readConnection().connection, id)
+  // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
+  // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
+  // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
+  const getStatus = async (): Promise<MemoryStatusSnapshot> => {
+    const counts = await countMemoriesByLayer(readConnection().connection)
+    return {
+      layers: { L1: counts.L1, L2: counts.L2 },
+      inboxes: { L1: counts.L1_INBOX, L2: counts.L2_INBOX },
+      failed: 0,
+      embeddingMode: resolved.embeddingMode,
+      readonly: instanceReadonly,
+      readonlyReason: instanceReadonlyReason,
+    }
+  }
   const commandDependencies: MemoryCommandDependencies = {
     writeInbox: writeL1Inbox,
     listMemories,
     getMemoryById,
+    getStatus,
   }
   // 命令的 effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
   ctx.effect(
@@ -217,7 +245,11 @@ export async function apply(
     throw error
   }
 
-  runtimeState = { readonly: lock.mode === 'readonly', reason: lock.reason, dbPath }
+  const readonlyMode = lock.mode === 'readonly'
+  runtimeState = { readonly: readonlyMode, reason: lock.reason, dbPath }
+  // 本实例状态与模块级运行态同步；导出 memoryRuntimeState() 的语义不变（仍是最近一次成功 apply）。
+  instanceReadonly = readonlyMode
+  instanceReadonlyReason = lock.reason
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
   ctx.effect(() => () => db?.close(), 'omw-memory-db')

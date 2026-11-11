@@ -18,6 +18,21 @@ DSH 记忆插件 function 插件（cordis 模块名 `dsh-oh-my-whale-memory`，A
 - 本包 `scripts.test` 保留 `vitest run --root ../..`，便于 `pnpm -r test` 复用同一入口。
 - 理由：与宿主 deepseek-harness 惯例一致（单一 vitest 入口），避免每包重复安装 vitest。
 
+### Windows 前置条件：OpenSSL 3 必须在 PATH 里
+
+LadybugDB 的 `vector`/`fts` 扩展动态链接 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`，
+`pnpm` 不随 `@ladybugdb/core` 分发这两个 DLL；代码不做目录探测，**必须由 PATH 环境变量提供**
+（否则 `INSTALL vector` 报 `Failed to load library: ... libvector.lbug_extension`）。
+Git for Windows 的 `C:\Program Files\Git\mingw64\bin` 就带这两个 DLL，任何 OpenSSL 3 安装的 `bin` 亦可。
+
+- PowerShell / 直接启动 DSH 时（会话级）：`$env:Path = 'C:\Program Files\Git\mingw64\bin;' + $env:Path`，再 `pnpm test`
+- 永久生效（用户级；「系统属性 → 环境变量」GUI 亦可）：
+  `[Environment]::SetEnvironmentVariable('Path', [Environment]::GetEnvironmentVariable('Path','User') + ';C:\Program Files\Git\mingw64\bin', 'User')`
+- 本仓库的 MSYS bash **不把 `/c/...` 形式转成 Windows 形式**，所以要写 Windows 形式：
+  `export PATH='C:\Program Files\Git\mingw64\bin;'"$PATH"`，再 `pnpm test`
+
+DSH 宿主进程也必须继承这个 PATH——插件运行期 `INSTALL/LOAD vector|fts` 同样依赖它。
+
 ## Config（Story 1.3 / FR-18）
 
 Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
@@ -97,7 +112,7 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
   保留最早 `recorded_at`、不改 `text`。归一化后为空抛 `empty_fingerprint_text`。
 - **扩展是每进程装载**：索引持久化在库里，但 `QUERY_VECTOR_INDEX`/`QUERY_FTS_INDEX` 前必须先
   `INSTALL vector; LOAD vector; INSTALL fts; LOAD fts;`。Windows 上依赖 OpenSSL 3
-  （见 `test/openssl.ts` 的 `injectOpenSslPath()`）。
+  （`libssl-3-x64.dll` / `libcrypto-3-x64.dll`），必须由环境变量 PATH 提供，见下节。
 - **句柄生命周期**：`openMemoryDatabase` 在模块级 Map 中按绝对路径复用句柄；
   `close()`（facade.close）只回收门面对象、**不释放底层 OS 文件句柄**——Windows 上
   同进程 close 后立即重开同一库会拿不到文件锁（"Could not set lock ... Error: 33"），
@@ -128,7 +143,7 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
 - **描述护栏（FR-1）**：工具 description 明确要求只记长期事实、并显式排除
   ephemeral / transient content（当前任务进度、一次性中间结果、闲聊等）。
 
-## /memory 命令（Story 1.7 / 1.8）
+## /memory 命令（Story 1.7 / 1.8 / 1.9）
 
 代码在 `src/command.ts`（纯工厂 + 解析，不碰 ctx / 库）与 `src/index.ts`（`apply` 中接线）。
 
@@ -146,8 +161,15 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
   embedding_model_id），NULL 与空值渲染 `(空)`、空数组渲染 `[]`，不回显 embedding 向量。
   **有意非对称**：已失效（墓碑）记忆不在 `list` 里出现，但 `show <id>` 仍返回并展示
   `invalid_at` / `expired_at`。id 不存在时返回 `{ kind: 'error', text: '未找到 id 为 … 的记忆。' }`。
-- 无子命令 / 未知子命令（如 `/memory status`）→ usage 错误，正文见 `MEMORY_COMMAND_USAGE`
-  （同时给出 remember / list / show 三条用法）。
+- `/memory status`：只读打印记忆库基础状态，全部本地（不调 LLM、不发网络请求）。
+  正文逐行钉死：首行 `记忆状态`，随后 `L1: <n>` / `L2: <n>` / `L1_INBOX: <n>` / `L2_INBOX: <n>`、
+  `failed: <n>`（计数事实源只有 `memory` 表的 `layer` 列；Epic 1 尚无 failed 存储，
+  故 **`failed:` 恒 0**——`L1_INBOX` / `L2_INBOX` 是该表的 layer 取值，有真实计数）、
+  `embedding: enabled | disabled（降级检索）`（非降级也显式打印）、
+  `readonly: false | true, reason: '<原因>'`（只读实例标注 `another instance owns the writer lock`）。
+  `status` 带多余参数 → usage 错误且不查库；库未就绪 → 明确报错，绝不静默返回 0。
+- 无子命令 / 未知子命令（如 `/memory foo`）→ usage 错误，正文见 `MEMORY_COMMAND_USAGE`
+  （同时给出 remember / list / show / status 四条用法）。
 - **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /
   `embedding_dim` 三列同落 NULL（不写零向量——零向量会污染 HNSW，留待 Story 2.3 回填）。
   与工具直写共用同一条无向量路径；维度校验因此只在显式带向量时生效，非空且长度与库 pin

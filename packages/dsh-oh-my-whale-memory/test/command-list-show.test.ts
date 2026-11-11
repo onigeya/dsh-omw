@@ -25,6 +25,13 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
     writeInbox: async () => {},
     listMemories: async () => [],
     getMemoryById: async () => null,
+    getStatus: async () => ({
+      layers: { L1: 0, L2: 0 },
+      inboxes: { L1: 0, L2: 0 },
+      failed: 0,
+      embeddingMode: 'enabled',
+      readonly: false,
+    }),
     ...overrides,
   }
 }
@@ -276,15 +283,16 @@ describe('handler：usage 身份（矩阵行「详情缺参」「未知/暂无�
     expect(result).toEqual({ kind: 'error', text: MEMORY_SHOW_USAGE })
   })
 
-  it('未知子命令 → MEMORY_COMMAND_USAGE 原样作为 error text，且含三条子命令用法', async () => {
+  it('未知子命令 → MEMORY_COMMAND_USAGE 原样作为 error text，且含四条子命令用法', async () => {
     const definition = createMemoryCommandDefinition(makeDeps())
 
-    const result = await definition.handler({ rawInput: ' status' })
+    const result = await definition.handler({ rawInput: ' bogus' })
 
     expect(result).toEqual({ kind: 'error', text: MEMORY_COMMAND_USAGE })
     expect(MEMORY_COMMAND_USAGE).toContain('/memory remember <内容>')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory list [关键词]')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory show <id>')
+    expect(MEMORY_COMMAND_USAGE).toContain('/memory status')
   })
 })
 
