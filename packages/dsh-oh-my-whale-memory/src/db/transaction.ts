@@ -13,10 +13,27 @@
  *    per-connection promise 链串行化（src/ 没有别的写串行化设施）。
  * 3. DDL 同样在事务内、异常时一并回滚——一次迁移建两张表因此是 all-or-nothing。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type * as lbug from '@ladybugdb/core'
 
 /** 每个连接一条串行链，保证同一时刻至多一个显式事务。 */
 const writeChains = new WeakMap<object, Promise<unknown>>()
+
+/**
+ * 当前 async 链**已持有**的连接集合（Epic 1 复盘 A-2 的重入守卫）。
+ *
+ * 用 AsyncLocalStorage 而不是布尔标志：**并发**（非嵌套）的两次 runInTransaction 必须照旧
+ * 按调用顺序排队（见文件头第 2 条承诺），只有「同一 async 链内的嵌套」才是错误。
+ * 布尔标志会把 `Promise.all` 里的并发写误判成重入。
+ */
+const openTransactions = new AsyncLocalStorage<ReadonlySet<object>>()
+
+/** 在当前链持有的连接集合上追加 connection（不可变副本，互不污染）。 */
+function withConnection(held: ReadonlySet<object> | undefined, connection: object): ReadonlySet<object> {
+  const next = new Set<object>(held ?? [])
+  next.add(connection)
+  return next
+}
 
 /**
  * 在显式事务内执行 work：成功即 COMMIT 并返回其结果；work（或 COMMIT）抛错时回滚
@@ -28,16 +45,27 @@ const writeChains = new WeakMap<object, Promise<unknown>>()
  * upsertMemory）会让内层排在外层尚未结算的 promise 之后——外层 await 内层，内层的
  * BEGIN TRANSACTION 永远等不到，调用静默挂起。同一事务内的复合写入请直接用
  * writeMemoryVersion 这类「由调用方开事务」的原语。
+ *
+ * Epic 1 复盘 A-2：这条纪律**现在由代码强制**——同一 async 链内重入同步抛错，不再静默挂起。
  */
 export async function runInTransaction<T>(
   connection: lbug.Connection,
   work: () => Promise<T>,
 ): Promise<T> {
+  // 守卫必须在**同步**入口检查：放进 .then 回调里，内层仍会先排到外层尚未结算的 promise 之后，
+  // 又变成同一个静默挂起。抛普通 Error——不扩 MemoryDbErrorCode 封闭集。
+  const held = openTransactions.getStore()
+  if (held?.has(connection)) {
+    throw new Error(
+      'runInTransaction 不得重入：同一 async 链内嵌套事务会静默挂起（外层事务未结算，内层 BEGIN TRANSACTION 永远等不到）；' +
+      '同一事务内的复合写入请直接用「由调用方开事务」的原语（如 writeMemoryVersion）。',
+    )
+  }
   const previous = writeChains.get(connection) ?? Promise.resolve()
   const run = previous.then(async () => {
     await connection.query('BEGIN TRANSACTION')
     try {
-      const result = await work()
+      const result = await openTransactions.run(withConnection(held, connection), work)
       await connection.query('COMMIT')
       return result
     } catch (error) {

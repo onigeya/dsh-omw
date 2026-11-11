@@ -58,6 +58,27 @@ import {
   type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
+import { createInboxConsumer, type InboxConsumer } from './inbox/consumer.js'
+import { createIdleGate } from './inbox/idle-gate.js'
+import { createPromotionTracker } from './inbox/promotion-trigger.js'
+import { createSessionEventHandler } from './inbox/session-events.js'
+import {
+  INBOX_FAILED_VIEW_LIMIT,
+  countInboxByStatus,
+  listRecentFailedInboxItems,
+  reclaimExpiredLeases,
+} from './inbox/queue.js'
+
+/**
+ * `session/event` 宿主事件面（Story 2.2 / AD-6）。
+ *
+ * `turn/start` / `turn/end` 是宿主全局广播的会话事件（`docs/cookbook/extension-cookbook.md:79`）；
+ * 本插件不注入 `agents`/`sessions` 服务，事件名也不在本 Context 的类型化事件表里，故用一条
+ * 具名结构类型显式声明这处接线——不把整个 Context 断言成 any，也便于裸 ctx 单测里降级为不监听。
+ */
+interface SessionEventHost {
+  on?(event: 'session/event', listener: (session: unknown, event: unknown) => void): unknown
+}
 
 export { Config, resolveRuntimeConfig } from './config.js'
 export type { RuntimeConfig, ConfigShape } from './config.js'
@@ -165,6 +186,9 @@ export async function apply(
   // 同进程再次 apply 会让本实例的命令读到别的实例的锁结果，故 getStatus 只读这份局部值。
   let instanceReadonly = false
   let instanceReadonlyReason: string | undefined
+  // Story 2.2：后台 INBOX 消费者（只有写者实例会创建并启动）。声明在两个 ctx.effect 之前——
+  // db effect 的 disposer 在 dispose 时先停消费者再关库（不新增 effect，closer 数不变）。
+  let inboxConsumer: InboxConsumer | null = null
   // Story 1.11（AC2/AC3）：INBOX 采集写路径。层收敛为唯一枚举——写 `L1`
   // （= MEMORY_REMEMBER_LAYER），`L1_INBOX` 从此只是 INBOX 队列标识/表名，不是 memory.layer 取值。
   // 可选分类旗标（kind / priority，含 -1）在此透传到落库，与 memory_remember 同一条写路径。
@@ -199,12 +223,20 @@ export async function apply(
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
   // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
   const getStatus = async (): Promise<MemoryStatusSnapshot> => {
-    const counts = await countMemoriesByLayer(readConnection().connection)
-    const auditGap = await computeAuditGap(readConnection().connection)
+    const connection = readConnection().connection
+    const counts = await countMemoriesByLayer(connection)
+    const auditGap = await computeAuditGap(connection)
+    // Story 2.2 / AC4：failed 换成 l1_inbox 的真实计数；有条目才读明细（最近 5 条 + stale），
+    // 无失败时不追加任何行，status 既有输出逐字不变。队列表缺失照抛（可见错误，不静默报 0）。
+    const inboxCounts = await countInboxByStatus(connection)
+    const failedEntries = inboxCounts.failed > 0
+      ? await listRecentFailedInboxItems(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
+      : []
     return {
       layers: { L1: counts.L1, L2: counts.L2 },
       inboxes: { L1: counts.L1_INBOX, L2: counts.L2_INBOX },
-      failed: 0,
+      failed: inboxCounts.failed,
+      failedEntries,
       embeddingMode: resolved.embeddingMode,
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
@@ -270,7 +302,12 @@ export async function apply(
   instanceReadonlyReason = lock.reason
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
-  ctx.effect(() => () => db?.close(), 'omw-memory-db')
+  ctx.effect(() => () => {
+    // dispose 顺序：先停消费者（不再取队头、清掉待触发定时器），再关库。
+    inboxConsumer?.stop()
+    inboxConsumer = null
+    db?.close()
+  }, 'omw-memory-db')
   ctx.effect(() => () => lock.release(), 'omw-memory-writer-lock')
 
   if (lock.mode === 'readonly') {
@@ -291,4 +328,37 @@ export async function apply(
   }
 
   ctx.logger.info(`记忆库就绪：${dbPath}（dim=${embedding.dim}，model=${embedding.modelId}）`)
+
+  // Story 2.2：写者实例的最后一段接线（只读实例在上面已 return，不回收 lease、不启动消费者，AC7）。
+  // 1) 启动回收：processing 且 lease_until < now → pending（进程 kill -9 后的自愈，AC3）；
+  // 2) 空闲闸门由 session/event 的 turn/start~turn/end 驱动（AD-6）；
+  // 3) 消费者当前**没有**精炼处理器（Story 2.3 注入 ctx.llm）——按设计此时不取队头，
+  //    取队会丢条目或把未精炼的条目误标 done；本 story 只保证它被 apply 启动、dispose 停止；
+  // 4) 生命周期挂在既有 db effect 的 disposer 上，不新增 ctx.effect（entry-exports 钉死 closer 数）。
+  const idleGate = createIdleGate()
+  const promotionTracker = createPromotionTracker({
+    onTrigger: (trigger) => {
+      // AC6：「触发信号」在此可观测；L1→L2 批量提升本体是 Story 2.5。
+      ctx.logger.info(
+        `L1→L2 提升触发信号：${trigger.reason}（L1 累计 ${trigger.totalL1}，会话 ${trigger.sessionId}，` +
+        `kind ${trigger.kind}，同 kind ${trigger.sessionKindCount}）`,
+      )
+    },
+  })
+  const reclaimed = await reclaimExpiredLeases(db.connection)
+  if (reclaimed > 0) ctx.logger.info(`INBOX 过期 lease 回收：${reclaimed} 条回 pending`)
+  inboxConsumer = createInboxConsumer({
+    connection: () => db?.connection ?? null,
+    gate: idleGate,
+    promotion: promotionTracker,
+    logger: ctx.logger,
+  })
+  inboxConsumer.start()
+  // 裸 ctx（单测）没有 `on`：可选调用降级为不监听（消费者因闸门恒空闲而空转，无副作用）。
+  // 映射本体在 session-events.ts（可单测；写反了宿主级测试看不出来）。
+  const sessionEvents = ctx as unknown as SessionEventHost
+  sessionEvents.on?.(
+    'session/event',
+    createSessionEventHandler({ gate: idleGate, promotion: promotionTracker }),
+  )
 }

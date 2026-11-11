@@ -24,6 +24,7 @@ import {
   META_KEYS,
   SCHEMA_VERSION,
   createL0RawTableStatement,
+  createL1InboxTableStatement,
   createMemoryTableStatement,
   createMetaTableStatement,
 } from '../src/db/schema'
@@ -260,6 +261,8 @@ function buildReadonlyStatements(dim: number): string[] {
     createMetaTableStatement(),
     createMemoryTableStatement(dim),
     createL0RawTableStatement(),
+    // Story 2.2：/memory status 读 l1_inbox 的 failed 计数（缺表照抛），只读夹具必须带这张表。
+    createL1InboxTableStatement(),
     mergeMeta(META_KEYS.schemaVersion, SCHEMA_VERSION),
     mergeMeta(META_KEYS.embeddingDim, String(dim)),
     mergeMeta(META_KEYS.embeddingModelId, MODEL_ID),
@@ -323,7 +326,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'L1_INBOX: 1',
         'L2_INBOX: 0',
         'failed: 0',
-        // 只读实例只读到既有三表，审计表不在（夹具不建）→ 差额不可用。
+        // 只读实例的库缺审计表（夹具不建）→ 差额不可用；队列表在（Story 2.2 起 status 读它算 failed）。
         'audit_gap: 未知（审计表缺失）',
         'embedding: enabled',
         `readonly: true, reason: '${READONLY_REASON}'`,

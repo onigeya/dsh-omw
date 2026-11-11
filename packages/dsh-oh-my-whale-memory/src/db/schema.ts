@@ -65,6 +65,34 @@ export function createL0RawTableStatement(): string {
   return 'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, PRIMARY KEY(id))'
 }
 
+/**
+ * INBOX 队列表（Story 2.2 / AD-6、NFR7）：采集到的条目 FIFO 排队，lease 状态机自愈。
+ *
+ * 表名 `l1_inbox` 与既有五张表同一 snake_case 约定（epic 原文的 "L1_INBOX" 指的是**队列**
+ * 这个逻辑名；`memory.layer` 的历史取值 'L1_INBOX' 是另一回事，不同表不冲突）。
+ * 列语义见 src/inbox/queue.ts（状态机与 lease 的唯一实现处）。
+ */
+export const L1_INBOX_TABLE = 'l1_inbox'
+
+export function createL1InboxTableStatement(): string {
+  return [
+    'CREATE NODE TABLE IF NOT EXISTS ' + L1_INBOX_TABLE + ' (',
+    '  id STRING,',
+    '  session_id STRING,',
+    '  kind STRING,',
+    '  payload STRING,',
+    '  status STRING,',
+    '  attempts INT64,',
+    '  lease_owner STRING,',
+    '  lease_until STRING,',
+    '  enqueued_at STRING,',
+    '  updated_at STRING,',
+    '  last_error STRING,',
+    '  PRIMARY KEY(id)',
+    ')',
+  ].join('')
+}
+
 export function createMetaTableStatement(): string {
   return 'CREATE NODE TABLE IF NOT EXISTS omw_meta(key STRING, value STRING, PRIMARY KEY(key))'
 }

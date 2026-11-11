@@ -147,8 +147,13 @@ export interface MemoryStatusSnapshot {
   readonly layers: { readonly L1: number; readonly L2: number }
   /** 两路 INBOX 的排队量。 */
   readonly inboxes: { readonly L1: number; readonly L2: number }
-  /** 失败条目计数（Epic 1 恒 0——无失败存储）。 */
+  /** 失败条目计数（Story 2.2 起读 `l1_inbox` 的 failed 计数；表缺失照抛，不静默报 0）。 */
   readonly failed: number
+  /**
+   * 最近失败条目明细（最近 5 条，Story 2.2 / AC4）。空或缺省时**不追加任何行**，
+   * 既有 status 逐行输出保持不变。
+   */
+  readonly failedEntries?: readonly MemoryFailedEntry[]
   /** embedding 可用性：token 或 model 缺失即 'disabled'（降级检索）。 */
   readonly embeddingMode: 'enabled' | 'disabled'
   /** 本窗口是否降级只读（写者锁被另一实例持有）。 */
@@ -157,6 +162,20 @@ export interface MemoryStatusSnapshot {
   readonly readonlyReason?: string
   /** audit_gap 计数；null = 审计表缺失、算不出来（不静默报 0）。 */
   readonly auditGap: number | null
+}
+
+/**
+ * 死信明细（Story 2.2 / AC4）：只给计数不够定位，`/memory status` 追加最近的失败摘要。
+ * `stale` 由读侧（src/index.ts 的 getStatus，24h 基准）判定——渲染层保持纯函数。
+ */
+export interface MemoryFailedEntry {
+  readonly id: string
+  readonly kind: string
+  readonly attempts: number
+  readonly lastError: string | null
+  readonly updatedAt: string
+  /** true = 进入 failed 起已超过 24h 仍未被处理。 */
+  readonly stale: boolean
 }
 
 /** remember 的可选分类入参（FR-20，AC2：手动写路径也能产出非空 kind / 非 0 priority）。 */
@@ -348,7 +367,7 @@ function renderMemoryDetail(detail: MemoryCommandDetail): string {
  * 可见，显式打印非降级态让两种模式都可断言，也避免把「字段缺失」误读成健康。
  */
 export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
-  return [
+  const lines = [
     '记忆状态',
     `L1: ${snapshot.layers.L1}`,
     `L2: ${snapshot.layers.L2}`,
@@ -358,7 +377,19 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     `audit_gap: ${snapshot.auditGap ?? '未知（审计表缺失）'}`,
     snapshot.embeddingMode === 'disabled' ? 'embedding: disabled（降级检索）' : 'embedding: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
-  ].join('\n')
+  ]
+  // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
+  const entries = snapshot.failedEntries ?? []
+  if (entries.length > 0) {
+    lines.push('failed 最近条目:')
+    for (const entry of entries) {
+      lines.push(
+        `- ${entry.id} kind=${entry.kind} attempts=${entry.attempts}` +
+        `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
+      )
+    }
+  }
+  return lines.join('\n')
 }
 
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
