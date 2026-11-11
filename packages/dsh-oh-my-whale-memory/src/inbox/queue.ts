@@ -5,6 +5,8 @@
  * - 一条条目一行，状态机 pending → processing(lease) → done|failed；
  * - FIFO 顺序 = (enqueued_at ASC, id ASC)（时间列一律 UTC ISO-8601 字符串，可直接字典序比较）；
  * - lease_owner 记进程 id、lease_until 记 take 时刻 + 60s（AD-6）；
+ * - **lease_until 复用为「最早可取件时刻」（Story 2.3 / R3①）**：processing 行上它是 lease 到期时刻，
+ *   pending 行上它是**退避截止**——失败回 pending 时写 now + backoff(attempts)，取件谓词据此跳过未到期条目；
  * - 失败 attempts 累加，超过 INBOX_MAX_RETRIES 进 failed 死信（Q-4）。
  *
  * 取队头是「读队头 + 条件写 lease」两步，但**两条语句在同一个 runInTransaction 里**：
@@ -50,6 +52,14 @@ export const INBOX_FAILED_STALE_MS = 24 * 60 * 60 * 1000
 export const INBOX_FAILED_VIEW_LIMIT = 5
 /** last_error 落库长度上限：错误摘要，不是日志转储。 */
 export const INBOX_LAST_ERROR_MAX_CHARS = 500
+/**
+ * 失败退避基准（Story 2.3 / R3①）：第 n 次失败后最早可取件时刻 = now + min(5s × 2^(n-1), 120s)
+ * （§14 的 5–120s 指数退避）。退避落在 pending 行的 lease_until 上，不新增列。
+ */
+export const INBOX_BACKOFF_BASE_MS = 5_000
+export const INBOX_BACKOFF_MAX_MS = 120_000
+/** 启动回收写进 last_error 的固定说明（Story 2.3 / R3②）。 */
+export const INBOX_RECLAIM_ERROR = 'reclaimed after crash'
 
 export interface InboxItem {
   readonly id: string
@@ -116,6 +126,7 @@ const INSERT_ITEM = [
 const CLAIM_HEAD = [
   'MATCH (q:' + L1_INBOX_TABLE + ')',
   'WHERE q.status = $pending',
+  '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
   'RETURN ' + COLUMNS,
   'ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1',
 ].join(' ')
@@ -124,6 +135,7 @@ const CLAIM_HEAD = [
 const CLAIM_HEAD_AFTER = [
   'MATCH (q:' + L1_INBOX_TABLE + ')',
   'WHERE q.status = $pending',
+  '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
   '  AND (q.enqueued_at > $after_enqueued_at',
   '       OR (q.enqueued_at = $after_enqueued_at AND q.id > $after_id))',
   'RETURN ' + COLUMNS,
@@ -142,16 +154,16 @@ const CLAIM_MARK = [
 const READ_ONE = 'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id RETURN ' + COLUMNS
 
 const COMPLETE = [
-  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id',
+  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id AND q.status = $processing',
   'SET q.status = $done, q.lease_owner = null, q.lease_until = null, q.updated_at = $updated_at',
   'RETURN q.id AS id',
 ].join(' ')
 
 /** 一轮失败：attempts+1，未超限回 pending（可重试）、超限进 failed（死信）。 */
 const FAIL_TEMPLATE = [
-  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id',
+  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id AND q.status = $processing',
   'SET q.status = $status, q.attempts = $attempts, q.lease_owner = null,',
-  '    q.lease_until = null, q.last_error = $last_error, q.updated_at = $updated_at',
+  '    q.lease_until = $lease_until, q.last_error = $last_error, q.updated_at = $updated_at',
   'RETURN q.id AS id',
 ].join(' ')
 
@@ -164,10 +176,16 @@ const RECLAIM_EXPIRED = [
 ].join(' ')
 
 /** 写者启动回收（AC3 超集，U7）：见 reclaimProcessingInboxItems。 */
+/**
+ * 写者启动回收（R3②）：崩溃是一次失败——attempts+1 并记 last_error，达上限直接进 failed 死信，
+ * 否则回 pending（不退避：进程刚重启，重试立即进行是期望行为）。
+ */
 const RECLAIM_PROCESSING = [
   'MATCH (q:' + L1_INBOX_TABLE + ')',
   'WHERE q.status = $processing',
-  'SET q.status = $pending, q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
+  'SET q.status = CASE WHEN q.attempts + 1 > $max_retries THEN $failed ELSE $pending END,',
+  '    q.attempts = q.attempts + 1, q.last_error = $reclaim_error,',
+  '    q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
   'RETURN q.id AS id',
 ].join(' ')
 
@@ -296,10 +314,11 @@ export async function claimNextInboxItem(
     const rows = options.after
       ? await queryRows(connection, CLAIM_HEAD_AFTER, {
         pending: INBOX_STATUS_PENDING,
+        now: updatedAt,
         after_enqueued_at: options.after.enqueuedAt,
         after_id: options.after.id,
       })
-      : await queryRows(connection, CLAIM_HEAD, { pending: INBOX_STATUS_PENDING })
+      : await queryRows(connection, CLAIM_HEAD, { pending: INBOX_STATUS_PENDING, now: updatedAt })
     const row = rows[0]
     if (!row) return null
     const item = toInboxItem(row)
@@ -316,73 +335,117 @@ export async function claimNextInboxItem(
   })
 }
 
-/** 标 done 并清 lease（AC2）。条目不存在返回 false（不静默 no-op）。 */
-export async function completeInboxItem(
+/**
+ * 标 done 并清 lease（AC2），**由调用方开事务**（Story 2.3 / R1 抽出的连接级原语）。
+ *
+ * 带 `status = processing` 守卫：只有**正在处理**的条目能转 done；返回 false 表示未命中
+ * （条目已被处理过、或状态不符）。精炼成功路径把本原语与产出写在同一事务里，靠这次条件
+ * 转换实现 at-most-once（U12：崩溃重放不重复产出）。
+ */
+export async function markInboxItemDone(
   connection: InboxConnection,
   id: string,
   options: { readonly now?: Date } = {},
 ): Promise<boolean> {
   const updatedAt = (options.now ?? new Date()).toISOString()
-  return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, COMPLETE, {
-      id,
-      done: INBOX_STATUS_DONE,
-      updated_at: updatedAt,
-    })
-    return rows.length > 0
+  const rows = await queryRows(connection, COMPLETE, {
+    id,
+    processing: INBOX_STATUS_PROCESSING,
+    done: INBOX_STATUS_DONE,
+    updated_at: updatedAt,
   })
-}
-
-export interface FailInboxResult {
-  readonly status: typeof INBOX_STATUS_PENDING | typeof INBOX_STATUS_FAILED
-  readonly attempts: number
+  return rows.length > 0
 }
 
 /**
- * 记一次失败：attempts+1；未超 INBOX_MAX_RETRIES 回 pending（下轮重试），
- * 超限进 failed 死信（AC4）。返回值即落库后的状态。
+ * 标 done 的便利包装：自带事务。语义与 2.2 相同（条目不存在 / 未在处理中返回 false，
+ * 不静默 no-op）——2.2 的调用方与测试无需改动。
+ */
+export async function completeInboxItem(
+  connection: InboxConnection,
+  id: string,
+  options: { readonly now?: Date } = {},
+): Promise<boolean> {
+  return runInTransaction(connection, () => markInboxItemDone(connection, id, options))
+}
+
+export interface FailInboxResult {
+  /** 落库后的状态；条目本就不在 processing 时原样返回其当前状态（N8 no-op）。 */
+  readonly status: InboxStatus
+  readonly attempts: number
+}
+
+/** 第 attempts 次失败后的退避（毫秒）：min(5s × 2^(attempts-1), 120s)（R3①）。 */
+export function inboxBackoffMs(attempts: number): number {
+  const exponent = Math.max(0, Math.trunc(attempts) - 1)
+  return Math.min(INBOX_BACKOFF_BASE_MS * 2 ** exponent, INBOX_BACKOFF_MAX_MS)
+}
+
+export interface FailInboxOptions {
+  readonly error: unknown
+  readonly now?: Date
+  /**
+   * true = 语义错（4xx / 输出截断），首次即降级、不再退避重试：直接进 failed 死信（AC:581）。
+   * 缺省 false = 瞬时失败，走 §14 的 5–120s 指数退避。
+   */
+  readonly fatal?: boolean
+}
+
+/**
+ * 记一次失败：attempts+1；未超 INBOX_MAX_RETRIES 或非致命错则回 pending 并写退避截止
+ * （`lease_until = now + backoff(attempts)`，R3①），超限/致命进 failed 死信（AC4）。
+ *
+ * 只有 **processing** 的条目才记失败（N8）：已 done / failed / pending 的行原样返回、不写库，
+ * 这样「成功路径已 complete、异常兜底又调一次 fail」不会把已完成的条目打回 pending。
  */
 export async function failInboxItem(
   connection: InboxConnection,
   id: string,
-  options: { readonly error: unknown; readonly now?: Date },
+  options: FailInboxOptions,
 ): Promise<FailInboxResult> {
-  const updatedAt = (options.now ?? new Date()).toISOString()
+  const now = options.now ?? new Date()
+  const updatedAt = now.toISOString()
   const lastError = inboxErrorText(options.error)
   return runInTransaction(connection, async () => {
     const rows = await queryRows(connection, READ_ONE, { id })
     const row = rows[0]
     if (!row) throw new Error('INBOX 条目不存在（id=' + id + '）：无法记录失败')
-    const attempts = Number(row.attempts ?? 0) + 1
-    const status = attempts > INBOX_MAX_RETRIES ? INBOX_STATUS_FAILED : INBOX_STATUS_PENDING
+    const current = toInboxItem(row)
+    if (current.status !== INBOX_STATUS_PROCESSING) return { status: current.status, attempts: current.attempts }
+    const attempts = current.attempts + 1
+    const status = options.fatal === true || attempts > INBOX_MAX_RETRIES
+      ? INBOX_STATUS_FAILED
+      : INBOX_STATUS_PENDING
     const written = await queryRows(connection, FAIL_TEMPLATE, {
       id,
+      processing: INBOX_STATUS_PROCESSING,
       status,
       attempts,
+      lease_until: status === INBOX_STATUS_PENDING
+        ? new Date(now.getTime() + inboxBackoffMs(attempts)).toISOString()
+        : null,
       last_error: lastError,
       updated_at: updatedAt,
     })
-    if (written.length === 0) throw new Error('INBOX 条目失败状态未落库（id=' + id + '）')
+    // N8：语句带 status 守卫，同事务内刚读到 processing 故不应未命中；真未命中按 no-op 返回，
+    // 不抛错——避免异常冲出消费者的 for 循环。
+    if (written.length === 0) return { status: current.status, attempts: current.attempts }
     return { status, attempts }
   })
 }
 
 /**
- * 两个回收口径的**唯一实现**：statement 的 WHERE 决定回收范围，SET 与参数完全一致
- * （清 lease、保留 attempts）。返回回收条数。
+ * 两个回收口径的**唯一实现**：statement 的 WHERE 决定回收范围，参数由调用方给
+ * （两个口径的 SET 已不同：过期回收保留 attempts，崩溃回收把这次崩溃记成一次失败）。
+ * 返回回收条数。
  */
 async function reclaimProcessing(
   connection: InboxConnection,
   statement: string,
-  now: Date,
+  params: Record<string, lbug.LbugValue>,
 ): Promise<number> {
-  const stamp = now.toISOString()
   return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, statement, {
-      processing: INBOX_STATUS_PROCESSING,
-      pending: INBOX_STATUS_PENDING,
-      now: stamp,
-    })
+    const rows = await queryRows(connection, statement, params)
     return rows.length
   })
 }
@@ -395,7 +458,12 @@ export async function reclaimExpiredLeases(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  return reclaimProcessing(connection, RECLAIM_EXPIRED, options.now ?? new Date())
+  const now = options.now ?? new Date()
+  return reclaimProcessing(connection, RECLAIM_EXPIRED, {
+    processing: INBOX_STATUS_PROCESSING,
+    pending: INBOX_STATUS_PENDING,
+    now: now.toISOString(),
+  })
 }
 
 /**
@@ -409,12 +477,24 @@ export async function reclaimExpiredLeases(
  * 条目（同进程重复精炼）。lease 与任务最坏时长的关系属 Story 2.3 契约（需续租或收紧 lease）。
  *
  * reclaimExpiredLeases 保留原语义（活着的持有者不被抢），供运行期/测试使用。
+ *
+ * Story 2.3 / R3②：启动回收把这次崩溃**记成一次失败**（attempts+1、last_error='reclaimed after crash'），
+ * 达到 INBOX_MAX_RETRIES 的条目直接进 failed 死信——否则「精炼每次都以杀死进程告终」的条目会
+ * 无限循环（U11）。
  */
 export async function reclaimProcessingInboxItems(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  return reclaimProcessing(connection, RECLAIM_PROCESSING, options.now ?? new Date())
+  const now = options.now ?? new Date()
+  return reclaimProcessing(connection, RECLAIM_PROCESSING, {
+    processing: INBOX_STATUS_PROCESSING,
+    pending: INBOX_STATUS_PENDING,
+    failed: INBOX_STATUS_FAILED,
+    max_retries: INBOX_MAX_RETRIES,
+    reclaim_error: INBOX_RECLAIM_ERROR,
+    now: now.toISOString(),
+  })
 }
 
 /** 按状态计数（缺失状态补 0）；只发一条聚合语句，未出现在结果里的状态留 0。 */

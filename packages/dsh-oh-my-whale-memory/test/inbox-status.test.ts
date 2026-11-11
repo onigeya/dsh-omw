@@ -163,8 +163,9 @@ async function makeDeadLetter(
   message: string,
 ): Promise<void> {
   await enqueueInboxItem(connection, { payload: '死信夹具', kind, sessionId: 'sess-status', now, id })
+  // R3①：失败回 pending 会写退避截止（最长 20s），每轮前进 1 分钟越过窗口，同时不破坏 25h 的 stale 断言。
   for (let round = 0; round < 4; round += 1) {
-    const stamp = new Date(now.getTime() + round * 1000)
+    const stamp = new Date(now.getTime() + round * 60_000)
     const item = await claimNextInboxItem(connection, { owner: 'status-fixture', now: stamp })
     if (!item) throw new Error('死信夹具取不到队头：' + id)
     await failInboxItem(connection, item.id, { error: new Error(message), now: stamp })
@@ -176,16 +177,19 @@ describe('AC4 集成：真库死信进入 status', () => {
     const dir = await makeTempDir('omw-inbox-status-')
     const registeredDefs: MemoryCommandDefinition[] = []
     const onEvents: string[] = []
-    await plugin.apply(makeCtx(dir, registeredDefs, onEvents), EMBEDDING_CONFIG)
-    expect(onEvents).toEqual(['session/event'])
-    expect(registeredDefs).toHaveLength(1)
-
+    // 先造死信、再 apply：Story 2.3 起 apply 会接线真精炼处理器，活消费者会在 pending 窗口抢走队头
+    // （实测 lease_owner = 进程 id）。死信（failed）永不被取，所以夹具先落库、插件后启动即可独占驱动队列。
     const store = await openMemoryDatabase({ dbPath: resolveMemoryDbPath(dir), dim: DIM, modelId: MODEL_ID })
     const stale = 'status-dead-stale'
     const fresh = 'status-dead-fresh'
     const staleNow = new Date(Date.now() - 25 * 60 * 60 * 1000)
     await makeDeadLetter(store.connection, stale, 'work_fact', staleNow, '老账失败')
     await makeDeadLetter(store.connection, fresh, 'persona', new Date(), '人格失败')
+    await store.close()
+
+    await plugin.apply(makeCtx(dir, registeredDefs, onEvents), EMBEDDING_CONFIG)
+    expect(onEvents).toEqual(['session/event'])
+    expect(registeredDefs).toHaveLength(1)
 
     const result = await registeredDefs[0]!.handler({ rawInput: ' status' })
     expect(result.kind).toBe('success')

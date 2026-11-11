@@ -47,6 +47,35 @@ export async function drainInboxBackgroundTasks(): Promise<void> {
 
 export const INBOX_POLL_INTERVAL_MS = 1_000
 
+/**
+ * 精炼处理器的返回值（Story 2.3 / R1、R4①）。
+ *
+ * - `completed: true` = 处理器已在**自身事务内**把条目转成 done（`markInboxItemDone` 与产出同事务，
+ *   at-most-once）；消费者据此**不再**重复 complete（第二次必不命中）。缺省 = 由消费者照旧收尾（2.2 行为）。
+ * - `kinds` = 本次精炼产出的节点 kind 列表（不是采集来源标签 step|turn|compaction）；
+ *   消费者按它逐条记提升信号（R4①）。缺省 = 沿用条目自身的 kind（2.2 兼容路径）。
+ */
+export interface InboxProcessResult {
+  readonly completed?: boolean
+  readonly kinds?: readonly string[]
+}
+
+/**
+ * 精炼处理器抛出的失败（Story 2.3）：`fatal` 区分「瞬时（退避重试）」与
+ * 「语义错（4xx / 输出截断，首次即降级、直接进死信，AC:581）」。消费者按结构读取 `fatal`。
+ */
+export class InboxRefineError extends Error {
+  readonly reason: string
+  readonly fatal: boolean
+
+  constructor(message: string, options: { readonly reason: string; readonly fatal: boolean }) {
+    super(message)
+    this.name = 'InboxRefineError'
+    this.reason = options.reason
+    this.fatal = options.fatal
+  }
+}
+
 export interface InboxConsumerOptions {
   /** 惰性取连接（apply 期间建库完成后才可用；未就绪 → 本轮不消费）。 */
   readonly connection: () => lbug.Connection | null
@@ -57,8 +86,9 @@ export interface InboxConsumerOptions {
   readonly intervalMs?: number
   /**
    * 精炼处理器（Story 2.3 注入 ctx.llm 精炼 + L1 落库）。缺省 = 不消费。
+   * 可返回 {@link InboxProcessResult} 声明「已在事务内标 done」与「精炼后的 kind」（R1 / R4①）。
    */
-  readonly process?: (item: InboxItem) => Promise<void>
+  readonly process?: (item: InboxItem) => Promise<InboxProcessResult | void>
   readonly promotion?: PromotionTracker
   readonly logger?: { warn(message: string): void }
 }
@@ -102,31 +132,44 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       after = { enqueuedAt: item.enqueuedAt, id: item.id }
       // 只有**精炼本身**失败才算这条失败：记账（complete / recordL1）失败不得把精炼成功的条目
       // 写回 pending/failed——那会重复精炼，attempts 已 3 时还会误送死信。
+      let result: InboxProcessResult | void
       try {
-        await process(item)
+        result = await process(item)
       } catch (error) {
-        const result = await failInboxItem(connection, item.id, { error, now: options.now?.() })
+        // AC:581：语义错首次即降级不重试 ⇒ 直接进死信；瞬时失败走退避。
+        const fatal = error instanceof InboxRefineError && error.fatal
+        const failed = await failInboxItem(connection, item.id, { error, now: options.now?.(), fatal })
         options.logger?.warn(
-          'INBOX 条目精炼失败（id=' + item.id + '，attempts=' + result.attempts +
-          '，status=' + result.status + '）：' + inboxErrorText(error),
+          'INBOX 条目精炼失败（id=' + item.id + '，attempts=' + failed.attempts +
+          '，status=' + failed.status + '）：' + inboxErrorText(error),
         )
         continue
       }
-      // completeInboxItem 返回 false = 未落库（其文档明写不静默 no-op）：不计成功、不记提升信号。
-      let completed = false
-      try {
-        completed = await completeInboxItem(connection, item.id, { now: options.now?.() })
-      } catch (error) {
-        options.logger?.warn('INBOX 条目完成落库异常（id=' + item.id + '）：' + inboxErrorText(error))
-      }
+      // R1：处理器若已在自身事务内标 done（与产出同事务），这里不能再 complete——
+      // 第二次转换必不命中，会把成功路径误判成「未落库」。
+      let completed = result?.completed === true
       if (!completed) {
-        options.logger?.warn('INBOX 条目完成未落库（id=' + item.id + '）：本轮不计成功、不记提升信号')
-        continue
+        // completeInboxItem 返回 false = 未落库（其文档明写不静默 no-op）：不计成功、不记提升信号。
+        try {
+          completed = await completeInboxItem(connection, item.id, { now: options.now?.() })
+        } catch (error) {
+          options.logger?.warn('INBOX 条目完成落库异常（id=' + item.id + '）：' + inboxErrorText(error))
+        }
+        if (!completed) {
+          options.logger?.warn('INBOX 条目完成未落库（id=' + item.id + '）：本轮不计成功、不记提升信号')
+          continue
+        }
       }
       processed += 1
       // 提升记账是旁路：记账失败不改队列状态（条目已 done），也不中断本轮。
+      // R4①：有精炼结果时按**精炼后的节点 kind** 逐条记账；无（2.2 兼容路径）才退回条目 kind。
       try {
-        options.promotion?.recordL1({ sessionId: item.sessionId, kind: item.kind })
+        const kinds = result?.kinds
+        if (kinds === undefined) {
+          options.promotion?.recordL1({ sessionId: item.sessionId, kind: item.kind })
+        } else {
+          for (const kind of kinds) options.promotion?.recordL1({ sessionId: item.sessionId, kind })
+        }
       } catch (error) {
         options.logger?.warn('INBOX 提升记账失败（id=' + item.id + '）：' + inboxErrorText(error))
       }
