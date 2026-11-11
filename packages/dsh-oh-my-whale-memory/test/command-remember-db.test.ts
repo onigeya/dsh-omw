@@ -5,7 +5,7 @@
  * 用裸 ctx 驱动 apply，捕获交给 commands.register 的定义，再以
  * `{ rawInput: ' remember 我偏好 ESM 不要 CJS' }` 调 definition.handler，
  * 在最外层表面（命令返回值 + 落库事实）上验证：
- * - success + `layer='L1_INBOX'` 节点存在，三列 embedding/embedding_model_id/
+ * - success + `layer='L1'` 节点存在（Story 1.11 层收敛），三列 embedding/embedding_model_id/
  *   embedding_dim 均为 NULL（Epic 1 无 embedding 客户端的既定状态）；
  * - 同文本重复写入节点数不增（id = uuid5(layer+':'+归一化 text)）。
  */
@@ -54,7 +54,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     expect(registered?.name).toBe('memory')
   })
 
-  it('remember 写入成功：L1_INBOX 节点存在且三列均为 NULL（AC1）', async () => {
+  it('remember 写入成功：L1 节点存在且三列均为 NULL（AC1 + Story 1.11 层收敛）', async () => {
     const invocation: MemoryCommandInvocation = { rawInput: ' remember 我偏好 ESM 不要 CJS' }
     const result = await registered?.handler(invocation)
 
@@ -62,7 +62,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
 
     const rows = await queryAll(
       connection,
-      "MATCH (m:memory {layer: 'L1_INBOX'}) WHERE m.text = '我偏好 ESM 不要 CJS' RETURN m.id AS id, m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim",
+      "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '我偏好 ESM 不要 CJS' RETURN m.id AS id, m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim",
     )
     expect(rows).toHaveLength(1)
     expect(rows[0]!['embedding']).toBeNull()
@@ -71,7 +71,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
   })
 
   it('同文本重复 remember：两次 success，节点数不增（同指纹同 id）', async () => {
-    const before = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
+    const before = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
     const totalBefore = Number(before[0]!['total'])
 
     const first = await registered?.handler({ rawInput: ' remember 我偏好 ESM 不要 CJS' })
@@ -79,35 +79,36 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     expect(first?.kind).toBe('success')
     expect(second?.kind).toBe('success')
 
-    const after = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
+    const after = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
     expect(Number(after[0]!['total'])).toBe(totalBefore)
   })
 
   it('无 payload：返回 usage error，节点数不变（AC2）', async () => {
-    const before = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
+    const before = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
     const totalBefore = Number(before[0]!['total'])
 
     const result = await registered?.handler({ rawInput: ' remember' })
     expect(result?.kind).toBe('error')
     expect(result?.text).toContain('memory remember')
 
-    const after = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
+    const after = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
     expect(Number(after[0]!['total'])).toBe(totalBefore)
   })
 
   it('status 走正常路径：真实库上返回 success 与四层计数（Story 1.9，不再是 usage error）', async () => {
-    // 本文件只写 L1_INBOX，故 L1 / L2 / L2_INBOX 恒 0；L1_INBOX 取实时计数保证与用例顺序无关。
-    const rows = await queryAll(connection, "MATCH (m:memory {layer: 'L1_INBOX'}) RETURN count(m) AS total")
-    const l1Inbox = Number(rows[0]!['total'])
+    // Story 1.11 层收敛后：本文件的写入全部落在 L1（实时计数，与用例顺序无关）；
+    // L1_INBOX 只是 INBOX 队列标识的历史计数位，本文件不再有写入命中它，故恒 0。
+    const rows = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
+    const l1Count = Number(rows[0]!['total'])
 
     const result = await registered?.handler({ rawInput: ' status' })
 
     expect(result?.kind).toBe('success')
     expect(result?.text).toBe([
       '记忆状态',
-      'L1: 0',
+      `L1: ${l1Count}`,
       'L2: 0',
-      `L1_INBOX: ${l1Inbox}`,
+      'L1_INBOX: 0',
       'L2_INBOX: 0',
       'failed: 0',
       'audit_gap: 0',
@@ -129,6 +130,79 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     const result = await registered?.handler({ rawInput: ' remember ！！！' })
     expect(result?.kind).toBe('error')
     expect(result?.text).toContain('归一化后为空')
+  })
+
+  it('remember 支持 --kind / --priority 旗标并落库（Story 1.11 / AC2：手动路径也能产出分类）', async () => {
+    const result = await registered?.handler({
+      rawInput: ' remember --kind=persona --priority=-1 我偏好先看证据再下结论',
+    })
+    expect(result?.kind).toBe('success')
+
+    const rows = await queryAll(
+      connection,
+      "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '我偏好先看证据再下结论' RETURN m.kind AS kind, m.priority AS priority",
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!['kind']).toBe('persona')
+    // priority=-1 不得被缺省值 0 吞掉（AC1 的硬要求）。
+    expect(Number(rows[0]!['priority'])).toBe(-1)
+  })
+
+  it('旗标顺序无关、正文保留内部空白（Story 1.11 / AC2）', async () => {
+    const result = await registered?.handler({
+      rawInput: ' remember --priority=7 --kind=work_method 先 复现 再 修',
+    })
+    expect(result?.kind).toBe('success')
+
+    const rows = await queryAll(
+      connection,
+      "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '先 复现 再 修' RETURN m.kind AS kind, m.priority AS priority",
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!['kind']).toBe('work_method')
+    expect(Number(rows[0]!['priority'])).toBe(7)
+  })
+
+  it('非法旗标值：返回 usage error 且不写库（Story 1.11）', async () => {
+    const before = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
+    const result = await registered?.handler({ rawInput: ' remember --priority=abc 非法优先级样例' })
+    expect(result?.kind).toBe('error')
+    expect(result?.text).toContain('memory remember')
+
+    const after = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
+    expect(Number(after[0]!['total'])).toBe(Number(before[0]!['total']))
+    const leaked = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '非法优先级样例' RETURN m.id AS id")
+    expect(leaked).toHaveLength(0)
+  })
+
+  it('同文本不同分类：命中同一 id、以最新写入为准、逐写记 generation log（Story 1.11 / AC4）', async () => {
+    const text = '同文本不同分类的收敛样例'
+    const logsBefore = await queryAll(connection, "MATCH (g:generation_log) WHERE g.action = 'upsert_memory' RETURN count(g) AS total")
+
+    const first = await registered?.handler({ rawInput: ' remember --kind=episodic --priority=5 ' + text })
+    expect(first?.kind).toBe('success')
+    const rowsAfterFirst = await queryAll(
+      connection,
+      "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '" + text + "' RETURN m.id AS id, m.kind AS kind, m.priority AS priority",
+    )
+    expect(rowsAfterFirst).toHaveLength(1)
+    expect(rowsAfterFirst[0]!['kind']).toBe('episodic')
+
+    const second = await registered?.handler({ rawInput: ' remember --kind=instruction --priority=-1 ' + text })
+    expect(second?.kind).toBe('success')
+    const rowsAfterSecond = await queryAll(
+      connection,
+      "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '" + text + "' RETURN m.id AS id, m.kind AS kind, m.priority AS priority",
+    )
+    // kind/priority 不进指纹 ⇒ 仍是同一节点，且分类以最新一次写入为准（AC4）。
+    expect(rowsAfterSecond).toHaveLength(1)
+    expect(rowsAfterSecond[0]!['id']).toBe(rowsAfterFirst[0]!['id'])
+    expect(rowsAfterSecond[0]!['kind']).toBe('instruction')
+    expect(Number(rowsAfterSecond[0]!['priority'])).toBe(-1)
+
+    // 「该改动必须记 generation log」（Story 1.10 的表）：两次写入各追加一行。
+    const logsAfter = await queryAll(connection, "MATCH (g:generation_log) WHERE g.action = 'upsert_memory' RETURN count(g) AS total")
+    expect(Number(logsAfter[0]!['total'])).toBe(Number(logsBefore[0]!['total']) + 2)
   })
 })
 

@@ -80,7 +80,7 @@ describe('LadybugDB Windows ABI 冒烟', () => {
     const embedding = '[0.5, 0.5, 0.5, 0.5]'
     const res = await conn.query(
       `CREATE (m:memory {id: 'smoke-1', text: 'ABI 冒烟样例',`
-      + ` embedding: ${embedding}, layer: 'L1_INBOX',`
+      + ` embedding: ${embedding}, layer: 'L1',`
       + ` valid_at: '2026-11-08T00:00:00Z', recorded_at: '2026-11-08T00:00:00Z'})`,
     )
     expect(res).toBeDefined()
@@ -91,7 +91,7 @@ describe('LadybugDB Windows ABI 冒烟', () => {
     // 单语句 query() 返回单个 QueryResult；数组仅在多语句时出现（lbug.d.ts L287-L291）。
     const rows = Array.isArray(result) ? await result[0].getAll() : await result.getAll()
     expect(rows).toHaveLength(1)
-    expect(rows[0]).toMatchObject({ 'm.text': 'ABI 冒烟样例', 'm.layer': 'L1_INBOX' })
+    expect(rows[0]).toMatchObject({ 'm.text': 'ABI 冒烟样例', 'm.layer': 'L1' })
   })
 
   it('step 5: INSTALL/LOAD vector 扩展 + CREATE_VECTOR_INDEX(HNSW cosine)', async () => {

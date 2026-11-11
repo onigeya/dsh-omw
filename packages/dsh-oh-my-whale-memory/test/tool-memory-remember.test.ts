@@ -2,7 +2,8 @@
  * memory_remember 工具测试（Story 1.6 / spec I/O 矩阵）。
  *
  * 契约：
- * - 工具名 `memory_remember`，参数 `content`（必填）/ `context`（可选 → source_refs）；
+ * - 工具名 `memory_remember`，参数 `content`（必填）/ `context`（可选 → source_refs）
+ *   / `kind`（可选，七类枚举）/ `priority`（可选，-1..100，-1 = 恒置顶，Story 1.11）；
  * - 固定写 layer='L1'；不产 embedding（三列向量 NULL，绝不写零向量）；
  * - 同指纹重复 → 同一 id（幂等）+ source_refs 并集去重 + recorded_at 保留最早 + 节点数不变；
  * - 库未就绪（无 profile / 无句柄）→ failed db_unavailable，retryable=false；
@@ -29,7 +30,7 @@ interface CapturedTool {
   description: string
   parameters: {
     type: string
-    properties: Record<string, { type?: string; required?: boolean; description?: string }>
+    properties: Record<string, { type?: string; required?: boolean; description?: string; enum?: readonly string[] }>
     required?: string[]
   }
   output: {
@@ -95,7 +96,7 @@ afterAll(async () => {
 async function rowsFor(id: string) {
   return queryAll(
     store.connection,
-    `MATCH (m:memory {id: '${id}'}) RETURN m.layer AS layer, m.text AS text, m.recorded_at AS recorded_at, m.source_refs AS refs, m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim`,
+    `MATCH (m:memory {id: '${id}'}) RETURN m.layer AS layer, m.text AS text, m.kind AS kind, m.priority AS priority, m.recorded_at AS recorded_at, m.source_refs AS refs, m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim`,
   )
 }
 
@@ -108,11 +109,19 @@ describe('memory_remember 工具（Story 1.6）', () => {
     expect(tool.description).toMatch(/transient/)
     expect(tool.description).toMatch(/长期/)
 
-    // 参数：content 必填 string，context 可选 string。
+    // 参数：content 必填 string，context 可选 string；
+    // kind 可选（FR-15 七类枚举）、priority 可选（-1..100，Story 1.11）。
     expect(tool.parameters.properties.content.type).toBe('string')
     expect(tool.parameters.required).toContain('content')
     expect(tool.parameters.required ?? []).not.toContain('context')
     expect(tool.parameters.properties.context.type).toBe('string')
+    expect(tool.parameters.properties.kind?.type).toBe('string')
+    expect([...(tool.parameters.properties.kind?.enum ?? [])]).toEqual([
+      'persona', 'episodic', 'instruction', 'work_fact', 'work_task', 'work_method', 'work_artifact',
+    ])
+    expect(tool.parameters.required ?? []).not.toContain('kind')
+    expect(tool.parameters.properties.priority?.type).toBe('integer')
+    expect(tool.parameters.required ?? []).not.toContain('priority')
 
     // 输出 schema：oneOf 两个 canonical 分支（stored / failed）。
     const branches = tool.output.schema.oneOf ?? []
@@ -276,5 +285,41 @@ describe('memory_remember 工具（Story 1.6）', () => {
       expect(row['action']).toBe('upsert_memory')
       expect(row['outcome']).toBe('success')
     }
+  })
+
+  it('显式 kind/priority 透传落库（Story 1.11 / AC1：priority=-1 不被缺省吞掉）', async () => {
+    const value = await tool.execute({ content: '透传分类样例', kind: 'instruction', priority: -1 })
+    expect(value.action).toBe('stored')
+
+    const rows = await rowsFor(value.id!)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]['kind']).toBe('instruction')
+    expect(Number(rows[0]['priority'])).toBe(-1)
+  })
+
+  it('缺省 kind/priority：落库空串与 0（Story 1.11 / AC1：缺省行为不变）', async () => {
+    const value = await tool.execute({ content: '缺省分类样例' })
+    expect(value.action).toBe('stored')
+
+    const rows = await rowsFor(value.id!)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]['kind']).toBe('')
+    expect(Number(rows[0]['priority'])).toBe(0)
+  })
+
+  it('同文本不同分类：同一 id + 以最新写入为准（Story 1.11 / AC4：分类不进指纹）', async () => {
+    const first = await tool.execute({ content: '同文本换分类工具样例', kind: 'persona', priority: 10 })
+    expect(first.action).toBe('stored')
+    const rowsAfterFirst = await rowsFor(first.id!)
+    expect(rowsAfterFirst[0]['kind']).toBe('persona')
+
+    const second = await tool.execute({ content: '同文本换分类工具样例', kind: 'episodic', priority: -1 })
+    expect(second.action).toBe('stored')
+    expect(second.id).toBe(first.id)
+
+    const rowsAfterSecond = await rowsFor(second.id!)
+    expect(rowsAfterSecond).toHaveLength(1)
+    expect(rowsAfterSecond[0]['kind']).toBe('episodic')
+    expect(Number(rowsAfterSecond[0]['priority'])).toBe(-1)
   })
 })
