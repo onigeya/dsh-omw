@@ -353,6 +353,26 @@ export async function failInboxItem(
 }
 
 /**
+ * 两个回收口径的**唯一实现**：statement 的 WHERE 决定回收范围，SET 与参数完全一致
+ * （清 lease、保留 attempts）。返回回收条数。
+ */
+async function reclaimProcessing(
+  connection: InboxConnection,
+  statement: string,
+  now: Date,
+): Promise<number> {
+  const stamp = now.toISOString()
+  return runInTransaction(connection, async () => {
+    const rows = await queryRows(connection, statement, {
+      processing: INBOX_STATUS_PROCESSING,
+      pending: INBOX_STATUS_PENDING,
+      now: stamp,
+    })
+    return rows.length
+  })
+}
+
+/**
  * 启动回收（AC3）：lease_until < now 的 processing 条目回 pending，lease 清空、attempts 保留。
  * 返回回收条数。lease 未过期的在跑持有者不被抢。
  */
@@ -360,15 +380,7 @@ export async function reclaimExpiredLeases(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  const now = (options.now ?? new Date()).toISOString()
-  return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, RECLAIM_EXPIRED, {
-      processing: INBOX_STATUS_PROCESSING,
-      pending: INBOX_STATUS_PENDING,
-      now,
-    })
-    return rows.length
-  })
+  return reclaimProcessing(connection, RECLAIM_EXPIRED, options.now ?? new Date())
 }
 
 /**
@@ -387,15 +399,7 @@ export async function reclaimProcessingInboxItems(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  const now = (options.now ?? new Date()).toISOString()
-  return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, RECLAIM_PROCESSING, {
-      processing: INBOX_STATUS_PROCESSING,
-      pending: INBOX_STATUS_PENDING,
-      now,
-    })
-    return rows.length
-  })
+  return reclaimProcessing(connection, RECLAIM_PROCESSING, options.now ?? new Date())
 }
 
 /** 按状态计数（缺失状态补 0）；只发一条聚合语句，未出现在结果里的状态留 0。 */
