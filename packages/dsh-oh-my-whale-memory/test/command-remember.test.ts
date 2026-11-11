@@ -33,6 +33,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       failed: 0,
       embeddingMode: 'enabled',
       readonly: false,
+      auditGap: 0,
     }),
     ...overrides,
   }
@@ -131,6 +132,7 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
       failed: 0,
       embeddingMode: 'enabled' as const,
       readonly: false,
+      auditGap: 0,
     }))
     const definition = createMemoryCommandDefinition(makeDeps({ writeInbox, getStatus }))
 
@@ -146,6 +148,7 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
       'L1_INBOX: 3',
       'L2_INBOX: 0',
       'failed: 0',
+      'audit_gap: 0',
       'embedding: enabled',
       'readonly: false',
     ].join('\n'))

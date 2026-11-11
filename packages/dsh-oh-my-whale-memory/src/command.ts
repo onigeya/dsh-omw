@@ -149,6 +149,8 @@ export interface MemoryStatusSnapshot {
   readonly readonly: boolean
   /** 只读原因，逐字取 `READONLY_REASON`；非只读时缺省。 */
   readonly readonlyReason?: string
+  /** audit_gap 计数；null = 审计表缺失、算不出来（不静默报 0）。 */
+  readonly auditGap: number | null
 }
 
 /** 命令依赖（由 `src/index.ts` 惰性绑定到库句柄；读路径不得在库未就绪时静默返回空）。 */
@@ -288,6 +290,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     `L1_INBOX: ${snapshot.inboxes.L1}`,
     `L2_INBOX: ${snapshot.inboxes.L2}`,
     `failed: ${snapshot.failed}`,
+    `audit_gap: ${snapshot.auditGap ?? '未知（审计表缺失）'}`,
     snapshot.embeddingMode === 'disabled' ? 'embedding: disabled（降级检索）' : 'embedding: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ].join('\n')

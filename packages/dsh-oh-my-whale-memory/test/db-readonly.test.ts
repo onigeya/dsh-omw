@@ -40,7 +40,11 @@ function mergeMeta(key: string, value: string): string {
   return `MERGE (m:omw_meta {key: '${key}'}) ON CREATE SET m.value = '${value}' ON MATCH SET m.value = '${value}'`
 }
 
-/** 与 `initializeDatabase` 建库时执行的那批语句一致（DDL 单一事实来源：src/db/schema.ts）。 */
+/**
+ * 本夹具刻意只建 Story 1.10 之前的既有三表（memory / l0_raw / omw_meta）：它模拟「旧库」
+ * 被第二实例以只读降级打开的场景，故不含审计两表（generation_log / keyed_decision）。
+ * 单条语句一律取自 src/db/schema.ts，不手抄列定义。
+ */
 function buildSchemaStatements(dim: number): string[] {
   return [
     'INSTALL vector; LOAD vector;',

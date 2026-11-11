@@ -69,6 +69,73 @@ export function createMetaTableStatement(): string {
   return 'CREATE NODE TABLE IF NOT EXISTS omw_meta(key STRING, value STRING, PRIMARY KEY(key))'
 }
 
+/**
+ * 审计账本：generation_log（Story 1.10 / AD-10、AD-21）。
+ *
+ * 一次迁移与 keyed_decision **同时**建（见 src/db/audit.ts 的 ensureAuditTables），
+ * 此后不得再分叉。只 append、永不改写；redact 的墓碑保留 id + recorded_at。
+ *
+ * - actor / kind / action / policy：动作用语 capture|refine|verify|cascade|redact
+ * - l0_refs：向下证据引用；outcome：FR-8 三档 success|failure|uncertain
+ * - question_key / probability / threshold / passed：FR-8 核实结果（不新增表）
+ * - cascade_depth（直接作废 = 0）/ trigger_id：级联记账（AD-19）
+ */
+export const GENERATION_LOG_TABLE = 'generation_log'
+
+/**
+ * 审计账本：keyed_decision（Story 1.10 / AD-18、AD-19、AD-21）。
+ *
+ * - judge_key：AD-18 内容键（uuid5('judge:' + policy + ':' + 排序后的 ids)），主键
+ * - resolution_source：auto|review|user 三档（v1 只加字段不加流程）
+ * - write_pending：中间态，崩溃恢复优先重放
+ * - invalidated_by：MAP(STRING, STRING[]) 的多对一失效因果，键 source_id|target_id
+ *   （有向：source = 新事实，target = 被失效者）
+ */
+export const KEYED_DECISION_TABLE = 'keyed_decision'
+
+/** generation_log 建表 DDL：15 列，列序即语义分组（溯源 → 核实 → 级联）。 */
+export function createGenerationLogTableStatement(): string {
+  return [
+    'CREATE NODE TABLE IF NOT EXISTS ' + GENERATION_LOG_TABLE + ' (',
+    '  id STRING,',
+    '  recorded_at STRING,',
+    '  actor STRING,',
+    '  kind STRING,',
+    '  action STRING,',
+    '  policy STRING,',
+    '  l0_refs STRING[],',
+    '  outcome STRING,',
+    '  reason STRING,',
+    '  question_key STRING,',
+    '  probability DOUBLE,',
+    '  threshold DOUBLE,',
+    '  passed BOOL,',
+    '  cascade_depth INT64,',
+    '  trigger_id STRING,',
+    '  PRIMARY KEY(id)',
+    ')',
+  ].join('')
+}
+
+/** keyed_decision 建表 DDL：10 列（judge_key 为主键）。 */
+export function createKeyedDecisionTableStatement(): string {
+  return [
+    'CREATE NODE TABLE IF NOT EXISTS ' + KEYED_DECISION_TABLE + ' (',
+    '  judge_key STRING,',
+    '  new_id STRING,',
+    '  old_id STRING,',
+    '  action STRING,',
+    '  policy STRING,',
+    '  l0_refs STRING[],',
+    '  resolution_source STRING,',
+    '  write_pending BOOL,',
+    '  invalidated_by MAP(STRING, STRING[]),',
+    '  ts STRING,',
+    '  PRIMARY KEY(judge_key)',
+    ')',
+  ].join('')
+}
+
 /** HNSW cosine 向量索引：CREATE_VECTOR_INDEX 不幂等，调用前必须查 show_indexes()。 */
 export function createVectorIndexStatement(): string {
   return `CALL CREATE_VECTOR_INDEX('memory', 'memory_embedding_hnsw', 'embedding', metric := 'cosine', mu := 30, ml := 60, pu := 0.05, efc := 200)`

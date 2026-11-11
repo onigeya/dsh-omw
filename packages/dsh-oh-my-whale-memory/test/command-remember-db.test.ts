@@ -110,9 +110,19 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       `L1_INBOX: ${l1Inbox}`,
       'L2_INBOX: 0',
       'failed: 0',
+      'audit_gap: 0',
       'embedding: enabled',
       'readonly: false',
     ].join('\n'))
+  })
+
+  it('remember 命令的溯源行 actor=user（Story 1.10 / AD-10：三档来源不写死）', async () => {
+    const before = await queryAll(connection, "MATCH (g:generation_log) WHERE g.actor = 'user' RETURN count(g) AS total")
+    const result = await registered?.handler({ rawInput: ' remember 命令溯源行 actor 用例' })
+    expect(result?.kind).toBe('success')
+
+    const after = await queryAll(connection, "MATCH (g:generation_log) WHERE g.actor = 'user' RETURN count(g) AS total")
+    expect(Number(after[0]!['total'])).toBe(Number(before[0]!['total']) + 1)
   })
 
   it('空指纹文本：收敛为 error 而非抛出（AC4）', async () => {

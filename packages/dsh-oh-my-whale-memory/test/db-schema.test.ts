@@ -47,12 +47,42 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     ]))
     expect(columns.get('embedding')).toBe('FLOAT[4]')
     expect(columns.get('source_refs')).toBe('STRING[]')
+    // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死。
+    expect(columns.size).toBe(13)
   })
 
   it('l0_raw 表含 AC2 列出的四列', async () => {
     const rows = await queryAll(store.connection, `CALL table_info('l0_raw') RETURN name, type`)
     const columns = rows.map((r) => String(r.name))
     expect(columns).toEqual(expect.arrayContaining(['id', 'raw_text', 'recorded_at', 'actor']))
+  })
+
+  it('generation_log 表 15 列、类型逐字（Story 1.10 / AD-21）', async () => {
+    const rows = await queryAll(store.connection, `CALL table_info('generation_log') RETURN name, type`)
+    const columns = new Map(rows.map((r) => [String(r.name), String(r.type)]))
+    expect(columns.size).toBe(15)
+    expect([...columns.keys()]).toEqual(expect.arrayContaining([
+      'id', 'recorded_at', 'actor', 'kind', 'action', 'policy', 'l0_refs', 'outcome', 'reason',
+      'question_key', 'probability', 'threshold', 'passed', 'cascade_depth', 'trigger_id',
+    ]))
+    expect(columns.get('l0_refs')).toBe('STRING[]')
+    expect(columns.get('probability')).toBe('DOUBLE')
+    expect(columns.get('threshold')).toBe('DOUBLE')
+    expect(columns.get('passed')).toBe('BOOL')
+    expect(columns.get('cascade_depth')).toBe('INT64')
+  })
+
+  it('keyed_decision 表 10 列、invalidated_by 为 MAP(STRING, STRING[])（Story 1.10 / AD-18）', async () => {
+    const rows = await queryAll(store.connection, `CALL table_info('keyed_decision') RETURN name, type`)
+    const columns = new Map(rows.map((r) => [String(r.name), String(r.type)]))
+    expect(columns.size).toBe(10)
+    expect([...columns.keys()]).toEqual(expect.arrayContaining([
+      'judge_key', 'new_id', 'old_id', 'action', 'policy', 'l0_refs',
+      'resolution_source', 'write_pending', 'invalidated_by', 'ts',
+    ]))
+    expect(columns.get('invalidated_by')).toBe('MAP(STRING, STRING[])')
+    expect(columns.get('write_pending')).toBe('BOOL')
+    expect(columns.get('l0_refs')).toBe('STRING[]')
   })
 
   it('omw_meta 写入了库级元数据（AC2）', async () => {
@@ -90,6 +120,9 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     const rows = await queryAll(store.connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
     const meta = new Map(rows.map((r) => [String(r.key), String(r.value)]))
     expect(meta.get('embedding_model_id')).toBe('test-embed-model-v2')
+    // Story 1.10 回归：审计两表在重开路径上仍在（CREATE ... IF NOT EXISTS 幂等）。
+    const auditTables = await queryAll(store.connection, `CALL table_info('keyed_decision') RETURN name`)
+    expect(auditTables).toHaveLength(10)
   })
 
   it('同进程同路径不同 dim → 抛 embedding_dim_mismatch（registry 快路径）', async () => {
