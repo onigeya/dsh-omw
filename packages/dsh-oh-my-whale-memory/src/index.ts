@@ -43,6 +43,7 @@
  * （便于纯单测直接传 plain object）。
  */
 import type { Context } from '@deepseek-ai/cordis'
+import { dirname, join } from 'node:path'
 import { resolveRuntimeConfig } from './config.js'
 import { computeAuditGap } from './db/audit.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
@@ -66,6 +67,7 @@ import {
 import { createIdleGate } from './inbox/idle-gate.js'
 import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
+import { createCaptureRecorder } from './capture/recorder.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
   countInboxByStatus,
@@ -74,11 +76,12 @@ import {
 } from './inbox/queue.js'
 
 /**
- * `session/event` 宿主事件面（Story 2.2 / AD-6）。
+ * `session/event` 宿主事件面（Story 2.2 / AD-6、Story 2.1）。
  *
- * `turn/start` / `turn/end` 是宿主全局广播的会话事件（`docs/cookbook/extension-cookbook.md:79`）；
- * 本插件不注入 `agents`/`sessions` 服务，事件名也不在本 Context 的类型化事件表里，故用一条
+ * `turn/start` / `turn/end` / `step/end` / `compaction/start` 是宿主全局广播的会话事件
+ * （`docs/cookbook/extension-cookbook.md:79`）；事件名不在本 Context 的类型化事件表里，故用一条
  * 具名结构类型显式声明这处接线——不把整个 Context 断言成 any，也便于裸 ctx 单测里降级为不监听。
+ * Story 2.1 起 inject 含 `'sessions'`，为 turn/end 采集提供 flush 屏障（AC③）。
  */
 interface SessionEventHost {
   on?(event: 'session/event', listener: (session: unknown, event: unknown) => void): unknown
@@ -143,8 +146,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * `'commands'`：`/memory` 宿主命令（Story 1.7）。
  * `'settings'`：/settings 表单投影与后续 /memory status 的设置读取通道（AD-11）。
  * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
+ * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
  */
-export const inject = ['commands', 'settings', 'tools'] as const
+export const inject = ['commands', 'settings', 'tools', 'sessions'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -360,6 +364,29 @@ export async function apply(
   if (reclaimed > 0) {
     ctx.logger.info(`INBOX 启动回收：${reclaimed} 条 processing 回 pending（单写者下必属已死进程）`)
   }
+  // Story 2.1：三钩子采集器。只读实例已在上面 return，所以这里必然是写者实例（AD-12）。
+  // 快照目录与库同父（<profile>/memory/capture/）；文件是「事务未提交」的崩溃标记。
+  const captureRecorder = createCaptureRecorder({
+    connection: () => db?.connection ?? null,
+    captureSteps: resolved.captureSteps,
+    snapshotDir: join(dirname(dbPath), 'capture'),
+    logger: ctx.logger,
+    // AC③：turn/end 采集前显式 await flush（宿主不在 turn 边界 flush；session.md:741）。
+    // 裸 ctx（单测）没有 sessions 服务时缺省 no-op。
+    flush: (session) => {
+      const sessions = (ctx as unknown as {
+        sessions?: { flush?: (value: unknown) => Promise<unknown> }
+      }).sessions
+      return typeof sessions?.flush === 'function'
+        ? Promise.resolve(sessions.flush(session))
+        : Promise.resolve()
+    },
+  })
+  // AC5：启动扫描孤儿快照（有 .snap 文件 = 上一次进程在事务提交前崩溃）并重放入 INBOX。
+  const replayedSnapshots = await captureRecorder.replayOrphanSnapshots()
+  if (replayedSnapshots > 0) {
+    ctx.logger.info(`孤儿快照重放：${replayedSnapshots} 条已重放入 INBOX`)
+  }
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,
@@ -372,6 +399,6 @@ export async function apply(
   const sessionEvents = ctx as unknown as SessionEventHost
   sessionEvents.on?.(
     'session/event',
-    createSessionEventHandler({ gate: idleGate, promotion: promotionTracker }),
+    createSessionEventHandler({ gate: idleGate, promotion: promotionTracker, capture: captureRecorder }),
   )
 }

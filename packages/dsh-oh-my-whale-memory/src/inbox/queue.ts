@@ -79,7 +79,10 @@ export interface InboxItemInput {
   readonly payload: string
   /** 归属会话 id（提升触发按会话聚合，Story 2.5 用）。 */
   readonly sessionId?: string
-  /** 七类分类之一，缺省空串。 */
+  /**
+   * 条目生产者的标签：Story 2.1 写采集来源（step|turn|compaction）；七类记忆 kind 是
+   * **写路径**（工具/命令）的合法域，精炼后由写路径决定节点 kind（评审 P7）。
+   */
   readonly kind?: string
   /** 入队时间，默认 now。 */
   readonly now?: Date
@@ -225,34 +228,46 @@ export function inboxErrorText(error: unknown): string {
 }
 
 /**
- * 入队一条待精炼条目，返回其 id（缺省 randomUUID；同 id 重复入队幂等，不覆盖既有行）。
+ * 在**调用方已开启的事务**内入队一条条目，返回其 id（Story 2.1 抽出）。
  *
- * **自带事务**，因此不得在已有事务内调用——Story 2.2 起 runInTransaction 对同一 async 链的
- * 重入直接抛错。需要「与其它写入同事务」的调用方得自己用「由调用方开事务」的插入语句；
- * 本函数是单条入队的便利包装，不做事务内检测。
+ * 写入语义与 INSERT_ITEM 完全一致：MERGE ... ON CREATE SET，只创建、不更新——同 id 重复入队
+ * 不会覆盖既有行的 status/attempts/lease。调用方注入确定性 id（采集侧用 uuid5('inbox:' + 稳定身份)）
+ * 时，崩溃重放不会造出第二条队列条目。
  */
-export async function enqueueInboxItem(
+export async function writeInboxItem(
   connection: InboxConnection,
   input: InboxItemInput,
 ): Promise<string> {
   const id = input.id ?? randomUUID()
   const now = (input.now ?? new Date()).toISOString()
-  await runInTransaction(connection, async () => {
-    await queryRows(connection, INSERT_ITEM, {
-      id,
-      session_id: input.sessionId ?? '',
-      kind: input.kind ?? '',
-      payload: input.payload,
-      status: INBOX_STATUS_PENDING,
-      attempts: 0,
-      lease_owner: null,
-      lease_until: null,
-      enqueued_at: now,
-      updated_at: now,
-      last_error: null,
-    })
+  await queryRows(connection, INSERT_ITEM, {
+    id,
+    session_id: input.sessionId ?? '',
+    kind: input.kind ?? '',
+    payload: input.payload,
+    status: INBOX_STATUS_PENDING,
+    attempts: 0,
+    lease_owner: null,
+    lease_until: null,
+    enqueued_at: now,
+    updated_at: now,
+    last_error: null,
   })
   return id
+}
+
+/**
+ * 入队一条待精炼条目，返回其 id（缺省 randomUUID；同 id 重复入队幂等，不覆盖既有行）。
+ *
+ * **自带事务**，因此不得在已有事务内调用——Story 2.2 起 runInTransaction 对同一 async 链的
+ * 重入直接抛错。需要「与其它写入同事务」的调用方请用 writeInboxItem（由调用方开事务），
+ * 例如采集侧的「L0 行 + INBOX 行」同一事务（Story 2.1）。本函数是它的单条便利包装。
+ */
+export async function enqueueInboxItem(
+  connection: InboxConnection,
+  input: InboxItemInput,
+): Promise<string> {
+  return runInTransaction(connection, () => writeInboxItem(connection, input))
 }
 
 export interface ClaimInboxOptions {
