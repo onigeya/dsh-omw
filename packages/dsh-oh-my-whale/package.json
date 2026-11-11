@@ -27,6 +27,7 @@
   },
   "scripts": {
     "build": "tsdown && tsc -p tsconfig.build.json",
+    "prepack": "pnpm run build",
     "test": "vitest run --root ../.."
   },
   "dependencies": {
