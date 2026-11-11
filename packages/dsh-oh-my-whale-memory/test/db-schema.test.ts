@@ -5,14 +5,13 @@
  * 首建写入库级元数据 omw_meta{schema_version, embedding_dim, embedding_model_id, created_at}。
  * AC6（同指纹重复写入的合并语义）在 db-upsert.test.ts。
  *
- * 依赖 Windows OpenSSL 3 注入（vector/fts 扩展），同 abi-smoke.test.ts。
+ * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 abi-smoke.test.ts。
  */
 import { access } from 'node:fs/promises'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 let dir: string
@@ -20,7 +19,6 @@ let dbPath: string
 let store: MemoryDatabase
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-schema-')
   dbPath = resolveMemoryDbPath(dir)
   store = await openMemoryDatabase({ dbPath, dim: 4, modelId: 'test-embed-model' })

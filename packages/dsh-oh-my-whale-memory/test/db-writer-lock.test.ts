@@ -3,7 +3,7 @@
  *
  * 单进程内即可覆盖"谁该成为写者、谁该降级只读、陈旧锁能否自动接管"；真正的
  * 跨进程第二实例（含 LadybugDB 的库文件级顺序约束）由 `db-readonly.test.ts` 覆盖。
- * 本文件不需要 LadybugDB，因此不注入 OpenSSL。
+ * 本文件不需要 LadybugDB。
  */
 import { spawn } from 'node:child_process'
 import { access, readFile, writeFile } from 'node:fs/promises'

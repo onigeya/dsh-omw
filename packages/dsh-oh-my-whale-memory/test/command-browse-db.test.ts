@@ -1,7 +1,7 @@
 /**
  * `/memory list` 与 `/memory show` 真库集成测试（Story 1.8 / AC1-AC4）。
  *
- * 沿用 db-upsert.test.ts 范式（injectOpenSslPath → mkdtemp → 真实库 dim=4），
+ * 沿用 db-upsert.test.ts 范式（mkdtemp → 真实库 dim=4），
  * 用裸 ctx 驱动 apply 捕获 commands.register 的定义，再调 definition.handler，
  * 在最外层表面（命令返回值 + 库内事实）上验证：
  * - AC1：25 条未失效 → list 恰返回 20 条且是最新 20（`recorded_at` 倒序，不是插入序）；
@@ -28,7 +28,6 @@ import {
 } from '../src/db/schema'
 import { READONLY_REASON } from '../src/db/writer-lock'
 import { MEMORY_LIST_DEFAULT_LIMIT, type MemoryCommandDefinition } from '../src/command'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
@@ -108,7 +107,6 @@ function idsFromListText(text: string): string[] {
 }
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-browse-')
   dbPath = resolveMemoryDbPath(dir)
 

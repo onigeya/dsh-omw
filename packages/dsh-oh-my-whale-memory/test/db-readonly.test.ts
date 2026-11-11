@@ -8,7 +8,7 @@
 import { spawn } from 'node:child_process'
 import { access, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import { openMemoryDatabase } from '../src/db/database'
 import { MemoryDbError } from '../src/db/errors'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
@@ -23,15 +23,10 @@ import {
   createVectorIndexStatement,
 } from '../src/db/schema'
 import * as plugin from '../src/index'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const FIXTURE = fileURLToPath(new URL('./fixtures/hold-db-open.mjs', import.meta.url))
 const MODEL_ID = 'bge-m3'
-
-beforeAll(() => {
-  injectOpenSslPath()
-})
 
 afterAll(cleanupTempDirs)
 

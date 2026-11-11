@@ -14,7 +14,6 @@ import { access } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
 import { resolveMemoryDbPath } from '../src/db/paths'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 afterAll(cleanupTempDirs)
@@ -93,7 +92,6 @@ describe('memory 插件入口导出形态', () => {
   })
 
   it('有 profileContext 时 apply 在 <profile>/memory/lbug.db 建库并注册 close effect（AC1）', async () => {
-    injectOpenSslPath()
     const dir = await makeTempDir('omw-entry-')
     const warn = vi.fn()
     const info = vi.fn()
@@ -134,7 +132,6 @@ describe('memory 插件入口导出形态', () => {
   })
 
   it('同进程第二次 apply 复用写者锁，不降级只读（Story 1.5 / AC1）', async () => {
-    injectOpenSslPath()
     const dir = await makeTempDir('omw-entry-lock-')
     const warn = vi.fn()
     const info = vi.fn()

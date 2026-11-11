@@ -5,13 +5,12 @@
  * （并集去重）、保留最早 recorded_at、不改 text/layer；跨层同文本产生两个节点。
  * embedding 长度与库 pin 的 dim 不符时抛 MemoryDbError(code='embedding_dim_mismatch')。
  *
- * 依赖 Windows OpenSSL 3 注入（vector/fts 扩展），同 abi-smoke.test.ts。
+ * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 abi-smoke.test.ts。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 let dir: string
@@ -19,7 +18,6 @@ let dbPath: string
 let store: MemoryDatabase
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-upsert-')
   dbPath = resolveMemoryDbPath(dir)
   store = await openMemoryDatabase({ dbPath, dim: 4, modelId: 'test-embed-model' })

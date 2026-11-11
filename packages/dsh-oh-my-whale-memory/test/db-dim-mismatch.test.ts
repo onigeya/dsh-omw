@@ -24,7 +24,6 @@ import {
   createMetaTableStatement,
   META_KEYS,
 } from '../src/db/schema'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const BUILT_DIM = 1024
@@ -34,7 +33,6 @@ let dir: string
 let dbPath: string
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-dim-')
   dbPath = resolveMemoryDbPath(dir)
 

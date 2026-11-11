@@ -8,6 +8,7 @@
  * - HNSW 参数：mu=30, ml=60, pu=0.05, efc=200（与官方示例值一致）
  * - BM25 参数：K=1.2, B=0.75（与官方示例值一致）
  * - 扩展：`vector`（HNSW cosine 磁盘索引）+ `fts`（Okapi BM25）
+ * - Windows 前置条件：OpenSSL 3 的 DLL 目录须在 PATH 中（见 README「构建与测试」）
  *
  * 五步流程：open → CREATE NODE TABLE → INSERT → QUERY → CREATE_VECTOR_INDEX
  * 任一步失败则测试 fail，Story 1.1 须标 blocked 上报，不迁就失败。
@@ -15,10 +16,7 @@
 import { join } from 'node:path'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import * as lbug from '@ladybugdb/core'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
-
-// OpenSSL 3 PATH 注入见 test/openssl.ts（单一事实来源）；本文件建库前调用。
 
 // LadybugDB 官方示例 HNSW/BM25 参数（research.md L107 / L131）
 const HNSW_MU = 30
@@ -37,10 +35,10 @@ let conn: lbug.Connection
 let dir: string
 
 beforeAll(async () => {
-  // Windows 上 vector/fts 扩展加载依赖 OpenSSL 3 DLL（见 injectOpenSslPath 注释），
-  // 必须在打开数据库连接之前注入，否则 step 5 的 INSTALL vector 会以
+  // Windows 上 vector/fts 扩展加载依赖 OpenSSL 3 DLL（libssl-3-x64.dll /
+  // libcrypto-3-x64.dll）——运行测试前必须把它们所在目录放进 PATH（见 README
+  // 「构建与测试」前置条件），否则 step 5 的 INSTALL vector 会以
   // "Failed to load library: ... libvector.lbug_extension" 失败。
-  injectOpenSslPath()
   dir = await makeTempDir('omw-abi-smoke-')
   db = new lbug.Database(join(dir, 'lbug.db'))
   conn = new lbug.Connection(db)

@@ -12,7 +12,7 @@
  * - description 护栏必须声明"不是 ephemeral/transient content"。
  *
  * 工具定义经 apply → ctx.tools.register 捕获（真实 defineTool 编译产物），
- * execute 走真实 LadybugDB 驱动（依赖 Windows OpenSSL 3 注入，同 abi-smoke）。
+ * execute 走真实 LadybugDB 驱动（依赖 Windows 上 PATH 里的 OpenSSL 3，同 abi-smoke）。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { apply } from '../src/index'
@@ -21,7 +21,6 @@ import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER, MEMORY_REMEMBER_TOOL_NAME } from '../src/tools/memory-remember'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 /** ctx.tools.register 捕获到的真实 ToolDefinition（defineTool 编译产物）。 */
@@ -73,7 +72,6 @@ let registered: CapturedTool[]
 let tool: CapturedTool
 
 beforeAll(async () => {
-  injectOpenSslPath()
   dir = await makeTempDir('omw-tool-remember-')
   dbPath = resolveMemoryDbPath(dir)
   registered = []

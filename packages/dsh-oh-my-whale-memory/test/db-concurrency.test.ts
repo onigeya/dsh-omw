@@ -6,13 +6,12 @@
  * 因此去重必须覆盖建表 + 元数据 + 建索引全过程，两个调用方拿到同一个 facade。
  * 并发但配置维度不同时，后到者拿到属于自己的 embedding_dim_mismatch，而不是被对方的错误污染。
  *
- * 依赖 Windows OpenSSL 3 注入（vector/fts 扩展），同 abi-smoke.test.ts。
+ * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 abi-smoke.test.ts。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { MemoryDbError } from '../src/db/errors'
-import { injectOpenSslPath } from './openssl'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const stores: MemoryDatabase[] = []
@@ -20,10 +19,6 @@ const stores: MemoryDatabase[] = []
 async function tempDbPath(label: string): Promise<string> {
   return resolveMemoryDbPath(await makeTempDir(`omw-conc-${label}-`))
 }
-
-beforeAll(() => {
-  injectOpenSslPath()
-})
 
 afterAll(async () => {
   for (const store of stores) {

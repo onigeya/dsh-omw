@@ -13,8 +13,8 @@
  * - 父进程关闭 stdin → 正常释放锁并退出（锁文件被移除）；
  * - 父进程直接 kill → 进程消失、锁文件残留，用于制造 AC3 的陈旧锁场景。
  *
- * OpenSSL 3 的 PATH 由父进程 `injectOpenSslPath()` 注入后随 spawn 继承——建
- * vector/fts 索引需要它（PATH 里没有 Git for Windows 时这一步会失败）。
+ * 建 vector/fts 索引需要 OpenSSL 3：其 DLL 目录必须已在父进程 PATH 中，
+ * 由 spawn 继承（PATH 里没有时这一步会失败）。
  */
 import { createInterface } from 'node:readline'
 import { withFileLock } from '@deepseek-ai/dsh-atomic-write'
