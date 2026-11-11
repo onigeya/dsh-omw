@@ -13,10 +13,41 @@
  *    per-connection promise 链串行化（src/ 没有别的写串行化设施）。
  * 3. DDL 同样在事务内、异常时一并回滚——一次迁移建两张表因此是 all-or-nothing。
  */
+import { AsyncLocalStorage } from 'node:async_hooks'
 import type * as lbug from '@ladybugdb/core'
 
 /** 每个连接一条串行链，保证同一时刻至多一个显式事务。 */
 const writeChains = new WeakMap<object, Promise<unknown>>()
+
+/** 事务开合标志：进 work 前置 active=true，COMMIT/ROLLBACK 后置 false（整条链共享同一对象）。 */
+interface OpenTransaction {
+  active: boolean
+}
+
+/**
+ * 当前 async 链的**打开事务登记表**（Epic 1 复盘 A-2 的重入守卫）。
+ *
+ * store 是 `Map<connection, {active}>`：判据是「本链上下文里该连接是否**仍有打开的事务**」，
+ * 而不是「该连接是否在本链里出现过」。差异出现在**外层已结算之后**：事务 work 里派生的游离续体
+ * 继承同一份 store，COMMIT/ROLLBACK 已把 active 置 false，于是它在事务结束后再调 runInTransaction
+ * 会正常排队（旧实现会误报重入）。
+ *
+ * 用 AsyncLocalStorage + 每链快照而不是布尔标志：**并发**（非嵌套）的两次 runInTransaction
+ * 必须照旧按调用顺序排队（见文件头第 2 条承诺），只有「同一 async 链内该连接仍有打开事务」
+ * 才是错误；布尔标志会把 `Promise.all` 里的并发写误判成重入。
+ */
+const openTransactions = new AsyncLocalStorage<ReadonlyMap<object, OpenTransaction>>()
+
+/** 在当前链的登记表上登记 connection → flag（不可变副本；flag 共享，供事务结束时翻转）。 */
+function withOpenTransaction(
+  held: ReadonlyMap<object, OpenTransaction> | undefined,
+  connection: object,
+  flag: OpenTransaction,
+): ReadonlyMap<object, OpenTransaction> {
+  const next = new Map(held ?? [])
+  next.set(connection, flag)
+  return next
+}
 
 /**
  * 在显式事务内执行 work：成功即 COMMIT 并返回其结果；work（或 COMMIT）抛错时回滚
@@ -28,17 +59,36 @@ const writeChains = new WeakMap<object, Promise<unknown>>()
  * upsertMemory）会让内层排在外层尚未结算的 promise 之后——外层 await 内层，内层的
  * BEGIN TRANSACTION 永远等不到，调用静默挂起。同一事务内的复合写入请直接用
  * writeMemoryVersion 这类「由调用方开事务」的原语。
+ *
+ * Epic 1 复盘 A-2：这条纪律**现在由代码强制**——同一 async 链内该连接**仍有打开事务**时，
+ * 入口立即抛错（async 函数里的同步 throw = 返回被拒的 promise），不再静默挂起；
+ * 事务结算后（COMMIT/ROLLBACK 把 flag 置 false）再调用则正常排队，不会被误报。
  */
 export async function runInTransaction<T>(
   connection: lbug.Connection,
   work: () => Promise<T>,
 ): Promise<T> {
+  // 守卫必须在**同步**入口检查：放进 .then 回调里，内层仍会先排到外层尚未结算的 promise 之后，
+  // 又变成同一个静默挂起。抛普通 Error——不扩 MemoryDbErrorCode 封闭集。
+  const held = openTransactions.getStore()
+  if (held?.get(connection)?.active === true) {
+    throw new Error(
+      'runInTransaction 不得重入：同一 async 链内该连接已有未结算的事务，嵌套 BEGIN TRANSACTION 会静默挂起' +
+      '（外层事务未结算，内层永远等不到）；' +
+      '同一事务内的复合写入请直接用「由调用方开事务」的原语（如 writeMemoryVersion）。',
+    )
+  }
   const previous = writeChains.get(connection) ?? Promise.resolve()
   const run = previous.then(async () => {
+    const flag: OpenTransaction = { active: true }
     await connection.query('BEGIN TRANSACTION')
     try {
-      const result = await work()
+      const result = await openTransactions.run(
+        withOpenTransaction(held, connection, flag),
+        work,
+      )
       await connection.query('COMMIT')
+      flag.active = false
       return result
     } catch (error) {
       try {
@@ -47,6 +97,7 @@ export async function runInTransaction<T>(
         // 见文件头第 1 条：语句出错时引擎已自动回滚，这里的 ROLLBACK 必然报
         // 「无活动事务」。原始错误才是要上抛的那个。
       }
+      flag.active = false
       throw error
     }
   })

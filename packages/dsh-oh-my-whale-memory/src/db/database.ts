@@ -35,6 +35,7 @@
 import { stat } from 'node:fs/promises'
 import * as lbug from '@ladybugdb/core'
 import { ensureAuditTables } from './audit.js'
+import { ensureInboxTables } from '../inbox/queue.js'
 import { MemoryDbError } from './errors.js'
 import {
   META_KEYS,
@@ -265,6 +266,8 @@ async function initializeDatabase(
   await connection.query(createMemoryTableStatement(dim))
   await connection.query(createL0RawTableStatement())
   await ensureAuditTables(connection)
+  // Story 2.2：INBOX 队列表与审计表一样在唯一迁移点建（IF NOT EXISTS，幂等）。
+  await ensureInboxTables(connection)
 
   if (actualDim === null) {
     await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)
