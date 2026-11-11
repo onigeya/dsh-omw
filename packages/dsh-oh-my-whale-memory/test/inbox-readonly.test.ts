@@ -40,8 +40,8 @@ function mergeMeta(key: string, value: string): string {
 
 /** 只读打开只校验 meta + memory 表与 dim（不建索引、不装扩展）。 */
 function buildReadonlyStatements(dim: number, withInbox = true): string[] {
-  const lease = (owner: string, until: string): string =>
-    owner === '' ? 'null' : `'${owner}'`
+  // 只回 lease 值的单参 helper：owner 空串渲染 null（原本多一个从不使用的 until 形参，删掉避免误导）。
+  const lease = (owner: string): string => (owner === '' ? 'null' : `'${owner}'`)
   const inboxRow = (
     id: string,
     status: string,
@@ -50,8 +50,8 @@ function buildReadonlyStatements(dim: number, withInbox = true): string[] {
     at: string,
   ): string =>
     `CREATE (q:l1_inbox {id: '${id}', session_id: 'ro-session', kind: 'episodic', payload: '只读夹具草稿', ` +
-    `status: '${status}', attempts: 1, lease_owner: ${lease(leaseOwner, leaseUntil)}, ` +
-    `lease_until: ${lease(leaseUntil, leaseUntil)}, enqueued_at: '${at}', updated_at: '${at}'})`
+    `status: '${status}', attempts: 1, lease_owner: ${lease(leaseOwner)}, ` +
+    `lease_until: ${lease(leaseUntil)}, enqueued_at: '${at}', updated_at: '${at}'})`
   return [
     createMetaTableStatement(),
     createMemoryTableStatement(dim),

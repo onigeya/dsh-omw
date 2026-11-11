@@ -89,11 +89,22 @@ schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatil
 - **库路径**：`<profile>/memory/lbug.db`。唯一来源是宿主注入的 `profileContext.dir`
   （= `$DSH_HOME/profiles/<name>`），不自行拼 `DSH_HOME`；目录不存在则 `mkdir -p`。
   没有 `profileContext` 时**跳过建库**并 warn，不猜路径。
-- **表结构**：`memory` 节点表 13 列——`id`/`layer`/`kind`/`priority`/`text`/
+- **表结构**（共 6 张）：`memory` 节点表 13 列——`id`/`layer`/`kind`/`priority`/`text`/
   `embedding FLOAT[DIM]`/`valid_at`/`recorded_at`/`invalid_at`/`expired_at`/
   `source_refs STRING[]`/`embedding_model_id`/`embedding_dim`；`l0_raw`（append-only）
-  `id`/`raw_text`/`recorded_at`/`actor`；库级元数据表 `omw_meta` 记
-  `schema_version`/`embedding_dim`/`embedding_model_id`/`created_at`。
+  `id`/`raw_text`/`recorded_at`/`actor`；审计两表 `generation_log`（15 列）与
+  `keyed_decision`（10 列，Story 1.10）；库级元数据表 `omw_meta` 记
+  `schema_version`/`embedding_dim`/`embedding_model_id`/`created_at`；
+  INBOX 队列表 `l1_inbox`（第 6 张，Story 2.2）见下条。
+- **INBOX 队列表 `l1_inbox`（Story 2.2）**：11 列——`id`/`session_id`/`kind`/`payload`/
+  `status`/`attempts INT64`/`lease_owner`/`lease_until`/`enqueued_at`/`updated_at`/
+  `last_error`，`PRIMARY KEY (id)`。状态机 `pending → processing(lease) → done | failed`：
+  取队头在**同一事务**内写 `status='processing'` + `lease_owner`（进程 id）+ `lease_until`
+  （= now + **60s**，AD-6）；FIFO 顺序 = `(enqueued_at ASC, id ASC)`；失败 `attempts` 累加，
+  第 4 次失败（`attempts > 3`）进 `failed` 死信并记 `last_error`；写者启动时把**全部**
+  `processing` 回收为 `pending`（AD-12 单写者 ⇒ 启动时任何 `processing` 行必属已死进程）。
+  建表与回收都只在写者实例：建表在 `src/db/database.ts` 的唯一迁移点、紧跟审计表之后；
+  只读实例不建、不回收、不启动消费者（AD-12）。消费只在 turn 窗口之外进行（AD-6）。
 - **索引建库即建**：`memory_embedding_hnsw`（HNSW cosine）与 `memory_text_fts`（Okapi BM25），
   不做暴力扫描。`CREATE_VECTOR_INDEX`/`CREATE_FTS_INDEX` 不幂等（重复调用抛
   `Binder exception: Index ... already exists`），启动时先 `CALL show_indexes()` 判断、缺才建。
@@ -169,12 +180,16 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
   `invalid_at` / `expired_at`。id 不存在时返回 `{ kind: 'error', text: '未找到 id 为 … 的记忆。' }`。
 - `/memory status`：只读打印记忆库基础状态，全部本地（不调 LLM、不发网络请求）。
   正文逐行钉死：首行 `记忆状态`，随后 `L1: <n>` / `L2: <n>` / `L1_INBOX: <n>` / `L2_INBOX: <n>`、
-  `failed: <n>`（计数事实源只有 `memory` 表的 `layer` 列；Epic 1 尚无 failed 存储，
-  故 **`failed:` 恒 0**——`L1_INBOX` / `L2_INBOX` 只是 INBOX 队列标识的历史计数位，
-  Story 1.11 收敛后写路径只写 `L1`，仅存量行会命中这两个计数）、
+  `failed: <n>`（Story 2.2 起是 `l1_inbox` 表 `status = 'failed'` 的**真实计数**，不再恒 0；
+  `L1_INBOX` / `L2_INBOX` 仍是 `memory` 表 `layer` 列的历史计数位——Story 1.11 收敛后
+  写路径只写 `L1`，仅存量行会命中这两个计数）、
   `embedding: enabled | disabled（降级检索）`（非降级也显式打印）、
   `readonly: false | true, reason: '<原因>'`（只读实例标注 `another instance owns the writer lock`）。
-  `status` 带多余参数 → usage 错误且不查库；库未就绪 → 明确报错，绝不静默返回 0。
+  **当且仅当 `failed > 0`** 时追加明细块：一行 `failed 最近条目:` 加最近 **5** 条
+  `- <id> kind=<kind> attempts=<n>[ stale] updated_at=<ISO> error=<单行摘要>`（`updated_at` 倒序；
+  进入死信起超过 **24h** 的标 `stale`）；没有失败时既有 9 行逐字不变。
+  `status` 带多余参数 → usage 错误且不查库；库未就绪 → 明确报错，绝不静默返回 0；
+  **队列表缺失照抛**（可见错误，不静默报 `failed: 0`）。
 - 无子命令 / 未知子命令（如 `/memory foo`）→ usage 错误，正文见 `MEMORY_COMMAND_USAGE`
   （同时给出 remember / list / show / status 四条用法）。
 - **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /

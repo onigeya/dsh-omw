@@ -383,8 +383,9 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   if (entries.length > 0) {
     lines.push('failed 最近条目:')
     for (const entry of entries) {
+      // id/kind 也过 renderSingleLine：值内换行会伪造出额外行，破坏「逐行钉死」的输出格式（P5）。
       lines.push(
-        `- ${entry.id} kind=${entry.kind} attempts=${entry.attempts}` +
+        `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
         `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
       )
     }

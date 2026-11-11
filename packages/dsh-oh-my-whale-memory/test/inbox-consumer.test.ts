@@ -17,7 +17,12 @@ import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { createIdleGate } from '../src/inbox/idle-gate'
 import { createPromotionTracker, type PromotionTrigger } from '../src/inbox/promotion-trigger'
-import { INBOX_BACKGROUND_TASKS, createInboxConsumer, type InboxConsumer } from '../src/inbox/consumer'
+import {
+  INBOX_BACKGROUND_TASKS,
+  createInboxConsumer,
+  drainInboxBackgroundTasks,
+  type InboxConsumer,
+} from '../src/inbox/consumer'
 import { claimNextInboxItem, completeInboxItem, enqueueInboxItem } from '../src/inbox/queue'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -78,9 +83,11 @@ function makeConsumer(options: {
   promotion?: ReturnType<typeof createPromotionTracker>
   intervalMs?: number
   logger?: { warn(message: string): void }
+  /** 连接替身（默认真库连接）：只用于模拟「记账（complete）失败」这一条路径。 */
+  connection?: () => MemoryDatabase['connection']
 } = {}): InboxConsumer {
   return createInboxConsumer({
-    connection: () => store.connection,
+    connection: options.connection ?? (() => store.connection),
     gate: options.gate ?? createIdleGate(),
     owner: OWNER,
     now: () => at(500),
@@ -97,6 +104,48 @@ async function waitUntil(check: () => boolean, timeoutMs = 3000): Promise<void> 
     if (Date.now() > deadline) throw new Error('waitUntil 超时')
     await new Promise((wake) => setTimeout(wake, 5))
   }
+}
+
+/** 用**真正的** setTimeout 轮询：P4 用例把全局 setTimeout 换成假定时器后 waitUntil 会挂死。 */
+async function waitWithRealTimers(
+  realSetTimeout: typeof setTimeout,
+  check: () => boolean,
+  timeoutMs = 3000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('waitWithRealTimers 超时')
+    await new Promise((wake) => realSetTimeout(wake as () => void, 5))
+  }
+}
+
+/**
+ * 连接替身（P1/P2 用）：只改写「标 done」那条语句（COMPLETE 是唯一含 $done 的语句）的结果，
+ * 用来模拟 completeInboxItem 落空（返回 false）或抛错；BEGIN/COMMIT/ROLLBACK 与其余读写一律透传真连接。
+ */
+function shimConnection(
+  real: MemoryDatabase['connection'],
+  behavior: (id: string) => 'ok' | 'empty' | 'throw',
+): MemoryDatabase['connection'] {
+  return {
+    query: (statement: string) => real.query(statement),
+    prepare: async (statement: string) => ({ statement, inner: await real.prepare(statement) }),
+    execute: async (prepared: unknown, params: Record<string, unknown>) => {
+      const handle = prepared as { statement: string; inner: never }
+      if (handle.statement.includes('$done')) {
+        const mode = behavior(String(params.id ?? ''))
+        if (mode === 'throw') throw new Error('标 done 落库炸了')
+        if (mode === 'empty') {
+          // 真实的空结果集：语句合法但 MATCH 不到行 → completeInboxItem 返回 false（不静默成功）。
+          const miss = await real.prepare(
+            "MATCH (q:l1_inbox) WHERE q.id = 'shim-missing-id' RETURN q.id AS id",
+          )
+          return real.execute(miss, {})
+        }
+      }
+      return real.execute(handle.inner, params as never)
+    },
+  } as unknown as MemoryDatabase['connection']
 }
 
 describe('AC5：空闲闸门与「无处理器不消费」', () => {
@@ -286,5 +335,177 @@ describe('AC5：start/stop 生命周期与后台任务强引用', () => {
     await new Promise((wake) => setTimeout(wake, 40))
     expect(seen).toHaveLength(1)
     expect((await readRow(afterStop))!.status).toBe('pending')
+  })
+})
+
+describe('P3：stop() 后在飞条目结算完即退出（不中断、不再开新轮）', () => {
+  it('第一条卡住时 stop：第一条 done、第二条仍 pending；drain 后模块级 Set 清空', async () => {
+    const first = nextId('stop-mid-1')
+    const second = nextId('stop-mid-2')
+    await enqueueInboxItem(store.connection, { payload: '第一条', now: at(80), id: first })
+    await enqueueInboxItem(store.connection, { payload: '第二条', now: at(81), id: second })
+
+    const seen: string[] = []
+    let release: () => void = () => undefined
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const consumer = makeConsumer({
+      process: async (item) => {
+        seen.push(item.id)
+        await blocked
+      },
+    })
+
+    const before = INBOX_BACKGROUND_TASKS.size
+    consumer.start()
+    await waitUntil(() => seen.length === 1)
+
+    // 第一条还在飞（process 卡住）时停机：在飞条目必须结算完，第二条不得被取出。
+    consumer.stop()
+    release()
+
+    await waitUntil(() => INBOX_BACKGROUND_TASKS.size === before)
+    await drainInboxBackgroundTasks()
+    expect(INBOX_BACKGROUND_TASKS.size).toBe(0)
+
+    expect(seen).toEqual([first])
+    expect(await readRow(first)).toMatchObject({ status: 'done' })
+    expect(await readRow(second)).toMatchObject({ status: 'pending', attempts: 0, leaseOwner: null })
+  })
+})
+
+describe('P1：completeInboxItem 未落库 → 不计成功、不记提升信号、不改队列状态', () => {
+  it('落空（返回 false）时 warn 带 id，条目仍是 processing（不写回 pending/failed）', async () => {
+    const id = nextId('complete-miss')
+    await enqueueInboxItem(store.connection, {
+      payload: '完成落空', kind: 'episodic', sessionId: 'sess-account', now: at(70), id,
+    })
+    const warning = vi.fn()
+    const triggers: PromotionTrigger[] = []
+    const promotion = createPromotionTracker({
+      onTrigger: (trigger) => triggers.push(trigger),
+      l1Threshold: 1,
+    })
+    const shim = shimConnection(store.connection, () => 'empty')
+    const consumer = makeConsumer({
+      logger: { warn: warning },
+      promotion,
+      process: async () => undefined,
+      connection: () => shim,
+    })
+
+    expect(await consumer.runOnce()).toBe(0)
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('完成未落库'))
+    expect(warning.mock.calls.flat().join('\n')).toContain(id)
+    // 队列状态没被改写：仍 processing、lease 未清、attempts 未 +1（没走 failInboxItem）。
+    expect(await readRow(id)).toMatchObject({ status: 'processing', attempts: 0, leaseOwner: OWNER })
+    expect(promotion.totalL1).toBe(0)
+    expect(triggers).toHaveLength(0)
+
+    // 清理：用真连接补一次完成（替身会让它永远停在 processing）。
+    await completeInboxItem(store.connection, id, { now: at(71) })
+    consumer.stop()
+  })
+
+  it('promotion.recordL1 抛错 → 条目照常 done，只 warn（旁路记账失败不入死信）', async () => {
+    const id = nextId('account-throw')
+    await enqueueInboxItem(store.connection, {
+      payload: '记账抛错', kind: 'persona', sessionId: 'sess-account', now: at(72), id,
+    })
+    const warning = vi.fn()
+    const promotion = createPromotionTracker({
+      onTrigger: () => {
+        throw new Error('记账炸了')
+      },
+      l1Threshold: 1,
+    })
+    const consumer = makeConsumer({ logger: { warn: warning }, promotion, process: async () => undefined })
+
+    expect(await consumer.runOnce()).toBe(1)
+    expect(await readRow(id)).toMatchObject({ status: 'done', attempts: 0, leaseOwner: null })
+    expect(warning).toHaveBeenCalledWith(expect.stringContaining('提升记账失败'))
+    expect(warning.mock.calls.flat().join('\n')).toContain('记账炸了')
+    consumer.stop()
+  })
+
+  it('completeInboxItem 抛错 → 该条仍 processing，且不冲垮本轮后续条目', async () => {
+    const bad = nextId('complete-throw')
+    const good = nextId('complete-throw-next')
+    await enqueueInboxItem(store.connection, { payload: '完成抛错', now: at(73), id: bad })
+    await enqueueInboxItem(store.connection, { payload: '后续条目', now: at(74), id: good })
+    const warning = vi.fn()
+    const shim = shimConnection(store.connection, (id) => (id === bad ? 'throw' : 'ok'))
+    const consumer = makeConsumer({
+      logger: { warn: warning },
+      process: async () => undefined,
+      connection: () => shim,
+    })
+
+    expect(await consumer.runOnce()).toBe(1)
+    expect(warning.mock.calls.flat().join('\n')).toContain('完成落库异常')
+    expect(warning.mock.calls.flat().join('\n')).toContain(bad)
+    expect(await readRow(bad)).toMatchObject({ status: 'processing', attempts: 0 })
+    expect(await readRow(good)).toMatchObject({ status: 'done' })
+
+    await completeInboxItem(store.connection, bad, { now: at(75) })
+    consumer.stop()
+  })
+})
+
+describe('P4：arm() 先清既有定时器（同时只有一个待触发轮询）', () => {
+  it('在飞轮次期间 stop()+start()：续期清掉 start() 排下的定时器，不出现两条轮询链', async () => {
+    const realSetTimeout = globalThis.setTimeout
+    const timeouts: Array<{ id: number; fn: () => void }> = []
+    const cleared: number[] = []
+    let nextHandle = 1
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation(((fn: () => void) => {
+      const id = nextHandle++
+      timeouts.push({ id, fn })
+      return { id, unref: () => undefined } as unknown as ReturnType<typeof setTimeout>
+    }) as unknown as typeof setTimeout)
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout').mockImplementation(((handle: { id?: number } | null) => {
+      if (handle && typeof handle.id === 'number') cleared.push(handle.id)
+    }) as unknown as typeof clearTimeout)
+
+    try {
+      const id = nextId('arm-guard')
+      await enqueueInboxItem(store.connection, { payload: '定时器夹具', now: at(90), id })
+      const seen: string[] = []
+      let release: () => void = () => undefined
+      const blocked = new Promise<void>((resolve) => {
+        release = resolve
+      })
+      const consumer = makeConsumer({
+        intervalMs: 7,
+        process: async (item) => {
+          seen.push(item.id)
+          await blocked
+        },
+      })
+
+      consumer.start()
+      const firstHandle = timeouts[timeouts.length - 1].id
+      timeouts[timeouts.length - 1].fn() // 触发首轮：timer 已置 null，runOnce 卡在 process
+      await waitWithRealTimers(realSetTimeout, () => seen.length === 1)
+
+      consumer.stop()
+      consumer.start()
+      const secondHandle = timeouts[timeouts.length - 1].id
+      expect(secondHandle).not.toBe(firstHandle)
+
+      release()
+      await waitWithRealTimers(realSetTimeout, () => timeouts.length >= 3)
+      const resumedHandle = timeouts[timeouts.length - 1].id
+      // 续期前必须清掉 start() 排下的那个定时器，否则会多出第二条轮询链。
+      expect(cleared).toContain(secondHandle)
+      expect(resumedHandle).not.toBe(secondHandle)
+
+      consumer.stop()
+      expect(cleared).toContain(resumedHandle)
+    } finally {
+      timeoutSpy.mockRestore()
+      clearSpy.mockRestore()
+    }
   })
 })

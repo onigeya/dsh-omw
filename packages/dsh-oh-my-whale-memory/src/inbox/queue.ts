@@ -39,7 +39,10 @@ export const INBOX_STATUSES: readonly InboxStatus[] = [
 
 /** lease 时长（AD-6：now() + 60s）。 */
 export const INBOX_LEASE_MS = 60_000
-/** 重试上限：attempts > 3（即第 4 次失败）进死信（Q-4 / AD-6）。 */
+/**
+ * 重试上限（U23 口径）：`attempts` = **累计失败次数**——第 1..3 次失败回 pending 重试，
+ * 第 4 次失败（`attempts > INBOX_MAX_RETRIES`）进 failed 死信（Q-4 / AD-6）。
+ */
 export const INBOX_MAX_RETRIES = 3
 /** 死信 stale 基准（AC4：24h 未成功）。 */
 export const INBOX_FAILED_STALE_MS = 24 * 60 * 60 * 1000
@@ -153,6 +156,14 @@ const FAIL_TEMPLATE = [
 const RECLAIM_EXPIRED = [
   'MATCH (q:' + L1_INBOX_TABLE + ')',
   'WHERE q.status = $processing AND q.lease_until < $now',
+  'SET q.status = $pending, q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
+  'RETURN q.id AS id',
+].join(' ')
+
+/** 写者启动回收（AC3 超集，U7）：见 reclaimProcessingInboxItems。 */
+const RECLAIM_PROCESSING = [
+  'MATCH (q:' + L1_INBOX_TABLE + ')',
+  'WHERE q.status = $processing',
   'SET q.status = $pending, q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
   'RETURN q.id AS id',
 ].join(' ')
@@ -352,6 +363,33 @@ export async function reclaimExpiredLeases(
   const now = (options.now ?? new Date()).toISOString()
   return runInTransaction(connection, async () => {
     const rows = await queryRows(connection, RECLAIM_EXPIRED, {
+      processing: INBOX_STATUS_PROCESSING,
+      pending: INBOX_STATUS_PENDING,
+      now,
+    })
+    return rows.length
+  })
+}
+
+/**
+ * 写者启动回收（AC3 的**超集**，U7）：把**全部** processing 条目回 pending，不等 lease 过期。
+ *
+ * 依据 AD-12：写者文件锁保证同一库同一时刻只有一个写进程，故写者启动那一刻看到的任何
+ * processing 行必然属于已死进程（本进程刚启动，不可能有在飞条目）。若只回收 `lease_until < now`，
+ * 「T 崩溃、T+20s 重启（lease 到 T+60）」的条目会卡在 processing 直到**下一次**重启才自愈。
+ *
+ * 刻意**不做**周期性回收：活进程内的周期回收会在「任务时长 > lease(60s)」时抢走自己正在处理的
+ * 条目（同进程重复精炼）。lease 与任务最坏时长的关系属 Story 2.3 契约（需续租或收紧 lease）。
+ *
+ * reclaimExpiredLeases 保留原语义（活着的持有者不被抢），供运行期/测试使用。
+ */
+export async function reclaimProcessingInboxItems(
+  connection: InboxConnection,
+  options: { readonly now?: Date } = {},
+): Promise<number> {
+  const now = (options.now ?? new Date()).toISOString()
+  return runInTransaction(connection, async () => {
+    const rows = await queryRows(connection, RECLAIM_PROCESSING, {
       processing: INBOX_STATUS_PROCESSING,
       pending: INBOX_STATUS_PENDING,
       now,

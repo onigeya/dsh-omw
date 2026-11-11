@@ -58,7 +58,11 @@ import {
   type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
-import { createInboxConsumer, type InboxConsumer } from './inbox/consumer.js'
+import {
+  createInboxConsumer,
+  drainInboxBackgroundTasks,
+  type InboxConsumer,
+} from './inbox/consumer.js'
 import { createIdleGate } from './inbox/idle-gate.js'
 import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
@@ -66,7 +70,7 @@ import {
   INBOX_FAILED_VIEW_LIMIT,
   countInboxByStatus,
   listRecentFailedInboxItems,
-  reclaimExpiredLeases,
+  reclaimProcessingInboxItems,
 } from './inbox/queue.js'
 
 /**
@@ -302,11 +306,15 @@ export async function apply(
   instanceReadonlyReason = lock.reason
 
   // 注册都是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
-  ctx.effect(() => () => {
-    // dispose 顺序：先停消费者（不再取队头、清掉待触发定时器），再关库。
+  // 异步 disposer：宿主/测试都会 await 它（entry-exports.test.ts 逐个 await closers）。
+  ctx.effect(() => async () => {
+    // dispose 顺序：先停消费者（不再开新轮、清掉待触发定时器），再等**在飞轮次结算完**
+    // （drain），最后关库——否则精炼/落库会落在已关闭的连接上。仍只挂一个 effect，
+    // closer 数不变（entry-exports 钉死 3 / 4 / 6）。
     inboxConsumer?.stop()
     inboxConsumer = null
-    db?.close()
+    await drainInboxBackgroundTasks()
+    await db?.close()
   }, 'omw-memory-db')
   ctx.effect(() => () => lock.release(), 'omw-memory-writer-lock')
 
@@ -330,7 +338,7 @@ export async function apply(
   ctx.logger.info(`记忆库就绪：${dbPath}（dim=${embedding.dim}，model=${embedding.modelId}）`)
 
   // Story 2.2：写者实例的最后一段接线（只读实例在上面已 return，不回收 lease、不启动消费者，AC7）。
-  // 1) 启动回收：processing 且 lease_until < now → pending（进程 kill -9 后的自愈，AC3）；
+  // 1) 启动回收：**全部** processing → pending（进程 kill -9 后的自愈，AC3；理由见下方注释）；
   // 2) 空闲闸门由 session/event 的 turn/start~turn/end 驱动（AD-6）；
   // 3) 消费者当前**没有**精炼处理器（Story 2.3 注入 ctx.llm）——按设计此时不取队头，
   //    取队会丢条目或把未精炼的条目误标 done；本 story 只保证它被 apply 启动、dispose 停止；
@@ -345,8 +353,13 @@ export async function apply(
       )
     },
   })
-  const reclaimed = await reclaimExpiredLeases(db.connection)
-  if (reclaimed > 0) ctx.logger.info(`INBOX 过期 lease 回收：${reclaimed} 条回 pending`)
+  // 启动回收用「全部 processing 回 pending」，而不是只回收过期 lease（U7）：AD-12 的写者锁保证
+  // 同一库同一时刻只有一个写进程，故本进程刚启动时看到的任何 processing 行都属于已死进程。
+  // 只回收过期条目会让「T 崩溃、T+20s 重启（lease 到 T+60）」的条目卡到**下一次**重启才自愈。
+  const reclaimed = await reclaimProcessingInboxItems(db.connection)
+  if (reclaimed > 0) {
+    ctx.logger.info(`INBOX 启动回收：${reclaimed} 条 processing 回 pending（单写者下必属已死进程）`)
+  }
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,

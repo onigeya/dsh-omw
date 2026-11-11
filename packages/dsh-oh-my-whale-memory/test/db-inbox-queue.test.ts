@@ -13,6 +13,7 @@ import { queryAll } from '../src/db/memory'
 import {
   INBOX_FAILED_STALE_MS,
   INBOX_FAILED_VIEW_LIMIT,
+  INBOX_LAST_ERROR_MAX_CHARS,
   INBOX_LEASE_MS,
   INBOX_STATUS_DONE,
   INBOX_STATUS_FAILED,
@@ -23,8 +24,10 @@ import {
   countInboxByStatus,
   enqueueInboxItem,
   failInboxItem,
+  inboxErrorText,
   listRecentFailedInboxItems,
   reclaimExpiredLeases,
+  reclaimProcessingInboxItems,
 } from '../src/inbox/queue'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -53,7 +56,8 @@ async function readRow(id: string): Promise<Record<string, unknown>> {
     store.connection,
     `MATCH (q:l1_inbox) WHERE q.id = '${id}' RETURN q.id AS id, q.status AS status, q.attempts AS attempts, ` +
     'q.lease_owner AS lease_owner, q.lease_until AS lease_until, q.last_error AS last_error, ' +
-    'q.enqueued_at AS enqueued_at, q.updated_at AS updated_at',
+    'q.enqueued_at AS enqueued_at, q.updated_at AS updated_at, ' +
+    'q.payload AS payload, q.kind AS kind, q.session_id AS session_id',
   )
   return rows[0] as Record<string, unknown>
 }
@@ -252,4 +256,158 @@ describe('状态计数与最近死信视图', () => {
     const stale = await listRecentFailedInboxItems(store.connection, { now: later })
     expect(stale.every((entry) => entry.stale === true)).toBe(true)
   }, 60_000)
+})
+
+/**
+ * 评审补丁 P9 的补充面（Story 2.2）：
+ * - CLAIM_HEAD_AFTER 的同毫秒并列分支（此前全仓无一处传 after 游标）；
+ * - last_error 截断（INBOX_LAST_ERROR_MAX_CHARS）与非 Error 值；
+ * - enqueueInboxItem 同 id 幂等（MERGE ON CREATE，不覆盖既有行）；
+ * - processing 条目不再被取出（同一轮不重复精炼同一条）；
+ * - P7 写者启动回收**全部** processing（lease 未过期也回收）与 reclaimExpiredLeases 的语义差。
+ */
+describe('P9-②：CLAIM_HEAD_AFTER 的同毫秒并列分支', () => {
+  it('同一毫秒入队三条 → 游标严格按 id 推进，抵达队尾返回 null', async () => {
+    await drainPending()
+    const a = nextId('tie-a')
+    const b = nextId('tie-b')
+    const c = nextId('tie-c')
+    const stamp = at(600)
+    await enqueueInboxItem(store.connection, { id: a, payload: 'A', now: stamp })
+    await enqueueInboxItem(store.connection, { id: b, payload: 'B', now: stamp })
+    await enqueueInboxItem(store.connection, { id: c, payload: 'C', now: stamp })
+    // 断言前提：三条 enqueued_at 逐字相同，顺序只能由 id 决定。
+    expect((await readRow(a)).enqueued_at).toBe((await readRow(b)).enqueued_at)
+    expect((await readRow(b)).enqueued_at).toBe((await readRow(c)).enqueued_at)
+
+    const first = await claimNextInboxItem(store.connection, { now: at(601) })
+    expect(first?.id).toBe(a)
+    const second = await claimNextInboxItem(store.connection, {
+      now: at(601),
+      after: { enqueuedAt: first!.enqueuedAt, id: first!.id },
+    })
+    expect(second?.id).toBe(b)
+    const third = await claimNextInboxItem(store.connection, {
+      now: at(601),
+      after: { enqueuedAt: second!.enqueuedAt, id: second!.id },
+    })
+    expect(third?.id).toBe(c)
+    expect(await claimNextInboxItem(store.connection, {
+      now: at(601),
+      after: { enqueuedAt: third!.enqueuedAt, id: third!.id },
+    })).toBeNull()
+
+    for (const id of [a, b, c]) await completeInboxItem(store.connection, id, { now: at(602) })
+  })
+})
+
+describe('P9-④：last_error 的截断与非 Error 值', () => {
+  it('inboxErrorText：Error 取 message、非 Error 走 String()、超长截到 INBOX_LAST_ERROR_MAX_CHARS', () => {
+    expect(inboxErrorText(new Error('boom'))).toBe('boom')
+    expect(inboxErrorText('plain')).toBe('plain')
+    expect(inboxErrorText(null)).toBe('null')
+    expect(inboxErrorText({ nope: 1 })).toBe('[object Object]')
+    const long = 'y'.repeat(INBOX_LAST_ERROR_MAX_CHARS + 120)
+    expect(inboxErrorText(long)).toBe(long.slice(0, INBOX_LAST_ERROR_MAX_CHARS))
+    expect(inboxErrorText(long)).toHaveLength(INBOX_LAST_ERROR_MAX_CHARS)
+  })
+
+  it('failInboxItem 落库同样截断；非 Error 值照原样 String() 后记录', async () => {
+    await drainPending()
+    const longId = nextId('long-error')
+    await enqueueInboxItem(store.connection, { id: longId, payload: 'L', now: at(700) })
+    await claimNextInboxItem(store.connection, { now: at(701) })
+    await failInboxItem(store.connection, longId, { error: new Error('y'.repeat(900)), now: at(702) })
+    expect(String((await readRow(longId)).last_error)).toHaveLength(INBOX_LAST_ERROR_MAX_CHARS)
+
+    const objId = nextId('obj-error')
+    await enqueueInboxItem(store.connection, { id: objId, payload: 'O', now: at(703) })
+    await claimNextInboxItem(store.connection, { now: at(704) })
+    await failInboxItem(store.connection, objId, { error: { code: 500 }, now: at(705) })
+    expect((await readRow(objId)).last_error).toBe('[object Object]')
+
+    await completeInboxItem(store.connection, objId, { now: at(706) })
+  })
+})
+
+describe('P9-⑤：enqueueInboxItem 同 id 幂等', () => {
+  it('二次入队不覆盖 payload/kind/session_id/attempts/enqueued_at，且该 id 只有一行', async () => {
+    await drainPending()
+    const id = nextId('dup')
+    await enqueueInboxItem(store.connection, {
+      id, payload: '第一次', kind: 'work_fact', sessionId: 's1', now: at(800),
+    })
+    await enqueueInboxItem(store.connection, {
+      id, payload: '第二次', kind: 'persona', sessionId: 's2', now: at(801),
+    })
+
+    const row = await readRow(id)
+    expect(row.payload).toBe('第一次')
+    expect(row.kind).toBe('work_fact')
+    expect(row.session_id).toBe('s1')
+    expect(row.enqueued_at).toBe(at(800).toISOString())
+    expect(Number(row.attempts)).toBe(0)
+    expect(row.status).toBe(INBOX_STATUS_PENDING)
+
+    const rows = await queryAll(
+      store.connection,
+      'MATCH (q:l1_inbox) WHERE q.id = \'' + id + '\' RETURN q.id AS id',
+    )
+    expect(rows).toHaveLength(1)
+  })
+})
+
+describe('P9-⑥：processing 条目不会被再次取出', () => {
+  it('两条都 processing 后再取为 null；指向队首之前的游标也不会把 processing 行捞回', async () => {
+    await drainPending()
+    const first = nextId('busy-1')
+    const second = nextId('busy-2')
+    await enqueueInboxItem(store.connection, { id: first, payload: '1', now: at(850) })
+    await enqueueInboxItem(store.connection, { id: second, payload: '2', now: at(851) })
+
+    expect((await claimNextInboxItem(store.connection, { now: at(852) }))?.id).toBe(first)
+    expect((await claimNextInboxItem(store.connection, { now: at(853) }))?.id).toBe(second)
+    // 两条都在 processing：队头查询不再返回任何条目（同一轮不重复精炼同一条）。
+    expect(await claimNextInboxItem(store.connection, { now: at(854) })).toBeNull()
+    // 游标刻意指到队首之前：status = pending 的过滤必须优先于游标范围。
+    expect(await claimNextInboxItem(store.connection, {
+      now: at(855),
+      after: { enqueuedAt: at(0).toISOString(), id: 'zzz' },
+    })).toBeNull()
+
+    await completeInboxItem(store.connection, first, { now: at(856) })
+    await completeInboxItem(store.connection, second, { now: at(857) })
+  })
+})
+
+describe('P7：写者启动回收全部 processing（AC3 超集，U7）', () => {
+  it('lease 未过期也回收：reclaimExpiredLeases=0 而 reclaimProcessingInboxItems=2，attempts 保留', async () => {
+    await drainPending()
+    const expired = nextId('reclaim-all-e')
+    const fresh = nextId('reclaim-all-f')
+    await enqueueInboxItem(store.connection, { id: expired, payload: 'E', now: at(900) })
+    await enqueueInboxItem(store.connection, { id: fresh, payload: 'F', now: at(901) })
+
+    // expired：先失败一次（attempts=1）再取一次 → processing。
+    await claimNextInboxItem(store.connection, { now: at(901) })
+    await failInboxItem(store.connection, expired, { error: new Error('第一次失败'), now: at(902) })
+    await claimNextInboxItem(store.connection, { now: at(903) })
+    // fresh：lease 刻意放到 10 倍 —— 「只回收过期」的原语必须放过它。
+    await claimNextInboxItem(store.connection, { now: at(903), leaseMs: 10 * INBOX_LEASE_MS })
+    expect((await readRow(expired)).status).toBe(INBOX_STATUS_PROCESSING)
+    expect((await readRow(fresh)).status).toBe(INBOX_STATUS_PROCESSING)
+
+    expect(await reclaimExpiredLeases(store.connection, { now: at(904) })).toBe(0)
+    expect(await reclaimProcessingInboxItems(store.connection, { now: at(904) })).toBe(2)
+
+    const expiredRow = await readRow(expired)
+    expect(expiredRow.status).toBe(INBOX_STATUS_PENDING)
+    expect(expiredRow.lease_owner).toBeNull()
+    expect(expiredRow.lease_until).toBeNull()
+    expect(Number(expiredRow.attempts)).toBe(1)
+    const freshRow = await readRow(fresh)
+    expect(freshRow.status).toBe(INBOX_STATUS_PENDING)
+    expect(freshRow.lease_owner).toBeNull()
+    expect(Number(freshRow.attempts)).toBe(0)
+  })
 })

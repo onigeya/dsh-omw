@@ -8,7 +8,10 @@
  * - 单轮内用 FIFO 游标推进，一条失败回 pending 也不会在同一轮被重复取出，
  *   从而「失败不阻塞后续条目」（AC4）；
  * - 后台 promise 全部登记进模块级 Set<Promise> 持强引用防 GC（§14），完成后自我移除；
- * - 定时器在 stop() 里 clear，dispose 时由既有的 db effect disposer 调用（不新增 effect）。
+ *   dispose 时先用 drainInboxBackgroundTasks() 等在飞轮次结算，再关库；
+ * - stop() 只保证不再**开**新一轮取队：已取出/正在精炼的条目照常结算完，不得中断在飞条目
+ *   （AC3「不丢条目」）；定时器在 stop() 里 clear，dispose 由既有的 db effect disposer 调用
+ *   （不新增 effect）。
  */
 import type * as lbug from '@ladybugdb/core'
 import {
@@ -34,6 +37,14 @@ export function trackInboxBackgroundTask<T>(promise: Promise<T>): Promise<T> {
   return promise
 }
 
+/**
+ * 等全部在飞后台任务结算（dispose 用）：stop() 只保证不再开新轮，不等待已开的轮次；
+ * 关库前必须先把它们等干净，否则精炼/写库会落在已关闭的连接上。
+ */
+export async function drainInboxBackgroundTasks(): Promise<void> {
+  await Promise.allSettled([...INBOX_BACKGROUND_TASKS])
+}
+
 export const INBOX_POLL_INTERVAL_MS = 1_000
 
 export interface InboxConsumerOptions {
@@ -55,7 +66,7 @@ export interface InboxConsumerOptions {
 export interface InboxConsumer {
   /** 启动消费循环（幂等）。 */
   start(): void
-  /** 停止并清掉待触发的定时器（幂等）。 */
+  /** 停止并清掉待触发的定时器（幂等）；在飞轮次会结算完当前条目后退出。 */
   stop(): void
   isRunning(): boolean
   /** 跑一轮：返回本轮成功消费的条数（测试与诊断入口）。 */
@@ -65,6 +76,9 @@ export interface InboxConsumer {
 export function createInboxConsumer(options: InboxConsumerOptions): InboxConsumer {
   const intervalMs = options.intervalMs ?? INBOX_POLL_INTERVAL_MS
   let running = false
+  // stop() 置位、start() 复位：runOnce 的循环据此在**当前条目结算完**后退出，不中断在飞条目。
+  // 不能直接读 running——诊断/测试会不经 start() 直接调 runOnce（那时 running 一直是 false）。
+  let stopRequested = false
   let timer: ReturnType<typeof setTimeout> | null = null
 
   const runOnce = async (): Promise<number> => {
@@ -76,6 +90,8 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
     let processed = 0
     let after: { enqueuedAt: string; id: string } | undefined
     for (;;) {
+      // stop() 后不再开新一轮取队；本条已取出/正在精炼的照常结算完（不丢条目）。
+      if (stopRequested) break
       if (!options.gate.isIdle()) break
       const item = await claimNextInboxItem(connection, {
         owner: options.owner,
@@ -84,17 +100,35 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       })
       if (!item) break
       after = { enqueuedAt: item.enqueuedAt, id: item.id }
+      // 只有**精炼本身**失败才算这条失败：记账（complete / recordL1）失败不得把精炼成功的条目
+      // 写回 pending/failed——那会重复精炼，attempts 已 3 时还会误送死信。
       try {
         await process(item)
-        await completeInboxItem(connection, item.id, { now: options.now?.() })
-        options.promotion?.recordL1({ sessionId: item.sessionId, kind: item.kind })
-        processed += 1
       } catch (error) {
         const result = await failInboxItem(connection, item.id, { error, now: options.now?.() })
         options.logger?.warn(
           'INBOX 条目精炼失败（id=' + item.id + '，attempts=' + result.attempts +
           '，status=' + result.status + '）：' + inboxErrorText(error),
         )
+        continue
+      }
+      // completeInboxItem 返回 false = 未落库（其文档明写不静默 no-op）：不计成功、不记提升信号。
+      let completed = false
+      try {
+        completed = await completeInboxItem(connection, item.id, { now: options.now?.() })
+      } catch (error) {
+        options.logger?.warn('INBOX 条目完成落库异常（id=' + item.id + '）：' + inboxErrorText(error))
+      }
+      if (!completed) {
+        options.logger?.warn('INBOX 条目完成未落库（id=' + item.id + '）：本轮不计成功、不记提升信号')
+        continue
+      }
+      processed += 1
+      // 提升记账是旁路：记账失败不改队列状态（条目已 done），也不中断本轮。
+      try {
+        options.promotion?.recordL1({ sessionId: item.sessionId, kind: item.kind })
+      } catch (error) {
+        options.logger?.warn('INBOX 提升记账失败（id=' + item.id + '）：' + inboxErrorText(error))
       }
     }
     return processed
@@ -115,6 +149,12 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
   }
 
   const arm = (delayMs: number): void => {
+    // 先清掉既有待触发定时器：在飞轮次结算后的续期与 start() 可能各排一个，
+    // 不清就会形成两条轮询链（定时器泄漏 + 并发消费）。
+    if (timer !== null) {
+      clearTimeout(timer)
+      timer = null
+    }
     const handle = setTimeout(tick, delayMs)
     // 不因一个待触发的轮询把宿主进程钉在事件循环上。
     if (typeof handle.unref === 'function') handle.unref()
@@ -125,10 +165,12 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
     start() {
       if (running) return
       running = true
+      stopRequested = false
       arm(0)
     },
     stop() {
       running = false
+      stopRequested = true
       if (timer !== null) {
         clearTimeout(timer)
         timer = null

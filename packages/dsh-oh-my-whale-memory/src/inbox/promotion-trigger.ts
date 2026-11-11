@@ -62,7 +62,10 @@ export function evaluatePromotionTrigger(state: PromotionTriggerState): Promotio
 export interface PromotionTracker {
   /** 每有一条 L1 精炼落库时调用（按会话 + kind 累计）。 */
   recordL1(input: { readonly sessionId: string; readonly kind: string }): void
-  /** 会话结束（turn/end）时调用：检查该会话同 kind 计数并**清空**该会话计数。 */
+  /**
+   * 会话结束（**边界 = turn/end**——宿主没有会话级结束事件，已知事件类型只有 turn/start 与
+   * turn/end，U22）时调用：检查该会话同 kind 计数并**清空**该会话计数。
+   */
   recordSessionEnd(input: { readonly sessionId: string; readonly kind?: string }): void
   readonly totalL1: number
   pendingFor(sessionId: string): { readonly total: number; readonly byKind: Record<string, number> }
@@ -79,6 +82,8 @@ export interface PromotionTrackerOptions {
  * 有状态累计器：按会话 + kind 计数，L1 全局累计。
  * `recordSessionEnd` 只看该会话内**条数最多的 kind**（并列取先达到者）判定「同 kind 满 5 条」，
  * L1 累计分支不在此参与；判完清掉该会话的计数（否则同一批条目会在之后每次 turn/end 重复触发）。
+ * 「会话结束」只能按 turn/end 观测（宿主无会话级结束事件，U22），故这里的 5 条同 kind 实际是
+ * 「截至该 turn 边界累计」；清空计数保证同一批条目不会在此后的每个 turn/end 重复发信号。
  */
 export function createPromotionTracker(options: PromotionTrackerOptions): PromotionTracker {
   const sessionKinds = new Map<string, Map<string, number>>()
