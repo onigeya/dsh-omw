@@ -101,6 +101,29 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
     )
     expect(lines).toHaveLength(12)
   })
+
+  it('P5：id/kind 内的换行也被单行化，不伪造额外行', () => {
+    const text = renderMemoryStatus({
+      ...BASE_SNAPSHOT,
+      failed: 1,
+      failedEntries: [
+        {
+          id: 'i-1\n伪造行',
+          kind: 'work_fact\n伪造行',
+          attempts: 4,
+          lastError: null,
+          updatedAt: '2026-11-11T00:00:00.000Z',
+          stale: false,
+        },
+      ],
+    })
+    const lines = text.split('\n')
+    // 9 行基准 + 「failed 最近条目:」+ 1 行条目：id/kind 里的换行不得裂成更多行。
+    expect(lines).toHaveLength(11)
+    expect(lines[10]).toContain('i-1')
+    expect(lines[10]).toContain('kind=work_fact')
+    expect(lines[10]).toContain('attempts=4')
+  })
 })
 
 function makeCtx(

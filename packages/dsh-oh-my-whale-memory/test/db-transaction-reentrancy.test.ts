@@ -72,6 +72,26 @@ describe('AC8：同一 async 链内不得重入', () => {
     expect(await rowIds(id)).toHaveLength(0)
     expect(await runInTransaction(store.connection, async () => 'ok')).toBe('ok')
   })
+
+  it('P6：事务 work 内派生的游离续体在外层 COMMIT 后再开事务，不误报重入', async () => {
+    let release: () => void = () => {}
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const holder: { promise?: Promise<string> } = {}
+    await runInTransaction(store.connection, async () => {
+      // 在事务上下文内派生游离续体（不 await）：它继承本链的登记表。
+      const detached = (async () => {
+        await gate
+        return runInTransaction(store.connection, async () => 'detached-ok')
+      })()
+      // 结果由下方 await 观察；这里只防未处理拒绝告警。
+      detached.catch(() => {})
+      holder.promise = detached
+      return 'outer'
+    })
+    // 此刻外层已 COMMIT：登记表里该连接仍在，但 active 已翻 false。
+    release()
+    expect(await holder.promise).toBe('detached-ok')
+  })
 })
 
 describe('并发非嵌套：仍按调用顺序串行执行（守卫不误杀）', () => {
