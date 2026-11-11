@@ -14,7 +14,8 @@ import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { INBOX_LEASE_MS, claimNextInboxItem, enqueueInboxItem } from '../src/inbox/queue'
-import type { InboxConsumerOptions } from '../src/inbox/consumer'
+import { drainInboxBackgroundTasks, type InboxConsumerOptions } from '../src/inbox/consumer'
+import { captureStableKey, l0InboxId, l0RawId } from '../src/db/l0'
 import type { MemoryCommandDefinition } from '../src/command'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -181,5 +182,45 @@ describe('P3/VG-V4：db effect 的 disposer 先停消费者、等在飞轮次、
     await dbEffect!.dispose()
 
     expect(consumer!.isRunning()).toBe(false)
+  }, 60_000)
+})
+
+describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③）', () => {
+  it('inject 含 sessions；回放 turn/end 后 l0_raw 与 l1_inbox 各落 1 行，且重复回放不增行', async () => {
+    const dir = await makeTempDir('omw-inbox-capture-')
+    const dbPath = resolveMemoryDbPath(dir)
+    await ensureMemoryDbDirectory(dbPath)
+    const store: MemoryDatabase = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL_ID })
+
+    captured.options = undefined
+    const { ctx, listeners } = makeCtx(dir)
+    await plugin.apply(ctx, EMBEDDING_CONFIG)
+
+    expect(plugin.inject).toContain('sessions')
+    expect(listeners).toHaveLength(1)
+
+    const session = { id: 'apply-capture', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
+    listeners[0](session, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+    await drainInboxBackgroundTasks()
+
+    const stableKey = captureStableKey('turn', 'apply-capture', '1')
+    const l0 = (await queryAll(
+      store.connection,
+      "MATCH (l:l0_raw) WHERE l.id = '" + l0RawId(stableKey) + "' RETURN l.raw_text AS raw_text, l.actor AS actor",
+    ))[0]
+    expect(l0?.raw_text).toBe('user: 轮末原文')
+    expect(l0?.actor).toBe('apply-capture')
+
+    const inbox = await readInboxRow(store.connection, l0InboxId(stableKey))
+    expect(inbox.status).toBe('pending')
+
+    // 确定性 id + 每轮至多一次：同一 (session, turn) 再回放不新增第二行队列条目。
+    listeners[0](session, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+    await drainInboxBackgroundTasks()
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (q:l1_inbox) WHERE q.id = '" + l0InboxId(stableKey) + "' RETURN q.id AS id",
+    )
+    expect(rows).toHaveLength(1)
   }, 60_000)
 })

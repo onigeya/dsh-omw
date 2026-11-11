@@ -81,3 +81,56 @@ describe('createSessionEventHandler：turn/start 进窗、turn/end 出窗', () =
     expect(gate.isIdle()).toBe(false)
   })
 })
+
+describe('Story 2.1：三钩子采集分派', () => {
+  function makeCapture() {
+    const calls: string[] = []
+    return {
+      calls,
+      capture: {
+        recordStepEnd: () => { calls.push('step') },
+        recordCompactionStart: () => { calls.push('compaction') },
+        recordTurnEnd: () => { calls.push('turn') },
+      },
+    }
+  }
+
+  it('step/end 与 compaction/start 分派给采集器；turn/end 在出窗之后分派', () => {
+    const gate = createIdleGate()
+    const promotion = createPromotionTracker({ onTrigger: () => {} })
+    const { calls, capture } = makeCapture()
+    let idleAtTurnEnd = false
+    const handle = createSessionEventHandler({
+      gate,
+      promotion,
+      capture: {
+        ...capture,
+        recordTurnEnd: () => { idleAtTurnEnd = gate.isIdle(); calls.push('turn') },
+      },
+    })
+
+    handle({ id: 's1' }, { type: 'step/end', turn: 1, step: 2 })
+    handle({ id: 's1' }, { type: 'compaction/start', compactionId: 'c1', turn: null })
+    handle({ id: 's1' }, { type: 'turn/start', turn: 1 })
+    expect(gate.isIdle()).toBe(false)
+    handle({ id: 's1' }, { type: 'turn/end', turn: 1, reason: { kind: 'completed' } })
+
+    expect(calls).toEqual(['step', 'compaction', 'turn'])
+    expect(idleAtTurnEnd).toBe(true)
+    expect(gate.isIdle()).toBe(true)
+  })
+
+  it('无关事件不触发采集；无 capture 时不抛（2.2 降级形态）', () => {
+    const gate = createIdleGate()
+    const promotion = createPromotionTracker({ onTrigger: () => {} })
+    const { calls, capture } = makeCapture()
+    const handle = createSessionEventHandler({ gate, promotion, capture })
+    handle({ id: 's1' }, { type: 'assistant/message' })
+    handle({ id: 's1' }, undefined)
+    expect(calls).toEqual([])
+
+    const plain = createSessionEventHandler({ gate, promotion })
+    expect(() => plain({ id: 's2' }, { type: 'step/end', turn: 1, step: 1 })).not.toThrow()
+    expect(() => plain({ id: 's2' }, { type: 'compaction/start', turn: null })).not.toThrow()
+  })
+})
