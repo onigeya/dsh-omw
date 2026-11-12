@@ -33,6 +33,7 @@ import {
 } from '../inbox/queue.js'
 import { MEMORY_REMEMBER_LAYER } from '../tools/memory-remember.js'
 import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute } from './llm-refine.js'
+import type { RelationRunner } from '../wiki/relations.js'
 
 /** 单次 `process` 的硬上界（R2：一次尝试 ≤30s，含 embedding；重试不在同一次尝试内）。 */
 export const INBOX_PROCESS_TIMEOUT_MS = 30_000
@@ -72,6 +73,11 @@ export interface InboxProcessorDeps {
   readonly llmTimeoutMs?: number
   readonly now?: () => Date
   readonly logger?: { warn(message: string): void }
+  /**
+   * 关系识别跑者（Story 2.6 / FR-17）。在 L1 事务**提交之后**调用：LLM 不可用 / 超时 /
+   * embedding 缺失都只跳过关系写入，**记忆照常进库**（AC:779-782）。不传即完全不跑关系。
+   */
+  readonly relations?: RelationRunner | null
 }
 
 interface EmbedFactsResult {
@@ -207,10 +213,11 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     // item.id 就是 l0_raw 行 id（2.3 P1 已把 L0 与 INBOX 统一成同一身份），故它的层是 L0，
     // 与刚写的 L1 节点构成 l0_raw→memory 的 EVIDENCE 边（2.5 判据②的链头）。
     let marked = false
+    // 事务外仍需这份清单（关系识别在事务提交后跑），故声明在闭包之外。
+    const writtenL1: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
     await runInTransaction(connection, async () => {
       marked = await markInboxItemDone(connection, item.id, { now: now() })
       if (!marked) return
-      const writtenL1: string[] = []
       for (let i = 0; i < refined.facts.length; i += 1) {
         const fact = refined.facts[i]!
         const vector = embedded.vectors[i] ?? null
@@ -235,16 +242,16 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
           },
           { now, logger: deps.logger },
         )
-        writtenL1.push(result.id)
+        writtenL1.push({ id: result.id, text: fact.text, kind: existing ? existing.kind : fact.kind, vector })
       }
       // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
       // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
       const edgeResult = await writeEvidenceEdges(
         connection,
-        writtenL1.map((id) => ({
+        writtenL1.map((node: { readonly id: string }) => ({
           fromId: item.id,
           fromLayer: L0_LAYER,
-          toId: id,
+          toId: node.id,
           toLayer: MEMORY_REMEMBER_LAYER,
           reason: 'refine',
         })),
@@ -275,6 +282,30 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
 
     // marked=false：条目已被处理过（R1 的 at-most-once 命中），本次不写任何产出。
     if (!marked) return { completed: true, kinds: [] }
+
+    // ⑤ 关系识别（Story 2.6 / FR-17）：在 L1 事务之外 best-effort 执行——AC:779-782 明确
+    // 「LLM 不可用或关系识别超时 ⇒ 跳过关系写入、记忆仍进库」。复用写时已算的 embedding，
+    // 不重算、不新增 ctx.effect；跟随精炼任务的总预算 signal。
+    if (deps.relations) {
+      try {
+        await deps.relations({
+          itemId: item.id,
+          route,
+          entries: writtenL1.map((node) => ({
+            id: node.id,
+            layer: MEMORY_REMEMBER_LAYER,
+            kind: node.kind,
+            text: node.text,
+            embedding: node.vector,
+          })),
+          now: now().toISOString(),
+          signal,
+        })
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        deps.logger?.warn('关系识别跑者异常（id=' + item.id + '）：' + message + '——记忆已入库，关系跳过')
+      }
+    }
     return { completed: true, kinds: refined.facts.map((fact) => fact.kind) }
   }
 }
