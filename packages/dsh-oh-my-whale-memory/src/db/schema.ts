@@ -191,3 +191,43 @@ export function createVectorIndexStatement(): string {
 export function createFtsIndexStatement(): string {
   return "CALL CREATE_FTS_INDEX('memory', 'memory_text_fts', ['text'])"
 }
+
+/**
+ * 类型化边表（Story 2.6 / AD-4、AD-19、AD-21）。
+ *
+ * EVIDENCE 必须是 **REL TABLE GROUP**：单条 `*1..4` 变长递归要能跨
+ * `l0_raw→memory` 与 `memory→memory` 两段走完「L2→L1→L0」；拆成两张单对边表时
+ * 跨表递归不可用，相关子查询会给出错判（brief-2-6-readiness.md §2.3 N1 实测）。
+ * GROUP 的两对表**共享属性集**（`CALL table_info('EVIDENCE')` 只返回 reason），
+ * 故边上只留 `reason`，不加时间列（brief §5.1 U6，Lead 已批准）。
+ *
+ * RELATED 是普通 REL TABLE：同层语义关联，由关系识别 LLM 提议、应用层校验后写入。
+ *
+ * 方向：被引用者 → 引用者（低层 → 高层）。同层禁止 EVIDENCE（U5，同层走 RELATED）。
+ */
+export const EVIDENCE_TABLE = 'EVIDENCE'
+export const RELATED_TABLE = 'RELATED'
+
+/**
+ * 闭包深度固定 4（AD-19：常量、不来自配置、不随 FR-12 的 depth 漂移）。
+ * L3 已退役（AD-17），现实证据链最长 2 跳（L0→L1→L2），4 是余量而非必需。
+ */
+export const EVIDENCE_CLOSURE_DEPTH = 4
+
+/** EVIDENCE 建表 DDL：GROUP 挂两对表（l0_raw→memory、memory→memory）。 */
+export function createEvidenceTableStatement(): string {
+  return (
+    'CREATE REL TABLE GROUP IF NOT EXISTS ' + EVIDENCE_TABLE + '(' +
+    'FROM ' + L0_RAW_TABLE + ' TO ' + MEMORY_TABLE + ', ' +
+    'FROM ' + MEMORY_TABLE + ' TO ' + MEMORY_TABLE + ', ' +
+    'reason STRING)'
+  )
+}
+
+/** RELATED 建表 DDL：同层（memory→memory）。 */
+export function createRelatedTableStatement(): string {
+  return (
+    'CREATE REL TABLE IF NOT EXISTS ' + RELATED_TABLE + '(' +
+    'FROM ' + MEMORY_TABLE + ' TO ' + MEMORY_TABLE + ', reason STRING)'
+  )
+}

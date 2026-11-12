@@ -80,6 +80,24 @@ export const BACKFILL_EMBEDDING_ACTION = 'backfill_embedding'
  */
 export const RESURRECT_MEMORY_ACTION = 'resurrect_memory'
 
+/**
+ * EVIDENCE 结构写边（Story 2.6 / AD-10）：精炼结构在写 L1 的**同一事务**内建
+ * l0_raw→memory 边。EVIDENCE 的唯一写者就是这条路径（裁决 U4）。
+ */
+export const WRITE_EVIDENCE_ACTION = 'write_evidence'
+
+/** X1 历史回填（Story 2.6 / 裁决 X1）：把建表前既有节点的 source_refs[] 物化为 EVIDENCE 边。 */
+export const BACKFILL_EVIDENCE_ACTION = 'backfill_evidence'
+
+/** 关系写入（Story 2.6 / FR-17）：LLM 提议、应用层校验后写 RELATED 边。 */
+export const WRITE_RELATED_ACTION = 'write_related'
+
+/** 关系写入整体跳过（Story 2.6 / AC5 / brief §5.1）：embedding 禁用或缺失、LLM 不可用/超时。 */
+export const SKIP_RELATED_ACTION = 'skip_related'
+
+/** LLM 提议的 EVIDENCE 被拒绝建边（Story 2.6 / 裁决 U4）：EVIDENCE 只由精炼结构写。 */
+export const REJECT_EVIDENCE_ACTION = 'reject_evidence'
+
 /** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
 export const DIRECT_CASCADE_DEPTH = 0
 
