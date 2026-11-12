@@ -137,12 +137,18 @@ function insertRefineAudit(
   outcome: GenerationLogOutcome,
   reason: string | null,
   now: () => Date,
+  /**
+   * action 缺省 refine_inbox。**降级可见性**（P16/T18）要把某些行落到独立 action 上——
+   * countRelatedSkips（/memory status 的降级计数）按 action 白名单统计，只改 reason 文本
+   * 是统计不到的（曾经就是这样：reason 前缀写了 write_evidence_skipped，action 仍是 refine_inbox）。
+   */
+  action: string = REFINE_INBOX_ACTION,
 ): Promise<string> {
   return insertGenerationLog(connection, {
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
-    action: REFINE_INBOX_ACTION,
+    action,
     outcome,
     reason,
     l0Refs: [itemId],
@@ -295,14 +301,15 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         )
         await insertRefineAudit(connection, item.id, 'success', null, now)
         if (edgeResult.skipped.length > 0) {
-          // 评审 P16（T18）：用独立 action（而非 refine_inbox 的 reason 文本），
-          // 这样 countRelatedSkips（status 的降级计数）能统计到（AD-21 降级必须可见）。
+          // 评审 P16（T18）：落**独立 action**（不是 refine_inbox 的 reason 文本）——
+          // countRelatedSkips 按 action 白名单计数，只改 reason 统计不到（AD-21 降级必须可见）。
           await insertRefineAudit(
             connection,
             item.id,
             'uncertain',
-            WRITE_EVIDENCE_SKIPPED_ACTION + '-skipped=' + String(edgeResult.skipped.length),
+            'skipped=' + String(edgeResult.skipped.length),
             now,
+            WRITE_EVIDENCE_SKIPPED_ACTION,
           )
         }
         if (embedded.failure) {

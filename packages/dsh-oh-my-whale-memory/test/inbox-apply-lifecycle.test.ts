@@ -283,12 +283,22 @@ describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => 
     expect(typeof maintenance).toBe('function')
     const connection = captured.options?.connection() ?? null
     expect(connection).not.toBeNull()
-    await maintenance?.()
-    // EVIDENCE 回填跑到了：空库扫完写哨兵（不新增存储，纯逻辑水位）。
-    const cursor = await queryAll(
-      connection as Parameters<typeof queryAll>[0],
-      "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS v",
+    const conn = connection as Parameters<typeof queryAll>[0]
+    // 评审 P15（T17）改了空库语义：游标为空 + 页为空 ⇒ 直接 return 0、**不写 done 哨兵**
+    //（done 是「扫完了」的断言，空库给不出这个结论；先写 done 会让后续新增的存量节点永远
+    // 不被回填）。所以这里先造一条**建表前就存在、source_refs 指向真 L0 行**的节点，
+    // 让回填真的扫到一页并写边，才能断言扫描跑完。
+    await queryAll(conn, "CREATE (l:l0_raw {id: 'wire-l0', raw_text: '原文', recorded_at: '2026-01-01T00:00:00.000Z', actor: 'system'})")
+    await queryAll(
+      conn,
+      "CREATE (m:memory {id: 'wire-m1', layer: 'L1', kind: '', priority: 0, text: '存量节点', " +
+        "valid_at: '2026-01-01T00:00:00.000Z', recorded_at: '2026-01-02T00:00:00.000Z', source_refs: ['wire-l0']})",
     )
+    await maintenance?.()
+    // EVIDENCE 回填跑到了：写了边 + 游标推进到 done（纯逻辑水位，不新增存储）。
+    const edges = await queryAll(conn, "MATCH (:l0_raw {id: 'wire-l0'})-[e:EVIDENCE]->(:memory {id: 'wire-m1'}) RETURN count(e) AS c")
+    expect(Number(edges[0]?.c ?? 0)).toBe(1)
+    const cursor = await queryAll(conn, "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS v")
     expect(cursor[0]?.v).toBe('done')
     // 且**没有**任何 embedding 回填副作用（disabled ⇒ 不接 embeddingBackfill）。
     const embeddingRuns = await queryAll(

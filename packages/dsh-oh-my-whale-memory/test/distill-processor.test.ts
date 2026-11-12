@@ -16,6 +16,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
+import { writeL0Raw } from '../src/db/l0'
 import { queryAll, upsertMemory } from '../src/db/memory'
 import { claimNextInboxItem, completeInboxItem, enqueueInboxItem, reclaimProcessingInboxItems, type InboxItem } from '../src/inbox/queue'
 import { InboxRefineError, createInboxConsumer } from '../src/inbox/consumer'
@@ -98,8 +99,19 @@ const failingEmbed = (reason: string): EmbedClient => ({
   embed: async () => ({ ok: false, reason, message: 'stub failure' }),
 })
 
+/**
+ * 造一条「可精炼」的 INBOX 条目。
+ *
+ * **必须同时写 l0_raw 行且 id 相同**（Story 2.3 的 P1：capture 侧 L0 行与 INBOX 行同一身份）。
+ * 否则精炼建 EVIDENCE 边时 l0_raw 端点缺失 ⇒ writeEvidenceEdges 记 endpoint-missing ⇒
+ * processor 再补一条 write_evidence_skipped 的 uncertain 审计（P6/P16 的降级可见），
+ * 于是「refine 审计 = 1 条」这类断言会被这条**正确**的降级行打破。
+ *
+ * 生产路径把两条写在同一事务里；这里是测试夹具，两个原语各自开事务即可（被测对象是 processor）。
+ */
 async function claimFixture(tag: string, payload: string): Promise<InboxItem> {
   const id = nextId(tag)
+  await writeL0Raw(store.connection, { id, text: payload, recordedAt: NOW, actor: 'sess-1' })
   await enqueueInboxItem(store.connection, { id, payload, kind: 'work_fact', sessionId: 'sess-1', now: NOW })
   const item = await claimNextInboxItem(store.connection, { owner: 'test-owner', now: NOW })
   if (!item || item.id !== id) throw new Error('夹具取不到自己的队头：' + id)
@@ -337,6 +349,8 @@ describe('① 崩溃重放（U12）', () => {
 describe('R1 + R4① 端到端：消费者 + 处理器', () => {
   it('一条精炼：处理器自标 done、按精炼后的 kind 记提升信号、llm 只调一次', async () => {
     const id = nextId('e2e')
+    // 同 claimFixture：L0 行与 INBOX 行同一 id，否则 EVIDENCE 边端点缺失会多出一条降级审计。
+    await writeL0Raw(store.connection, { id, text: '用户: 我偏好中文', recordedAt: NOW, actor: 'sess-9' })
     await enqueueInboxItem(store.connection, { id, payload: '用户: 我偏好中文', kind: 'turn', sessionId: 'sess-9', now: NOW })
     const { llm, calls } = scriptedLlm(okOutput([
       { text: '偏好中文', kind: 'persona', priority: 0 },
