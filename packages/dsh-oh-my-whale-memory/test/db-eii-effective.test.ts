@@ -12,7 +12,7 @@
  */
 import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { checkReachableToL0, computeEiiViolations } from '../src/db/eii'
+import { checkReachableToL0, computeEiiViolations, computeEvidenceDrift } from '../src/db/eii'
 import { ensureEdgeTables, writeEvidenceEdges } from '../src/db/edges'
 import { memoryNodeId } from '../src/db/id'
 import { resolveMemoryDbPath } from '../src/db/paths'
@@ -121,5 +121,25 @@ describe('P9①：有效性三条件（未来 valid_at / 失效 / forget）', ()
     expect(violations).not.toContain(invalidId)
     expect(violations).not.toContain(expiredId)
     void queryAll
+  })
+})
+/**
+ * 评审 P18b（T20）变异审计 M9 补钉：`computeEvidenceDrift` 漂移 A 必须遍历**去重后的 refSet**。
+ * 库内 `source_refs` 允许含重复 id（`list_concat` 追加时可能留重复），用原数组遍历会把
+ * 同一条漂移放大成多条（M9 = 用 refs 数组替回 refSet 时，本用例变红）。
+ */
+describe('P18b：漂移 A 按去重 refSet 计数（重复 ref 不放大）', () => {
+  it('同一条 ref 出现两次 ⇒ refsWithoutEdges 只出现一条', async () => {
+    await store.connection.query(
+      "CREATE (l:l0_raw {id: 'drift-l0', raw_text: '原文', recorded_at: '" + PAST + "', actor: 'system'})",
+    )
+    await seedNode({ id: 'drift-m', text: '有重复引用的事实', embedding: null })
+    // 目标节点无 EVIDENCE 入边 ⇒ drift-l0 是一条真漂移；同时把 source_refs 塞成重复值。
+    await store.connection.query(
+      "MATCH (m:memory {id: 'drift-m'}) SET m.source_refs = ['drift-l0', 'drift-l0']",
+    )
+    const drift = await computeEvidenceDrift(store.connection, NOW)
+    const entries = drift.refsWithoutEdges.filter((e) => e.id === 'drift-m' && e.ref === 'drift-l0')
+    expect(entries).toHaveLength(1)
   })
 })

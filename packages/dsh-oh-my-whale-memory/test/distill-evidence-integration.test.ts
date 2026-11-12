@@ -284,6 +284,21 @@ describe('P2/T11：processor→关系跑者接线（AC4 一次性决定 / AC3 �
       recordedAt: NOW.toISOString(),
       actor: 'system',
     })
+    // 库里再放一个**邻居**（不同指纹、同 E1）——这条是变异审计 M5 的钉子关键：
+    // 若 processor 把「指纹合并命中的既有节点」也交给关系跑者（M5 = 用 writtenL1 替 relationEntries），
+    // 它就会为此跑一次 recallNeighbors + LLM（llmCalls 变 1、落 write_related 审计）；
+    // 只有 relationEntries 只含新节点时，才真的「一次 LLM 都不发」。
+    await upsertMemory(store.connection, {
+      layer: MEMORY_REMEMBER_LAYER,
+      text: '一个与主题无关的既有邻居',
+      embedding: E1,
+      embeddingModelId: 'test-embed',
+      kind: 'work_fact',
+      priority: 0,
+      validAt: NOW.toISOString(),
+      recordedAt: NOW.toISOString(),
+      actor: 'system',
+    })
     let llmCalls = 0
     const relationLlm = {
       stream() {
