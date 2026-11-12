@@ -50,6 +50,7 @@ import { computeEvidenceGap } from './db/eii.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
+import { runInTransaction } from './db/transaction.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 import {
   countMemoriesByLayer,
@@ -57,6 +58,8 @@ import {
   getMemoryById as readMemoryById,
   listEffectiveMemoryIdsByLayer,
   listMemories as readMemories,
+  readL2PromotionCursor,
+  writeL2PromotionCursor,
 } from './db/memory.js'
 import {
   createMemoryCommandDefinition,
@@ -405,31 +408,43 @@ export async function apply(
   // 4) 生命周期挂在既有 db effect 的 disposer 上，不新增 ctx.effect（entry-exports 钉死 closer 数）。
   const idleGate = createIdleGate()
   /**
-   * Story 2.5（U3/U10）：把最近的有效 L1 入 l2_inbox —— 每条 L1 一个条目（一个条目综合一条 L1）。
+   * Story 2.5（U3/U10）：把有效 L1 入 l2_inbox —— 每条 L1 一个条目（一个条目综合一条 L1）。
    *
    * - 条目 id 是确定性内容键（{@link buildL2PromotionItemId}）：MERGE ON CREATE 只建一次、不覆盖
    *   既有行 ⇒ 同一 L1 不会重复入队、崩溃重放不产重条目，**v1 的「丢弃不重试」**由此成立。
    * - 已在队列里的（pending/processing/done/failed）直接跳过：done = 已有结论，failed = 已耗尽
    *   4 次机会。要重试只能改 L1 文本（换指纹）或调阈值重新标定。
    * - sessionId 取触发信号的会话：L2 条目的路由解析靠它（缺省回退到 Config 的显式路由）。
+   *
+   * 评审 P1（T1）：候选**按 `(recorded_at, id)` 升序游标分页**取（页大小 200），不再把触发阈值
+   * 当 LIMIT —— 旧口径每轮只覆盖最新 20 条有效 L1，更早的永久不可达。游标存 omw_meta，
+   * 页尾（本页不足一页）回绕到起点，与确定性条目 id + readStatus 跳过共同保证收敛。
+   * 评审 P12（T18）：整批入队 + 游标推进在**同一个 runInTransaction** 里完成，且循环内只能用
+   * `writeItem`（`enqueue` 自带事务，重入会抛）—— 避免裸语句与 L1 写链交错。
    */
   const enqueuePromotion = async (trigger: { readonly reason: string, readonly sessionId: string }): Promise<number> => {
     const connection = db?.connection
     if (!connection) return 0
-    const l1Ids = await listEffectiveMemoryIdsByLayer(connection, MEMORY_REMEMBER_LAYER, L1_PROMOTION_THRESHOLD)
-    let enqueued = 0
-    for (const l1Id of l1Ids) {
-      const id = buildL2PromotionItemId(l1Id)
-      if (await l2InboxQueue.readStatus(connection, id) !== null) continue
-      const payload: L2PromotionPayload = { l1Ids: [l1Id] }
-      await l2InboxQueue.enqueue(connection, {
-        id,
-        sessionId: trigger.sessionId,
-        kind: L2_INBOX_KIND,
-        payload: JSON.stringify(payload),
-      })
-      enqueued += 1
-    }
+    const after = await readL2PromotionCursor(connection)
+    const page = await listEffectiveMemoryIdsByLayer(connection, MEMORY_REMEMBER_LAYER, { after })
+    const enqueued = await runInTransaction(connection, async () => {
+      let written = 0
+      for (const l1Id of page.ids) {
+        const id = buildL2PromotionItemId(l1Id)
+        if (await l2InboxQueue.readStatus(connection, id) !== null) continue
+        const payload: L2PromotionPayload = { l1Ids: [l1Id] }
+        await l2InboxQueue.writeItem(connection, {
+          id,
+          sessionId: trigger.sessionId,
+          kind: L2_INBOX_KIND,
+          payload: JSON.stringify(payload),
+        })
+        written += 1
+      }
+      // 游标与入队同一事务：否则崩溃会让游标前进而条目未入队，那批候选永久不可达。
+      await writeL2PromotionCursor(connection, page.nextCursor ?? '')
+      return written
+    })
     if (enqueued > 0) {
       ctx.logger.info(
         `L1→L2 提升入队：${enqueued} 条 L1 进 l2_inbox（原因 ${trigger.reason}）`,

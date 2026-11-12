@@ -38,6 +38,8 @@ export const META_KEYS = {
   createdAt: 'created_at',
   /** Story 2.6 / X1：EVIDENCE 历史回填的断点游标（纯逻辑水位，不新增存储）。 */
   evidenceBackfillCursor: 'evidence_backfill_cursor',
+  /** Story 2.5 / 评审 P1（T1）：L1→L2 提升候选的断点游标，形态 `"<recorded_at>|<id>"`。 */
+  l2PromotionCursor: 'l2_promotion_cursor',
 } as const
 
 /** 维度必须是 ≥1 的整数——直接拼进 DDL，越界即拒绝（不信任外部配置）。 */
