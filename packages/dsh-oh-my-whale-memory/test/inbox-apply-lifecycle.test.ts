@@ -28,10 +28,17 @@ const EMBEDDING_CONFIG_ENABLED = {
 }
 const at = (seconds: number): Date => new Date(Date.UTC(2026, 10, 11, 0, 0, seconds))
 
-/** createInboxConsumer 的捕获点：证明 apply 把哪个 gate 交给了消费者（V3）。 */
+/**
+ * createInboxConsumer 的捕获点：证明 apply 把哪个 gate 交给了消费者（V3）。
+ *
+ * Story 2.5 起 apply 会建**两条**消费链（L1 主路径 + L2 提升慢路径），故这里持续累积；
+ * `options`/`consumer` 只跟随**不传 queue 的那一条**（即 L1 主路径）——本文件所有断言
+ * 说的都是它；L2 慢路径的接线由 test/l2-promotion-apply.test.ts 单独钉。
+ */
 const captured = vi.hoisted(() => ({
   options: undefined as InboxConsumerOptions | undefined,
   consumer: undefined as unknown,
+  all: [] as InboxConsumerOptions[],
 }))
 
 vi.mock('../src/inbox/consumer.js', async (importOriginal) => {
@@ -39,9 +46,12 @@ vi.mock('../src/inbox/consumer.js', async (importOriginal) => {
   return {
     ...actual,
     createInboxConsumer: (options: Parameters<typeof actual.createInboxConsumer>[0]) => {
-      captured.options = options
+      captured.all.push(options)
       const consumer = actual.createInboxConsumer(options)
-      captured.consumer = consumer
+      if (options.queue === undefined) {
+        captured.options = options
+        captured.consumer = consumer
+      }
       return consumer
     },
   }
