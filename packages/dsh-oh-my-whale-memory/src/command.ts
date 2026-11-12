@@ -157,6 +157,13 @@ export interface MemoryStatusSnapshot {
   /** embedding 可用性：endpoint / token / model 任一缺失即 'disabled'（降级检索）。 */
   readonly embeddingMode: 'enabled' | 'disabled'
   /**
+   * System One 忠实性通道的状态（Story 2.5 / AC:674、U6）：
+   * - `enabled`：配置开启且未运行态降级（核实走 System One）；
+   * - `disabled-by-config`：`systemOne.enabled=false`，整体回落 ctx.llm 单次检查；
+   * - `degraded`：端点持续不可达（连续失败达阈值），整体回落 ctx.llm 单次检查。
+   */
+  readonly systemOne: SystemOneStatusMode
+  /**
    * 仍有效但**没有向量**的节点数（Story 2.4 / U5）：这些节点进不了 HNSW，对语义去重与
    * 语义检索隐形。仅在 embedding enabled 且该值 > 0 时追加渲染，0 时输出逐字不变。
    */
@@ -178,6 +185,12 @@ export interface MemoryStatusSnapshot {
    */
   readonly relatedSkipped: number | null
 }
+
+/**
+ * System One 通道的状态枚举（Story 2.5 / U6）。命令层不 import db/distill 模块，
+ * 故在此重复声明形状——与 `distill/system-one.ts` 的运行态槽语义必须一致。
+ */
+export type SystemOneStatusMode = 'enabled' | 'disabled-by-config' | 'degraded'
 
 /**
  * 边侧差额计数（命令层镜像 `db/eii.ts` 的 `EvidenceGapSummary`）。命令层不 import db 模块，
@@ -407,6 +420,13 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
       : snapshot.unembedded > 0
         ? `embedding: enabled（未嵌入 ${snapshot.unembedded} 条）`
         : 'embedding: enabled',
+    // Story 2.5 / U6：恒打印一行（与 embedding 行同一取向）——非降级也显式打印，
+    // 让「配置关闭」与「运行态降级」两种降级都可断言，且不与 enabled 混淆。
+    snapshot.systemOne === 'disabled-by-config'
+      ? 'systemOne: disabled-by-config（已降级回 ctx.llm）'
+      : snapshot.systemOne === 'degraded'
+        ? 'systemOne: degraded（已降级回 ctx.llm）'
+        : 'systemOne: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ]
   // Story 2.6 / D7：边侧差额（EII + 漂移）与关系降级——都只在需要时追加，gap=0 时既有

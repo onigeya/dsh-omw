@@ -364,6 +364,33 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
  * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`；`'L1_INBOX'` / `'L2_INBOX'`
  * 现在只作 INBOX 队列标识/表名的历史计数位保留（Story 1.7 存量行仍会命中 `L1_INBOX` 计数）。
  */
+const LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT = [
+  'MATCH (m:' + MEMORY_TABLE + ')',
+  '  WHERE m.layer = $layer AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  '  RETURN m.id AS id',
+  '  ORDER BY m.recorded_at DESC',
+  '  LIMIT $limit',
+].join('\n')
+
+/**
+ * 最近的有效记忆 id（按层过滤，recorded_at 倒序，最多 limit 条）。
+ *
+ * Story 2.5 的 L1→L2 提升调度用：提升触发时只知道「L1 累计跨过阈值」，
+ * 需要把候选 L1 的 id 取出来入 l2_inbox（每条 L1 一个条目，U3）。
+ * 只读；过期 / 失效节点不参与提升（它们不该再产出综合陈述）。
+ */
+export async function listEffectiveMemoryIdsByLayer(
+  connection: MemoryConnection,
+  layer: string,
+  limit: number,
+): Promise<string[]> {
+  const rows = await queryRows(connection, LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT, {
+    layer,
+    limit: Math.max(0, Math.trunc(limit)),
+  })
+  return rows.map((row) => String(row.id))
+}
+
 export const COUNTED_MEMORY_LAYERS = ['L1', 'L2', 'L1_INBOX', 'L2_INBOX'] as const
 export type CountedMemoryLayer = (typeof COUNTED_MEMORY_LAYERS)[number]
 export type MemoryLayerCounts = Record<CountedMemoryLayer, number>

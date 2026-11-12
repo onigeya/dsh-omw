@@ -123,6 +123,7 @@ function statusText(
     'failed: 0',
     `audit_gap: ${auditGap}`,
     unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
+    'systemOne: enabled',
     'readonly: false',
   ]
   // Story 2.6 / F2：边侧差额与关系降级——与 command.ts 同一渲染口径。
@@ -356,6 +357,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'audit_gap: 未知（审计表缺失）',
         // Story 2.4 / U5：只读夹具 4 条节点（L1×2 / L2×1 / L1_INBOX×1）全无向量。
         'embedding: enabled（未嵌入 4 条）',
+        'systemOne: enabled',
         `readonly: true, reason: '${READONLY_REASON}'`,
         // Story 2.6 / F2：只读夹具既不建边表也不建审计表 ⇒ 两个差额都算不出来，
         // 与 audit_gap 同一约定显式渲染「未知」，绝不静默报 0。

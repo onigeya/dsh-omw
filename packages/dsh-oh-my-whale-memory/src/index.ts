@@ -55,6 +55,7 @@ import {
   countMemoriesByLayer,
   countUnembeddedMemories,
   getMemoryById as readMemoryById,
+  listEffectiveMemoryIdsByLayer,
   listMemories as readMemories,
 } from './db/memory.js'
 import {
@@ -68,10 +69,11 @@ import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-
 import {
   createInboxConsumer,
   drainInboxBackgroundTasks,
+  trackInboxBackgroundTask,
   type InboxConsumer,
 } from './inbox/consumer.js'
 import { createIdleGate } from './inbox/idle-gate.js'
-import { createPromotionTracker } from './inbox/promotion-trigger.js'
+import { L1_PROMOTION_THRESHOLD, createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingBackfill } from './embedding/backfill.js'
@@ -84,10 +86,23 @@ import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
   countInboxByStatus,
+  l1InboxQueue,
   l2InboxQueue,
   listRecentFailedInboxItems,
   reclaimProcessingInboxItems,
 } from './inbox/queue.js'
+import {
+  L2_INBOX_KIND,
+  L2_PROMOTION_INTERVAL_MS,
+  buildL2PromotionItemId,
+  createL2PromotionProcessor,
+  type L2PromotionPayload,
+} from './distill/promotion.js'
+import {
+  createSystemOneClient,
+  setSystemOneEnabled,
+  systemOneRuntimeState,
+} from './distill/system-one.js'
 
 /**
  * `session/event` 宿主事件面（Story 2.2 / AD-6、Story 2.1）。
@@ -200,6 +215,10 @@ export async function apply(
   for (const message of resolved.warnings) {
     ctx.logger.warn(message)
   }
+  // Story 2.5 / U6：把配置态同步进 System One 的运行态槽——getStatus 读它渲染
+  // systemOne 行（配置关闭时清掉可能残留的运行态降级）。放在所有早退之前，
+  // 只读实例也要能正确渲染配置态。
+  setSystemOneEnabled(resolved.systemOne.enabled)
 
   // Story 1.6 / 1.7：命令与工具都在 profileContext 早退之前无条件注册（注册是 effect，
   // 自动挂 disposer），两者共用闭包可变量 `db`——库未就绪时命令给出明确错误、
@@ -212,6 +231,9 @@ export async function apply(
   // Story 2.2：后台 INBOX 消费者（只有写者实例会创建并启动）。声明在两个 ctx.effect 之前——
   // db effect 的 disposer 在 dispose 时先停消费者再关库（不新增 effect，closer 数不变）。
   let inboxConsumer: InboxConsumer | null = null
+  // Story 2.5：L2 提升消费者（慢循环）。与 L1 消费者同挂在 db effect 的 disposer 上，
+  // 仍是**不新增 ctx.effect**（entry-exports 钉死 closer 数 3/4/6）。
+  let l2Consumer: InboxConsumer | null = null
   // Story 1.11（AC2/AC3）：INBOX 采集写路径。层收敛为唯一枚举——写 `L1`
   // （= MEMORY_REMEMBER_LAYER），`L1_INBOX` 从此只是 INBOX 队列标识/表名，不是 memory.layer 取值。
   // 可选分类旗标（kind / priority，含 -1）在此透传到落库，与 memory_remember 同一条写路径。
@@ -272,6 +294,10 @@ export async function apply(
       failed: inboxCounts.failed,
       failedEntries,
       embeddingMode: resolved.embeddingMode,
+      // Story 2.5 / U6：配置态（enabled=false）优先于运行态（端点持续不可达 ⇒ degraded）。
+      systemOne: resolved.systemOne.enabled
+        ? (systemOneRuntimeState().degraded ? 'degraded' : 'enabled')
+        : 'disabled-by-config',
       unembedded,
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
@@ -346,6 +372,8 @@ export async function apply(
     // closer 数不变（entry-exports 钉死 3 / 4 / 6）。
     inboxConsumer?.stop()
     inboxConsumer = null
+    l2Consumer?.stop()
+    l2Consumer = null
     await drainInboxBackgroundTasks()
     await db?.close()
   }, 'omw-memory-db')
@@ -376,12 +404,50 @@ export async function apply(
   // 3) 消费者由本 story 注入精炼处理器（ctx.llm 单通道）；它只在空闲闸门放开时取队头；
   // 4) 生命周期挂在既有 db effect 的 disposer 上，不新增 ctx.effect（entry-exports 钉死 closer 数）。
   const idleGate = createIdleGate()
-  const promotionTracker = createPromotionTracker({
-    onTrigger: (trigger) => {
-      // AC6：「触发信号」在此可观测；L1→L2 批量提升本体是 Story 2.5。
+  /**
+   * Story 2.5（U3/U10）：把最近的有效 L1 入 l2_inbox —— 每条 L1 一个条目（一个条目综合一条 L1）。
+   *
+   * - 条目 id 是确定性内容键（{@link buildL2PromotionItemId}）：MERGE ON CREATE 只建一次、不覆盖
+   *   既有行 ⇒ 同一 L1 不会重复入队、崩溃重放不产重条目，**v1 的「丢弃不重试」**由此成立。
+   * - 已在队列里的（pending/processing/done/failed）直接跳过：done = 已有结论，failed = 已耗尽
+   *   4 次机会。要重试只能改 L1 文本（换指纹）或调阈值重新标定。
+   * - sessionId 取触发信号的会话：L2 条目的路由解析靠它（缺省回退到 Config 的显式路由）。
+   */
+  const enqueuePromotion = async (trigger: { readonly reason: string, readonly sessionId: string }): Promise<number> => {
+    const connection = db?.connection
+    if (!connection) return 0
+    const l1Ids = await listEffectiveMemoryIdsByLayer(connection, MEMORY_REMEMBER_LAYER, L1_PROMOTION_THRESHOLD)
+    let enqueued = 0
+    for (const l1Id of l1Ids) {
+      const id = buildL2PromotionItemId(l1Id)
+      if (await l2InboxQueue.readStatus(connection, id) !== null) continue
+      const payload: L2PromotionPayload = { l1Ids: [l1Id] }
+      await l2InboxQueue.enqueue(connection, {
+        id,
+        sessionId: trigger.sessionId,
+        kind: L2_INBOX_KIND,
+        payload: JSON.stringify(payload),
+      })
+      enqueued += 1
+    }
+    if (enqueued > 0) {
       ctx.logger.info(
-        `L1→L2 提升触发信号：${trigger.reason}（L1 累计 ${trigger.totalL1}，会话 ${trigger.sessionId}，` +
-        `kind ${trigger.kind}，同 kind ${trigger.sessionKindCount}）`,
+        `L1→L2 提升入队：${enqueued} 条 L1 进 l2_inbox（原因 ${trigger.reason}）`,
+      )
+    }
+    return enqueued
+  }
+  const promotionTracker = createPromotionTracker({
+    // AC:721「后台 FIFO 消费者」：触发信号在这里转成入队动作。onTrigger 是同步回调，
+    // 故入队 fire-and-forget —— 挂模块级 Set 持强引用（§14），失败只告警不抛（信号不该拖垮采集）。
+    onTrigger: (trigger) => {
+      void trackInboxBackgroundTask(
+        enqueuePromotion(trigger).catch((error: unknown) => {
+          ctx.logger.warn(
+            'L1→L2 提升入队失败：' + (error instanceof Error ? error.message : String(error)),
+          )
+          return 0
+        }),
       )
     },
   })
@@ -391,6 +457,11 @@ export async function apply(
   const reclaimed = await reclaimProcessingInboxItems(db.connection)
   if (reclaimed > 0) {
     ctx.logger.info(`INBOX 启动回收：${reclaimed} 条 processing 回 pending（单写者下必属已死进程）`)
+  }
+  // Story 2.5：L2 队列的启动回收与 L1 同口径（U7：单写者下 processing 必属已死进程）。
+  const reclaimedL2 = await l2InboxQueue.reclaimProcessing(db.connection)
+  if (reclaimedL2 > 0) {
+    ctx.logger.info(`L2 INBOX 启动回收：${reclaimedL2} 条 processing 回 pending（单写者下必属已死进程）`)
   }
   // Story 2.1：三钩子采集器。只读实例已在上面 return，所以这里必然是写者实例（AD-12）。
   // 快照目录与库同父（<profile>/memory/capture/）；文件是「事务未提交」的崩溃标记。
@@ -496,6 +567,32 @@ export async function apply(
     logger: ctx.logger,
   })
   inboxConsumer.start()
+  // Story 2.5：L1→L2 提升的第二条消费链。
+  // - System One 客户端只在配置开启时构造（U9：端点/模型是模块常量，不扩 Config）；
+  //   配置关闭时就整体回落 ctx.llm 单次检查（AC:674）。
+  // - 慢循环：intervalMs 调到 30s（AC:721），并用 claimGuard 给 L1 主路径让路（L1 待处理时本轮不取件）。
+  const systemOneClient = resolved.systemOne.enabled ? createSystemOneClient() : null
+  const l2PromotionProcessor = createL2PromotionProcessor({
+    connection: () => db?.connection ?? null,
+    llm: llmPort,
+    resolveRoute: (sessionId) => configuredRoute ?? sessionRoute(sessionId),
+    systemOne: systemOneClient,
+    embedding: embeddingClient,
+    embeddingModel: resolved.embedding.model ?? null,
+    embeddingModelId: embedding.modelId,
+    logger: ctx.logger,
+  })
+  l2Consumer = createInboxConsumer({
+    connection: () => db?.connection ?? null,
+    gate: idleGate,
+    intervalMs: L2_PROMOTION_INTERVAL_MS,
+    queue: l2InboxQueue,
+    process: l2PromotionProcessor,
+    // 让路规则（brief §5.4）：L1 队列还有待处理条目就跳过本轮，慢路径不抢主路径。
+    claimGuard: async () => (await l1InboxQueue.countByStatus(db!.connection)).pending === 0,
+    logger: ctx.logger,
+  })
+  l2Consumer.start()
   // 裸 ctx（单测）没有 `on`：可选调用降级为不监听（消费者因闸门恒空闲而空转，无副作用）。
   // 映射本体在 session-events.ts（可单测；写反了宿主级测试看不出来）。
   const sessionEvents = ctx as unknown as SessionEventHost

@@ -36,6 +36,7 @@ const STATUS_BASE: MemoryStatusSnapshot = {
   inboxes: { L1: 3, L2: 0 },
   failed: 0,
   embeddingMode: 'enabled',
+  systemOne: 'enabled',
   unembedded: 0,
   readonly: false,
   auditGap: 0,
@@ -88,6 +89,7 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'failed: 0',
       'audit_gap: 0',
       'embedding: enabled',
+      'systemOne: enabled',
       'readonly: false',
     ].join('\n'))
   })
@@ -161,6 +163,7 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'failed: 0',
       'audit_gap: 0',
       'embedding: disabled（降级检索）',
+      'systemOne: enabled',
       "readonly: true, reason: 'another instance owns the writer lock'",
     ])
   })

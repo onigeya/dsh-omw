@@ -15,11 +15,10 @@
  */
 import type * as lbug from '@ladybugdb/core'
 import {
-  claimNextInboxItem,
-  completeInboxItem,
-  failInboxItem,
   inboxErrorText,
+  l1InboxQueue,
   type InboxItem,
+  type InboxQueue,
 } from './queue.js'
 import type { IdleGate } from './idle-gate.js'
 import type { PromotionTracker } from './promotion-trigger.js'
@@ -95,6 +94,17 @@ export interface InboxConsumerOptions {
    */
   readonly maintenance?: () => Promise<unknown>
   readonly promotion?: PromotionTracker
+  /**
+   * Story 2.5 / U1：本消费者消费的队列。缺省 {@link l1InboxQueue}（2.2 既有行为逐字不变）；
+   * L2 提升消费者传 {@link l2InboxQueue}。
+   */
+  readonly queue?: InboxQueue
+  /**
+   * Story 2.5 / brief §5.4：取件前的让路闸门——返回 false 时本轮**不再取**新条目
+   * （已取出的条目照常结算完）。L2 慢循环用它给 L1 主路径让路（L1 有待处理条目就跳过本轮），
+   * 避免慢路径把主路径的条目饿死。抛错时按「忙」处理（跳过本轮，只告警）。
+   */
+  readonly claimGuard?: () => Promise<boolean>
   readonly logger?: { warn(message: string): void }
 }
 
@@ -110,6 +120,7 @@ export interface InboxConsumer {
 
 export function createInboxConsumer(options: InboxConsumerOptions): InboxConsumer {
   const intervalMs = options.intervalMs ?? INBOX_POLL_INTERVAL_MS
+  const queue = options.queue ?? l1InboxQueue
   let running = false
   // stop() 置位、start() 复位：runOnce 的循环据此在**当前条目结算完**后退出，不中断在飞条目。
   // 不能直接读 running——诊断/测试会不经 start() 直接调 runOnce（那时 running 一直是 false）。
@@ -132,7 +143,16 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       // stop() 后不再开新一轮取队；本条已取出/正在精炼的照常结算完（不丢条目）。
       if (stopRequested) break
       if (!options.gate.isIdle()) break
-      const item = await claimNextInboxItem(connection, {
+      if (options.claimGuard) {
+        let allowed = false
+        try {
+          allowed = await options.claimGuard()
+        } catch (error) {
+          options.logger?.warn('INBOX 取件闸门异常（按忙处理）：' + inboxErrorText(error))
+        }
+        if (!allowed) break
+      }
+      const item = await queue.claimNext(connection, {
         owner: options.owner,
         now: options.now?.(),
         after,
@@ -147,7 +167,7 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       } catch (error) {
         // AC:581：语义错首次即降级不重试 ⇒ 直接进死信；瞬时失败走退避。
         const fatal = error instanceof InboxRefineError && error.fatal
-        const failed = await failInboxItem(connection, item.id, { error, now: options.now?.(), fatal })
+        const failed = await queue.fail(connection, item.id, { error, now: options.now?.(), fatal })
         options.logger?.warn(
           'INBOX 条目精炼失败（id=' + item.id + '，attempts=' + failed.attempts +
           '，status=' + failed.status + '）：' + inboxErrorText(error),
@@ -160,7 +180,7 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       if (!completed) {
         // completeInboxItem 返回 false = 未落库（其文档明写不静默 no-op）：不计成功、不记提升信号。
         try {
-          completed = await completeInboxItem(connection, item.id, { now: options.now?.() })
+          completed = await queue.complete(connection, item.id, { now: options.now?.() })
         } catch (error) {
           options.logger?.warn('INBOX 条目完成落库异常（id=' + item.id + '）：' + inboxErrorText(error))
         }

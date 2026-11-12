@@ -118,6 +118,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'failed: 0',
       'audit_gap: 0',
       'embedding: enabled（未嵌入 1 条）',
+      'systemOne: enabled',
       'readonly: false',
       'evidence_gap: 1（EII 1 / 漂移 0）',
     ].join('\n'))

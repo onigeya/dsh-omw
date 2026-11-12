@@ -91,23 +91,23 @@ export interface InboxProcessorDeps {
   readonly relations?: RelationRunner | null
 }
 
-interface EmbedFactsResult {
+export interface EmbedFactsResult {
   readonly vectors: readonly (readonly number[] | null)[]
   readonly failure: { readonly reason: string; readonly message: string } | null
 }
 
 /**
- * 写时嵌入（N4 / AC:589）：写库事务**之前**取向量。任一批次失败都不阻塞 L1 写入，
- * 只把该批记成无向量（三列留空），并把失败摘要交给审计行。
+ * 写时嵌入的通用实现（N4 / AC:589 / Story 2.5 AC:755）：写库事务**之前**取向量。
+ * 任一批次失败都不阻塞节点写入，只把该批记成无向量（三列留空），并把失败摘要交给审计行。
+ * L1（本文件）与 L2（distill/promotion.ts）共用——两处的分批与失败语义必须一致。
  */
-async function embedFacts(
-  deps: InboxProcessorDeps,
+export async function embedTexts(
+  client: EmbedClient | null | undefined,
+  model: string | null | undefined,
   texts: readonly string[],
   signal: AbortSignal,
 ): Promise<EmbedFactsResult> {
   const vectors: (readonly number[] | null)[] = texts.map(() => null)
-  const client = deps.embedding
-  const model = deps.embeddingModel
   if (!client || !model || texts.length === 0) return { vectors, failure: null }
   let failure: { reason: string; message: string } | null = null
   for (let start = 0; start < texts.length; start += EMBEDDING_MAX_BATCH) {
@@ -122,8 +122,11 @@ async function embedFacts(
   return { vectors, failure }
 }
 
-/** 入口守卫判据：pending（直接调用/未 claim）与 processing（消费者已 claim）都继续；其余一律短路。 */
-function isProcessableStatus(status: InboxStatus | null): boolean {
+/**
+ * 入口守卫判据：pending（直接调用/未 claim）与 processing（消费者已 claim）都继续；其余一律短路。
+ * 导出给 Story 2.5 的 L2 提升处理器复用（同一套「只有待处理条目才值得干活」纪律）。
+ */
+export function isProcessableStatus(status: InboxStatus | null): boolean {
   return status === INBOX_STATUS_PENDING || status === INBOX_STATUS_PROCESSING
 }
 
@@ -216,7 +219,12 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     }
 
     // ③ 写时嵌入：在写库事务之前（AC:589）。
-    const embedded = await embedFacts(deps, refined.facts.map((fact) => fact.text), signal)
+    const embedded = await embedTexts(
+      deps.embedding,
+      deps.embeddingModel,
+      refined.facts.map((fact) => fact.text),
+      signal,
+    )
     if (embedded.failure) {
       deps.logger?.warn(
         'INBOX 写时嵌入失败（id=' + item.id + '，reason=' + embedded.failure.reason + '）：' +
