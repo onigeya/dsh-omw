@@ -12,6 +12,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
+import { insertGenerationLog } from '../src/db/audit'
 import { ensureEdgeTables } from '../src/db/edges'
 import { memoryNodeId } from '../src/db/id'
 import { upsertMemory } from '../src/db/memory'
@@ -25,6 +26,7 @@ import {
   SKIP_RELATED_LLM_REASON,
   applyRelations,
   buildRelationMessages,
+  countRelatedSkips,
   createRelationRunner,
   parseRelationOutput,
   recallNeighbors,
@@ -381,5 +383,33 @@ describe('createRelationRunner（生产降级路径）', () => {
     expect(skips.length).toBe(2)
     expect(skips[0]?.reason).toContain('node=' + nid('k-novector'))
     expect(skips[1]?.reason).toContain(SKIP_RELATED_LLM_REASON)
+  })
+})
+
+describe('P5：status 的关系降级计数（真库）', () => {
+  /** 直写一行审计（生产路径由 insertRelationAudit 写，这里只关心 action 的统计口径）。 */
+  async function audit(action: string): Promise<void> {
+    await insertGenerationLog(store.connection, {
+      recordedAt: NOW,
+      actor: 'system',
+      kind: 'refine',
+      action,
+      outcome: 'uncertain',
+      reason: 'p5',
+      l0Refs: ['item-p5'],
+    })
+  }
+
+  it('countRelatedSkips 只数三类降级 action，不数正常写入', async () => {
+    const before = (await countRelatedSkips(store.connection)) ?? 0
+    // 评审 P5（T6）：口径改为恒定 action 白名单（skip_related / reject_evidence /
+    // write_evidence_skipped）。正常写入（write_related）**不计**，否则 /memory status 的降级行
+    // 会随成功写入单调上涨，变成假警报。
+    await audit('skip_related')
+    await audit('reject_evidence')
+    await audit('write_evidence_skipped')
+    await audit('write_related')
+    await audit('refine_inbox')
+    expect(await countRelatedSkips(store.connection)).toBe(before + 3)
   })
 })
