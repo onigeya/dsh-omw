@@ -175,7 +175,6 @@ const RECLAIM_EXPIRED = [
   'RETURN q.id AS id',
 ].join(' ')
 
-/** 写者启动回收（AC3 超集，U7）：见 reclaimProcessingInboxItems。 */
 /**
  * 写者启动回收（R3②）：崩溃是一次失败——attempts+1 并记 last_error，达上限直接进 failed 死信，
  * 否则回 pending（不退避：进程刚重启，重试立即进行是期望行为）。

@@ -9,7 +9,7 @@
  * 记队列失败（attempts+1 + 退避；`fatal` 时直接进死信，AC:581）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { REFINE_INBOX_ACTION, REFINE_KIND, insertGenerationLog } from '../db/audit.js'
+import { REFINE_INBOX_ACTION, REFINE_KIND, insertGenerationLog, type GenerationLogOutcome } from '../db/audit.js'
 import { memoryNodeId } from '../db/id.js'
 import { getMemoryById, writeMemoryVersion } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
@@ -102,6 +102,28 @@ function isProcessableStatus(status: InboxStatus | null): boolean {
   return status === INBOX_STATUS_PENDING || status === INBOX_STATUS_PROCESSING
 }
 
+/**
+ * 写一行 refine 审计（N9）。**不开事务**：事务边界由调用方决定——失败路径另开事务写，
+ * 成功路径与产出同事务写。四处记账的字段原本逐字重复，这里收敛为唯一实现。
+ */
+function insertRefineAudit(
+  connection: lbug.Connection,
+  itemId: string,
+  outcome: GenerationLogOutcome,
+  reason: string | null,
+  now: () => Date,
+): Promise<string> {
+  return insertGenerationLog(connection, {
+    recordedAt: now().toISOString(),
+    actor: 'system',
+    kind: REFINE_KIND,
+    action: REFINE_INBOX_ACTION,
+    outcome,
+    reason,
+    l0Refs: [itemId],
+  })
+}
+
 /** 失败审计行：必须**另开事务**写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
 async function recordRefineFailure(
   connection: lbug.Connection,
@@ -110,15 +132,7 @@ async function recordRefineFailure(
   now: () => Date,
 ): Promise<void> {
   await runInTransaction(connection, () =>
-    insertGenerationLog(connection, {
-      recordedAt: now().toISOString(),
-      actor: 'system',
-      kind: REFINE_KIND,
-      action: REFINE_INBOX_ACTION,
-      outcome: failure.retryable ? 'uncertain' : 'failure',
-      reason: failure.reason,
-      l0Refs: [item.id],
-    }),
+    insertRefineAudit(connection, item.id, failure.retryable ? 'uncertain' : 'failure', failure.reason, now),
   )
 }
 
@@ -209,36 +223,18 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
           { now },
         )
       }
-      await insertGenerationLog(connection, {
-        recordedAt: now().toISOString(),
-        actor: 'system',
-        kind: REFINE_KIND,
-        action: REFINE_INBOX_ACTION,
-        outcome: 'success',
-        reason: null,
-        l0Refs: [item.id],
-      })
+      await insertRefineAudit(connection, item.id, 'success', null, now)
       if (embedded.failure) {
-        await insertGenerationLog(connection, {
-          recordedAt: now().toISOString(),
-          actor: 'system',
-          kind: REFINE_KIND,
-          action: REFINE_INBOX_ACTION,
-          outcome: 'uncertain',
-          reason: EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
-          l0Refs: [item.id],
-        })
+        await insertRefineAudit(
+          connection,
+          item.id,
+          'uncertain',
+          EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
+          now,
+        )
       }
       if (refined.facts.some((fact) => fact.coerced)) {
-        await insertGenerationLog(connection, {
-          recordedAt: now().toISOString(),
-          actor: 'system',
-          kind: REFINE_KIND,
-          action: REFINE_INBOX_ACTION,
-          outcome: 'uncertain',
-          reason: COERCED_CLASSIFICATION_REASON,
-          l0Refs: [item.id],
-        })
+        await insertRefineAudit(connection, item.id, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
       }
     })
 
