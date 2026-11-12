@@ -259,13 +259,19 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(after).toHaveLength(1)
   }, 60_000)
 
-describe('P11/VG-3：U5 回填的 apply 级接线（enabled 接线为 maintenance，disabled 完全不接）', () => {
-  it('embedding enabled ⇒ 消费者拿到 maintenance 函数；disabled ⇒ undefined', async () => {
+/**
+ * Story 2.6 契约演进（Lead F1）：maintenance 从「embedding 回填（可选）」变成**恒存在的组合
+ * 函数**——`embedding 回填（有客户端才跑）+ EVIDENCE 回填（不依赖任何配置，X1 义务）`。
+ * 故 embedding disabled 时不再是 undefined；更强的新断言保证 disabled 下只跑 EVIDENCE 回填：
+ * 真跑一轮 maintenance，必须写下游标哨兵且**不产生任何 backfill_embedding 审计行**。
+ */
+describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => {
+  it('enabled ⇒ 拿到 maintenance 函数；disabled ⇒ 仍为函数且只跑 EVIDENCE 回填', async () => {
     const enabledDir = await makeTempDir('omw-bf-wire-on-')
     captured.options = undefined
     const on = makeCtx(enabledDir)
     await plugin.apply(on.ctx, EMBEDDING_CONFIG_ENABLED)
-    // 删掉 index.ts:455 的 maintenance 那一行，这里立刻变红。
+    // 删掉 index.ts 的 maintenance 那一行，这里立刻变红。
     expect(typeof captured.options?.maintenance).toBe('function')
     ;(captured.consumer as { stop(): void } | undefined)?.stop()
 
@@ -273,7 +279,23 @@ describe('P11/VG-3：U5 回填的 apply 级接线（enabled 接线为 maintenanc
     captured.options = undefined
     const off = makeCtx(disabledDir)
     await plugin.apply(off.ctx, EMBEDDING_CONFIG)
-    expect(captured.options?.maintenance).toBeUndefined()
+    const maintenance = captured.options?.maintenance
+    expect(typeof maintenance).toBe('function')
+    const connection = captured.options?.connection() ?? null
+    expect(connection).not.toBeNull()
+    await maintenance?.()
+    // EVIDENCE 回填跑到了：空库扫完写哨兵（不新增存储，纯逻辑水位）。
+    const cursor = await queryAll(
+      connection as Parameters<typeof queryAll>[0],
+      "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS v",
+    )
+    expect(cursor[0]?.v).toBe('done')
+    // 且**没有**任何 embedding 回填副作用（disabled ⇒ 不接 embeddingBackfill）。
+    const embeddingRuns = await queryAll(
+      connection as Parameters<typeof queryAll>[0],
+      "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN count(*) AS c",
+    )
+    expect(Number(embeddingRuns[0]?.c ?? -1)).toBe(0)
     ;(captured.consumer as { stop(): void } | undefined)?.stop()
   }, 60_000)
 })
