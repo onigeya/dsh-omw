@@ -100,7 +100,9 @@ describe('X1：EVIDENCE 边历史回填', () => {
     const written = await backfill.runOnce()
     // bf-m1 ← bf-l0a、bf-l0b；bf-m2 ← bf-m1；同层 bf-m3 ← bf-other-l1 必须跳过。
     expect(written).toBe(3)
-    expect(await readEvidenceInEdgeIds(store.connection, 'bf-m1')).toEqual(['bf-l0a', 'bf-l0b'])
+    // 评审 P18d②（T22）：边扫描没有 ORDER BY，返回顺序不是契约 ⇒ 排序后比集合，
+    // 不钉实现巧合的物理顺序。
+    expect((await readEvidenceInEdgeIds(store.connection, 'bf-m1')).slice().sort()).toEqual(['bf-l0a', 'bf-l0b'])
     expect(await readEvidenceInEdgeIds(store.connection, 'bf-m2')).toEqual(['bf-m1'])
     expect(await readEvidenceInEdgeIds(store.connection, 'bf-m3')).toEqual([])
 

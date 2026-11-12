@@ -92,7 +92,8 @@ describe('边表 DDL 与写边原语', () => {
     ])
     expect(first.written).toBe(1)
     expect(first.skipped).toEqual([])
-    expect(await readEvidenceInEdgeIds(store.connection, 'e1-m1')).toEqual(['e1-l0a'])
+    // 评审 P18d②（T22）：集合比较，不依赖无 ORDER BY 的扫描顺序。
+    expect((await readEvidenceInEdgeIds(store.connection, 'e1-m1')).slice().sort()).toEqual(['e1-l0a'])
     const replay = await writeEvidenceEdges(store.connection, [
       { fromId: 'e1-l0a', fromLayer: 'L0', toId: 'e1-m1', toLayer: 'L1' },
     ])
