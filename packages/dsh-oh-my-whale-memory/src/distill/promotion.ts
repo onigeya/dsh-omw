@@ -516,7 +516,17 @@ export function createL2PromotionProcessor(
     }
 
     // 忠实性核实：只标注、不丢弃；调用失败即抛（候选留队列重试）。
-    const verdict = await judgeStatement(deps, { statement, facts, route, signal: llmSignal })
+    // 调用失败同样要落一条账目（reason = 上游失败原因），否则这条候选为什么被重试在
+    // generation_log 里完全不可见——Story 7.2 按 outcome 过滤时会整批漏掉它们。
+    let verdict: L2Verdict
+    try {
+      verdict = await judgeStatement(deps, { statement, facts, route, signal: llmSignal })
+    } catch (error) {
+      if (error instanceof InboxRefineError) {
+        await recordPromotionFailure(connection, l1Ids, { reason: error.reason, retryable: !error.fatal }, now)
+      }
+      throw error
+    }
 
     // kind / priority 按 AC:723-726 从来源 L1 **继承**（不采信模型自己的分类）：
     // kind = 来源主流值（并列取先达到者，U11）、priority = 来源最大值。
