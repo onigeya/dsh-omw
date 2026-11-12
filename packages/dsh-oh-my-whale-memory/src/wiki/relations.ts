@@ -26,20 +26,26 @@ import {
   DEFAULT_CAPTURE_POLICY,
   REJECT_EVIDENCE_ACTION,
   SKIP_RELATED_ACTION,
+  WRITE_EVIDENCE_SKIPPED_ACTION,
   WRITE_RELATED_ACTION,
   insertGenerationLog,
 } from '../db/audit.js'
 import { readPinnedEmbeddingDim } from '../db/dedup.js'
 import { writeRelatedEdges, type RelatedEdgeInput } from '../db/edges.js'
 import { collectRows } from '../db/rows.js'
-import { MEMORY_TABLE, META_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
+import { GENERATION_LOG_TABLE, MEMORY_TABLE, META_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import { foldStream } from '../distill/stream-fold.js'
 
 /** 邻接召回条数（AC:763 写死 top-K=8）。 */
 export const RELATION_RECALL_TOP_K = 8
 
-/** 每条新记忆最多写出的 RELATED 边数（AC:773）。 */
+/**
+ * 每条新记忆最多写出的 RELATED 边数（AC:773）。
+ * 评审 P2（T2）：关系跑者**只对本次新产生的节点**跑（processor 只把 outcome 为
+ * created / version-invalidated 的条目交给它），所以每次调用就是该节点的一生一次 ⇒
+ * 这里的「本次调用上限」等价于「每节点上限」，不会因反复精炼累积。
+ */
 export const RELATED_MAX_EDGES = 5
 
 /** 关系识别 prompt 版本（与输出 schema 同文件、同版本号，改一个必须改另一个）。 */
@@ -65,6 +71,8 @@ export interface RecallNeighbor {
   readonly id: string
   readonly layer: string
   readonly kind: string
+  /** 归一化文本（评审 P3/T3：给 LLM 语义判断用；prompt 里截断 120 字符）。 */
+  readonly text: string
   /** ANN 距离 = 1 − cosine（越小越像）。 */
   readonly distance: number
 }
@@ -84,7 +92,10 @@ const RECALL_STATEMENT = [
   'MATCH (node)',
   'WHERE node.valid_at <= $now AND node.recorded_at <= $now',
   '  AND node.invalid_at IS NULL AND node.expired_at IS NULL',
-  'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, distance',
+  // 评审 P19b（T24）：自身排除**下推**到查询（与 dedup.ts:117 同一形态）。
+  // 原先在 JS 里 continue 过滤会让自身白占一个 top-K 名额（k=8 实际最多 7 条）。
+  "  AND node.id <> $self_id",
+  'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.text AS text, distance',
   'ORDER BY distance',
 ].join('\n')
 
@@ -109,20 +120,25 @@ export async function recallNeighbors(
   if (k === 0 || input.embedding.length === 0) return []
   const dim = await readPinnedEmbeddingDim(connection)
   if (dim === null || dim !== input.embedding.length) return []
+  // 评审 P19b（T24）：排除自身**下推**到查询（与 dedup.ts:117 同形态）。
+  // 但 0.22.3 的 QUERY_VECTOR_INDEX 把 $k 用在索引扫描内、外层 WHERE 过滤是**之后**做的，
+  // 故自身若落在 top-k 里，光下推仍会少一条。排除时多要一条候选，过滤后再裁到 k。
+  const indexK = input.excludeId === undefined ? k : k + 1
   const rows = await queryRows(connection, RECALL_STATEMENT, {
     q: [...input.embedding],
-    k,
+    k: indexK,
     now: input.now,
+    // 空串时恒真（`<> ''` 对非空 id 恒成立），故不传 excludeId 时行为不变。
+    self_id: input.excludeId ?? '',
   })
   const neighbors: RecallNeighbor[] = []
   for (const row of rows) {
     const id = String(row.id)
-    if (input.excludeId !== undefined && id === input.excludeId) continue
     neighbors.push({
       id,
-      layer: String(row.layer)
-      ,
+      layer: String(row.layer),
       kind: row.kind === null || row.kind === undefined ? '' : String(row.kind),
+      text: String(row.text ?? ''),
       distance: Number(row.distance ?? Number.POSITIVE_INFINITY),
     })
   }
@@ -166,7 +182,9 @@ export function buildRelationMessages(candidate: RelationCandidate, neighbors: r
     RELATION_OUTPUT_SCHEMA,
     '',
     '新记忆：' + JSON.stringify({ id: candidate.id, layer: candidate.layer, kind: candidate.kind, text: candidate.text }),
-    '邻接候选：' + JSON.stringify(neighbors.map((n) => ({ id: n.id, layer: n.layer, kind: n.kind }))),
+    '邻接候选：' + JSON.stringify(
+      neighbors.map((n) => ({ id: n.id, layer: n.layer, kind: n.kind, text: n.text.slice(0, 120) })),
+    ),
   ].join('\n')
   return [{ role: 'user', content: [{ type: 'text', text: instruction }] }]
 }
@@ -325,10 +343,12 @@ export async function identifyRelations(input: IdentifyRelationsInput): Promise<
   return { ok: true, proposals }
 }
 
-/** 一条关系写入的审计行（skip / reject / write 三种动作复用同一形状）。 */
+/** 一条关系写入的审计行（skip / reject / write 三种动作复用同一形状）。
+ *  l0Refs 一律记**来源 INBOX 条目 id**（向下证据引用，与同表其它写者一致），
+ *  候选 memory 节点 id 只留在 reason 文本里（评审 P8/T8）。 */
 async function insertRelationAudit(
   connection: lbug.Connection,
-  candidateId: string,
+  itemId: string,
   action: string,
   outcome: 'success' | 'failure' | 'uncertain',
   reason: string | null,
@@ -340,7 +360,7 @@ async function insertRelationAudit(
     kind: CAPTURE_KIND,
     action,
     policy: DEFAULT_CAPTURE_POLICY,
-    l0Refs: [candidateId],
+    l0Refs: [itemId],
     outcome,
     reason,
   })
@@ -359,6 +379,8 @@ export interface ApplyRelationsResult {
 export async function applyRelations(
   connection: lbug.Connection,
   args: {
+    /** 来源 INBOX 条目 id（审计 l0Refs，评审 P8/T8）。 */
+    readonly itemId: string
     readonly candidate: { readonly id: string; readonly layer: string; readonly kind: string }
     readonly proposals: readonly RelationProposal[]
     readonly neighbors: readonly RecallNeighbor[]
@@ -371,7 +393,7 @@ export async function applyRelations(
     for (const targetId of selection.rejectedEvidence) {
       await insertRelationAudit(
         connection,
-        args.candidate.id,
+        args.itemId,
         REJECT_EVIDENCE_ACTION,
         'uncertain',
         REJECT_EVIDENCE_REASON + ': target=' + targetId,
@@ -382,7 +404,7 @@ export async function applyRelations(
       written = await writeRelatedEdges(connection, selection.accepted)
       await insertRelationAudit(
         connection,
-        args.candidate.id,
+        args.itemId,
         WRITE_RELATED_ACTION,
         'success',
         'edges=' + String(written) + (selection.rejectedOther.length > 0 ? ' rejected=' + String(selection.rejectedOther.length) : ''),
@@ -419,7 +441,10 @@ export async function countRelatedSkips(connection: lbug.Connection): Promise<nu
   try {
     const rows = await queryRows(
       connection,
-      'MATCH (g:' + 'generation_log' + " {action: '" + SKIP_RELATED_ACTION + "'}) RETURN count(*) AS c",
+      'MATCH (g:' + GENERATION_LOG_TABLE + ')' +
+        ' WHERE g.action IN [' +
+        "'" + SKIP_RELATED_ACTION + "', '" + REJECT_EVIDENCE_ACTION + "', '" + WRITE_EVIDENCE_SKIPPED_ACTION + "']" +
+        ' RETURN count(*) AS c',
       {},
     )
     return Number(rows[0]?.c ?? 0)
@@ -477,8 +502,21 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
       await recordRelatedSkip(connection, input.itemId, SKIP_RELATED_EMBEDDING_REASON, input.now)
       return
     }
+    // 审计降级时绝不外抛（评审 P4/T4）：审计失败只 warn，关系降级不得把已提交的记忆拖成失败。
+    const recordSkipSafely = async (reason: string): Promise<void> => {
+      try {
+        await recordRelatedSkip(connection, input.itemId, reason, input.now)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        options.logger?.warn('关系跳过审计写入失败（id=' + input.itemId + '）：' + message)
+      }
+    }
     for (const entry of input.entries) {
-      if (input.signal.aborted) return
+      if (input.signal.aborted) {
+        // 评审 P4（T4）：30s 总预算耗尽是一类降级，必须落一条 skip 审计（模块头 / AD-21）。
+        await recordSkipSafely('relation-budget-aborted')
+        return
+      }
       const embedding = entry.embedding
       if (embedding === null || embedding.length === 0) {
         // 本节点没有向量（写时嵌入失败）：只跳过它，其余节点照常。
@@ -507,6 +545,7 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
           return
         }
         await applyRelations(connection, {
+          itemId: input.itemId,
           candidate: { id: entry.id, layer: entry.layer, kind: entry.kind },
           proposals: identified.proposals,
           neighbors,
@@ -514,8 +553,10 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
         })
       } catch (error) {
         // 关系写入是 best-effort：绝不让它把已提交的记忆拖成失败（AC:779-782）。
+        // 评审 P4（T4）：DB 抛错同样是一类降级，落一条 skip 审计（自守卫，审计失败只 warn）。
         const message = error instanceof Error ? error.message : String(error)
         options.logger?.warn('关系识别/写入失败（node=' + entry.id + '）：' + message)
+        await recordSkipSafely('relation-error: ' + message)
       }
     }
   }

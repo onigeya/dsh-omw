@@ -13,8 +13,9 @@
  * - **挂既有模块级后台任务集**：调用方是消费者的 maintenance 钩子（与 NULL 向量回填同一钩子），
  *   因此不新增 ctx.effect，且天然被既有的 `stop() → drain → close()` 覆盖。
  *
- * 崩溃语义：边写入与审计同一事务；游标在事务**之后**推进。故进程在两者之间崩溃只会
- * 让同一批重做一遍——MERGE 幂等，不产重边。
+ * 崩溃语义（评审 P7/T7 修订）：边写入、审计与**游标推进**同一事务。故进程崩溃只会让整批
+ * 一起回滚（下一轮从原游标重做）——MERGE 幂等，不产重边，也**不会重复记** backfill_evidence
+ * 审计行。唯一例外是「空页 ⇒ 写 done 哨兵」那条路径（无审计，留在事务外）。
  */
 import type * as lbug from '@ladybugdb/core'
 import {
@@ -40,7 +41,9 @@ export const BACKFILL_EVIDENCE_REASON = 'source-ref'
 
 const PAGE_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE m.recorded_at > $cursor_at OR (m.recorded_at = $cursor_at AND m.id > $cursor_id)',
+  'WHERE (m.recorded_at > $cursor_at OR (m.recorded_at = $cursor_at AND m.id > $cursor_id))',
+  // 评审 P9（T9③ / spec D3 spec:103）：回填只取**有效**节点，墓碑/失效节点不产出边。
+  '  AND m.invalid_at IS NULL AND m.expired_at IS NULL',
   'RETURN m.id AS id, m.layer AS layer, m.source_refs AS source_refs, m.recorded_at AS recorded_at',
   'ORDER BY m.recorded_at ASC, m.id ASC',
   'LIMIT $limit',
@@ -106,8 +109,13 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
       limit: batchSize,
     })
     if (page.length === 0) {
-      // 扫完了：写哨兵，之后每轮只花一次 meta 读。
-      await writeCursor(connection, EVIDENCE_BACKFILL_DONE)
+      // 评审 P15（T17）：只有**游标非空**（确实扫过一段）时才能把空页判为「扫完」。
+      // 游标为空 + 页空 = 空库 / 首次 maintenance 早于任何节点写入——此时写 done 会让
+      // 之后新写的节点**永不回填**。直接 return 0（代价：空库每轮多一次查询，可忽略）。
+      if (cursor.length > 0) {
+        // 扫完了：写哨兵，之后每轮只花一次 meta 读。
+        await writeCursor(connection, EVIDENCE_BACKFILL_DONE)
+      }
       return 0
     }
 
@@ -130,9 +138,17 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
     const entries: EvidenceEdgeInput[] = []
     const skipped: string[] = []
     let lastSeen = cursor
+    // 评审 P1（T1）：闸门在本页中途转忙 ⇒ 尾部行**没被处理**，游标不能落 done 哨兵，
+    // 否则那些行永久无 EVIDENCE 边且游标谎报完成。processed 用于审计写**实际处理行数**。
+    let completed = true
+    let processed = 0
     for (const row of page) {
       // 每个节点迭代前复查闸门：一轮绝不跨 turn 边界继续。
-      if (!options.gate.isIdle()) break
+      if (!options.gate.isIdle()) {
+        completed = false
+        break
+      }
+      processed += 1
       const id = String(row.id)
       const layer = String(row.layer)
       lastSeen = String(row.recorded_at) + '|' + id
@@ -163,7 +179,7 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
 
     const outcome = skipped.length > 0 ? 'uncertain' : 'success'
     const reason =
-      'nodes=' + String(page.length) + ' edges=' + String(entries.length) +
+      'nodes=' + String(processed) + ' edges=' + String(entries.length) +
       (skipped.length > 0 ? ' skipped=' + String(skipped.length) + ' first=' + (skipped[0] ?? '') : '')
     let written = 0
     await runInTransaction(connection, async () => {
@@ -179,9 +195,12 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
       })
       const result = await writeEvidenceEdges(connection, entries)
       written = result.written
+      // 评审 P7（T7）：游标推进移入**同一事务**（写在写边与审计之后）。放在事务外时
+      // COMMIT 后崩溃/任何重放会让同一批再记一次 backfill_evidence 审计行——边 MERGE 幂等，
+      // 账本不幂等。空页写 done 的路径无审计，留在事务外（上面那段）。
+      // 评审 P1：只有「本页全部处理完」**且**是末批（不足一页）才能写 done 哨兵。
+      await writeCursor(connection, completed && processed < batchSize ? EVIDENCE_BACKFILL_DONE : lastSeen)
     })
-    // 游标推进放在事务外：回填幂等（MERGE），崩溃重放只会重做同一批的 MERGE。
-    await writeCursor(connection, page.length < batchSize ? EVIDENCE_BACKFILL_DONE : lastSeen)
     return written
   }
   return { runOnce }

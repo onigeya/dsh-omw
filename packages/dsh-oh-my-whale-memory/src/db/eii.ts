@@ -228,7 +228,9 @@ export async function computeEvidenceDrift(connection: lbug.Connection, now: str
     const refs = toStringArray(node.source_refs)
     const refSet = new Set(refs)
     const edgeSet = inEdges.get(id) ?? new Set<string>()
-    for (const ref of refs) if (!edgeSet.has(ref)) refsWithoutEdges.push({ id, ref })
+    // 评审 P18b（T20）：遍历**去重后的 refSet**——库内 source_refs 允许含重复 id
+    //（list_concat 追加），用原数组会把同一条漂移放大成多条。
+    for (const ref of refSet) if (!edgeSet.has(ref)) refsWithoutEdges.push({ id, ref })
     for (const from of edgeSet) if (!refSet.has(from)) edgesWithoutRefs.push({ id, ref: from })
   }
   return { refsWithoutEdges, edgesWithoutRefs }

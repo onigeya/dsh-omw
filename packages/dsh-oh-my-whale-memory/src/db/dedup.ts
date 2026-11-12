@@ -106,6 +106,35 @@ export interface DedupOptions {
   now?: () => Date
   /** 去重扫描失败时的告警出口（去重是守门而非致命，失败只告警不阻塞写入）。 */
   logger?: { warn(message: string): void }
+  /**
+   * ANN 扫描失败时的处置（Story 2.6 评审补钉 P20）：
+   * - `'degrade'`（缺省，2.4 语义）：吞错、按「无候选」继续写、只告警；
+   * - `'throw'`：抛 {@link SemanticScanError} 让调用方事务干净回滚。
+   *
+   * 为什么需要后者：LadybugDB 0.22.3 里**事务内任一语句报错即中止整个事务**（后续语句被
+   * 静默丢弃，COMMIT 抛 'No active transaction for COMMIT.'）。因此在别人的事务里吞掉扫描
+   * 错误再继续写是**假降级**——写入全部丢失。需要降级语义的宿主应先以 'throw' 试一次，
+   * 捕获后带 {@link DedupOptions.skipSemanticScan} 重试。
+   */
+  scanFailure?: 'degrade' | 'throw'
+  /**
+   * 整段跳过 ANN（只走指纹路径①）。给「上一轮扫描把事务搞中止」的调用方重试用：
+   * 与 `embedding: null` 不同，向量仍按原样写入（失效索引要靠这次成功提交自愈）。
+   */
+  skipSemanticScan?: boolean
+}
+
+/**
+ * ANN 粗筛/复核失败（仅 `scanFailure: 'throw'` 时抛）。调用方应把它当作**可重试的降级信号**，
+ * 而不是条目失败：同一个事务带 `skipSemanticScan: true` 重跑一次即可正常写入。
+ */
+export class SemanticScanError extends Error {
+  readonly reason = 'semantic-scan-failed'
+
+  constructor(cause: unknown) {
+    super('语义去重扫描失败（ANN）: ' + (cause instanceof Error ? cause.message : String(cause)), { cause })
+    this.name = 'SemanticScanError'
+  }
 }
 
 /** ANN 粗筛：`WITH node, distance MATCH (node) WHERE ...` 的谓词顺序由 brief-2-4:10-93 探针锁定。 */
@@ -378,6 +407,12 @@ export async function writeDeduplicatedMemory(
   if (existing !== null) {
     if (existing.expiredAt !== null) {
       // 用户显式 forget（prd.md:293）优先于自动复活：保留失效态，只记一条 uncertain 供 7.2 过滤。
+      // 评审 P19a（T23）：**仍要合并 source_refs**。processor 会为本次观测量出
+      // l0_raw→该节点 的 EVIDENCE 边（事实层面为真：这次观测确实产出过这条记忆），
+      // 而 EFFECTIVE_MEMORY_REFS / computeEvidenceDrift 都过滤 expired_at IS NULL ⇒
+      // 不合并的话边与 source_refs 两个载体永久不一致且不可见。
+      // 不动 expired_at / invalid_at（不复活），outcome 仍为 fingerprint-merge。
+      await mergeSourceRefs(connection, existing.id, sourceRefs)
       await audit(RESURRECT_MEMORY_ACTION, 'uncertain', `skip-resurrect expired_at=${existing.expiredAt}`)
       return { id: existing.id, recordedAt: existing.recordedAt, outcome: 'fingerprint-merge' }
     }
@@ -407,19 +442,27 @@ export async function writeDeduplicatedMemory(
 
   // ---- ANN 粗筛 + 精确复核 ----
   let candidates: DedupCandidate[] = []
-  try {
-    candidates = await findSemanticCandidates(connection, {
-      layer,
-      vector,
-      dim,
-      selfId: id,
-      nowIso,
-    })
-  } catch (error) {
-    // 去重是守门而非致命：向量索引缺失/扩展未装载等失败按「无候选」处理，绝不阻塞写入
-    // （宁可留下重复节点，也不能丢数据）。
-    options?.logger?.warn(`语义去重扫描失败，按无候选写入：${(error as Error).message}`)
-    candidates = []
+  if (options?.skipSemanticScan === true) {
+    // 调用方上一轮已被扫描失败中止过事务（见 DedupOptions.scanFailure）：本轮整段跳过。
+    // 向量照常往下传——索引要靠这次成功提交自愈。
+    options.logger?.warn('语义去重扫描本轮跳过（扫描失败后的降级重试）')
+  } else {
+    try {
+      candidates = await findSemanticCandidates(connection, {
+        layer,
+        vector,
+        dim,
+        selfId: id,
+        nowIso,
+      })
+    } catch (error) {
+      // 去重是守门而非致命：向量索引缺失/扩展未装载等失败按「无候选」处理，绝不阻塞写入
+      // （宁可留下重复节点，也不能丢数据）。**但**事务内失败会中止整个事务，那种情况下继续
+      // 写等于往一个已死的事务里写——所以把选择权交给调用方（scanFailure）。
+      if (options?.scanFailure === 'throw') throw new SemanticScanError(error)
+      options?.logger?.warn(`语义去重扫描失败，按无候选写入：${(error as Error).message}`)
+      candidates = []
+    }
   }
 
   // ---- 路径②：语义重复（cosine ≥ 0.97）----

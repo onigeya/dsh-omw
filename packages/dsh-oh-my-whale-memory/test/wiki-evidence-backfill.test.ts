@@ -7,7 +7,10 @@
  * 3. 同层 ref **不建边**且在审计 + audit_gap（漂移）里可见（X1×U5）；
  * 4. 游标扫完落 `done`、闸门忙则一步不走。
  *
- * 开库次数：本文件共 1 次——LadybugDB 每进程约 15 个库封顶。
+ * 评审补钉（P1/P9③/P11/P15）在第二个库里跑（分页 / 中途转忙 / 空库首轮 / 墓碑过滤），
+ * 使上面四条用例的共享状态不被污染。
+ *
+ * 开库次数：本文件共 2 次——LadybugDB 每进程约 15 个库封顶。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
@@ -54,6 +57,14 @@ async function readCursor(db: MemoryDatabase): Promise<string | null> {
   const rows = await queryAll(db.connection, "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS value")
   const value = rows[0]?.value
   return value === undefined || value === null ? null : String(value)
+}
+
+async function setCursor(db: MemoryDatabase, value: string): Promise<void> {
+  await exec(db, [
+    "MERGE (m:omw_meta {key: 'evidence_backfill_cursor'})",
+    "ON CREATE SET m.value = '" + value + "'",
+    "ON MATCH SET m.value = '" + value + "'",
+  ].join(' '))
 }
 
 async function backfillAuditRows(db: MemoryDatabase): Promise<Record<string, unknown>[]> {
@@ -138,5 +149,115 @@ describe('X1：EVIDENCE 边历史回填', () => {
     const gate = createIdleGate()
     const backfill = createEvidenceBackfill({ connection: () => null, gate })
     expect(await backfill.runOnce()).toBe(0)
+  })
+})
+
+/**
+ * 评审补钉（P1/P9③/P11/P15）：分页续跑、页内闸门转忙、空库首轮、墓碑过滤。
+ * 独立库 + 独立 gate，避免与上面四条共享状态的用例互相干扰。
+ */
+describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', () => {
+  let db: MemoryDatabase
+
+  beforeAll(async () => {
+    db = await openMemoryDatabase({
+      dbPath: resolveMemoryDbPath(await makeTempDir('omw-ebf2-')),
+      dim: DIM,
+      modelId: 'test-embed',
+    })
+    await ensureEdgeTables(db.connection)
+  })
+
+  afterAll(async () => {
+    await db?.close()
+  })
+
+  it('评审 P15（T17）：空库首轮不写 done，之后写入的节点仍能被回填', async () => {
+    const gate = createIdleGate()
+    const backfill = createEvidenceBackfill({ connection: () => db.connection, gate })
+    expect(await backfill.runOnce()).toBe(0)
+    // 空库 + 游标为空 ⇒ 绝不落 done（否则后续新节点永不回填）。
+    expect(await readCursor(db)).toBe(null)
+
+    await seedL0(db, 'p15-l0', 'P15 原文')
+    await seedMemory(db, { id: 'p15-m', layer: 'L1', refs: ['p15-l0'], recordedAt: '2026-02-01T00:00:00.000Z' })
+    expect(await backfill.runOnce()).toBe(1)
+    expect(await readEvidenceInEdgeIds(db.connection, 'p15-m')).toEqual(['p15-l0'])
+  })
+
+  it('评审 P11（T12①）：batchSize 分页——每轮只推进一页，续跑后边数不重复', async () => {
+    const gate = createIdleGate()
+    const backfill = createEvidenceBackfill({ connection: () => db.connection, gate, batchSize: 2 })
+    await seedL0(db, 'p11-l0', 'P11 原文')
+    await seedMemory(db, { id: 'p11-a', layer: 'L1', refs: ['p11-l0'], recordedAt: '2026-03-01T00:00:00.000Z' })
+    await seedMemory(db, { id: 'p11-b', layer: 'L1', refs: ['p11-l0'], recordedAt: '2026-03-02T00:00:00.000Z' })
+    await seedMemory(db, { id: 'p11-c', layer: 'L1', refs: ['p11-l0'], recordedAt: '2026-03-03T00:00:00.000Z' })
+    // 显式把游标钉在第一页之前（不依赖上面用例留下的状态）。
+    await setCursor(db, '2026-02-28T00:00:00.000Z|cursor')
+
+    const first = await backfill.runOnce()
+    // 第一页：p11-a 与 p11-b（按 recorded_at 升序），只写这两条的边。
+    expect(first).toBe(2)
+    const cursorAfterFirst = await readCursor(db)
+    expect(cursorAfterFirst).not.toBe(EVIDENCE_BACKFILL_DONE)
+    expect(String(cursorAfterFirst)).toContain('|')
+
+    const second = await backfill.runOnce()
+    expect(second).toBe(1)
+    // 末批（不足一页且本页处理完）⇒ 落 done；再跑一轮即短路。
+    expect(await readCursor(db)).toBe(EVIDENCE_BACKFILL_DONE)
+    expect(await backfill.runOnce()).toBe(0)
+    expect(await readEvidenceInEdgeIds(db.connection, 'p11-c')).toEqual(['p11-l0'])
+    const total = await queryAll(db.connection, 'MATCH ()-[e:EVIDENCE]->() RETURN count(*) AS c')
+    expect(Number(total[0]?.c)).toBe(4)
+  })
+
+  it('评审 P9③（T9）：墓碑 / 失效节点不被回填', async () => {
+    await seedL0(db, 'p9-l0', 'P9 原文')
+    await exec(db, [
+      "CREATE (m:memory {id: 'p9-tomb', layer: 'L1', kind: '', priority: 0, text: 'p9-tomb',",
+      "  valid_at: '2026-04-01T00:00:00.000Z', recorded_at: '2026-04-01T00:00:00.000Z',",
+      "  invalid_at: '2026-04-02T00:00:00.000Z', expired_at: NULL, source_refs: ['p9-l0']})",
+    ].join(' '))
+    await setCursor(db, '2026-03-31T00:00:00.000Z|cursor')
+    const gate = createIdleGate()
+    const backfill = createEvidenceBackfill({ connection: () => db.connection, gate })
+    await backfill.runOnce()
+    expect(await readEvidenceInEdgeIds(db.connection, 'p9-tomb')).toEqual([])
+  })
+
+  it('评审 P1（T1）：页内闸门转忙 ⇒ 不落 done、尾部行下一轮被重扫', async () => {
+    // 自定义 gate：前 1 次 isIdle=true（入口），随后 false（页内第一次复查即转忙）。
+    let calls = 0
+    const flaky = {
+      enterTurn: () => {},
+      exitTurn: () => {},
+      isIdle: () => { calls += 1; return calls <= 1 },
+      depthFor: () => 0,
+    }
+    await seedL0(db, 'p1-l0', 'P1 原文')
+    await exec(db, [
+      "CREATE (m:memory {id: 'p1-head', layer: 'L1', kind: '', priority: 0, text: 'p1-head',",
+      "  valid_at: '2026-05-01T00:00:00.000Z', recorded_at: '2026-05-01T00:00:00.000Z', invalid_at: NULL, expired_at: NULL, source_refs: ['p1-l0']})",
+    ].join(' '))
+    await exec(db, [
+      "CREATE (m:memory {id: 'p1-tail', layer: 'L1', kind: '', priority: 0, text: 'p1-tail',",
+      "  valid_at: '2026-05-02T00:00:00.000Z', recorded_at: '2026-05-02T00:00:00.000Z', invalid_at: NULL, expired_at: NULL, source_refs: ['p1-l0']})",
+    ].join(' '))
+
+    // 显式钉在第一页之前，保证本轮只看 p1-head / p1-tail 两行。
+    await setCursor(db, '2026-04-30T00:00:00.000Z|cursor')
+    const shortPage = createEvidenceBackfill({ connection: () => db.connection, gate: flaky, batchSize: 2 })
+    const written = await shortPage.runOnce()
+    // 页内第一个节点就被闸门挡下 ⇒ 一条边都没写、游标不能落 done。
+    expect(written).toBe(0)
+    expect(await readCursor(db)).not.toBe(EVIDENCE_BACKFILL_DONE)
+
+    // 闸门恢复 ⇒ 下一轮把两行都扫掉（尾部行没丢）。
+    const healthy = createIdleGate()
+    const resumed = createEvidenceBackfill({ connection: () => db.connection, gate: healthy, batchSize: 2 })
+    expect(await resumed.runOnce()).toBe(2)
+    expect(await readEvidenceInEdgeIds(db.connection, 'p1-head')).toEqual(['p1-l0'])
+    expect(await readEvidenceInEdgeIds(db.connection, 'p1-tail')).toEqual(['p1-l0'])
   })
 })

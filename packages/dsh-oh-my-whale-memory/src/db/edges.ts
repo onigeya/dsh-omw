@@ -67,7 +67,7 @@ const MERGE_EVIDENCE_FROM_L0 = [
   'MATCH (a:' + L0_RAW_TABLE + ' {id: $from_id})',
   'MATCH (b:' + MEMORY_TABLE + ' {id: $to_id})',
   'MERGE (a)-[r:' + EVIDENCE + ']->(b)',
-  'SET r.reason = coalesce($reason, r.reason)',
+  'ON CREATE SET r.reason = $reason',
   'RETURN b.id AS to_id',
 ].join('\n')
 
@@ -75,7 +75,7 @@ const MERGE_EVIDENCE_FROM_MEMORY = [
   'MATCH (a:' + MEMORY_TABLE + ' {id: $from_id})',
   'MATCH (b:' + MEMORY_TABLE + ' {id: $to_id})',
   'MERGE (a)-[r:' + EVIDENCE + ']->(b)',
-  'SET r.reason = coalesce($reason, r.reason)',
+  'ON CREATE SET r.reason = $reason',
   'RETURN b.id AS to_id',
 ].join('\n')
 
@@ -83,18 +83,13 @@ const MERGE_RELATED = [
   'MATCH (a:' + MEMORY_TABLE + ' {id: $from_id})',
   'MATCH (b:' + MEMORY_TABLE + ' {id: $to_id})',
   'MERGE (a)-[r:' + RELATED + ']->(b)',
-  'SET r.reason = coalesce($reason, r.reason)',
+  'ON CREATE SET r.reason = $reason',
   'RETURN b.id AS to_id',
 ].join('\n')
 
 const DIRECT_IN_EDGE_IDS = [
   'MATCH (x)-[e:' + EVIDENCE + ']->(m:' + MEMORY_TABLE + ' {id: $id})',
   'RETURN x.id AS from_id',
-].join('\n')
-
-const RELATED_OUT_EDGES = [
-  'MATCH (a:' + MEMORY_TABLE + ' {id: $id})-[r:' + RELATED + ']->(b:' + MEMORY_TABLE + ')',
-  'RETURN b.id AS target_id, r.reason AS reason',
 ].join('\n')
 
 /** 建两张边表。只应在建库/打开库的唯一迁移点调用一次；DDL 在事务内执行（all-or-nothing）。
@@ -145,7 +140,13 @@ export async function writeEvidenceEdges(
       to_id: entry.toId,
       reason: entry.reason ?? null,
     }))
-    if (rows.length > 0) written += 1
+    if (rows.length > 0) {
+      written += 1
+    } else {
+      // 评审 P6（T6）：MATCH 未命中端点时返回 0 行——既没写边也不是「已存在」，
+      // 必须显式计入 skipped，否则调用方无法把「端点缺失」与「成功」区分开。
+      skipped.push({ reason: 'endpoint-missing', fromId: entry.fromId, toId: entry.toId })
+    }
   }
   return { written, skipped }
 }
@@ -180,18 +181,4 @@ export async function writeRelatedEdges(
 export async function readEvidenceInEdgeIds(connection: lbug.Connection, id: string): Promise<string[]> {
   const rows = await queryRows(connection, DIRECT_IN_EDGE_IDS, { id })
   return rows.map((row) => String(row.from_id))
-}
-
-export interface RelatedEdge {
-  readonly targetId: string
-  readonly reason: string | null
-}
-
-/** 某节点的 RELATED 出边（读侧原语；memory_related 工具本体属 Epic 3）。 */
-export async function readRelatedOutEdges(connection: lbug.Connection, id: string): Promise<RelatedEdge[]> {
-  const rows = await queryRows(connection, RELATED_OUT_EDGES, { id })
-  return rows.map((row) => ({
-    targetId: String(row.target_id),
-    reason: row.reason === null || row.reason === undefined ? null : String(row.reason),
-  }))
 }

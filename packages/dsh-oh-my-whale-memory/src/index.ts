@@ -478,10 +478,14 @@ export async function apply(
     gate: idleGate,
     promotion: promotionTracker,
     process: inboxProcessor,
-    maintenance: () => Promise.all([
-      embeddingBackfill ? embeddingBackfill.runOnce() : Promise.resolve(0),
-      evidenceBackfill.runOnce(),
-    ]),
+    // 评审 P18a（T19）：**串行**跑两个回填。两者都在事务外做裸 prepare/execute，
+    // 并发会在同一条连接上交错（语句可能落进对方未结算的连接级事务）。串行代价可忽略
+    // （每轮各 ≤1 批），与 P7 的「游标进事务」是双保险。
+    maintenance: async () => {
+      const embedded = embeddingBackfill ? await embeddingBackfill.runOnce() : 0
+      const evidenced = await evidenceBackfill.runOnce()
+      return embedded + evidenced
+    },
     logger: ctx.logger,
   })
   inboxConsumer.start()

@@ -9,7 +9,7 @@
  * 播种用 upsertMemory + memoryNodeId（节点 id 是指纹 uuid5，不是文本本身）。
  * 开库次数：本文件 1 次——LadybugDB 每进程约 15 个库封顶。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { ensureEdgeTables } from '../src/db/edges'
@@ -18,10 +18,13 @@ import { upsertMemory } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/rows'
 import {
+  RELATION_OUTPUT_SCHEMA,
   RELATION_RECALL_TOP_K,
+  RELATION_SENTINEL_PREAMBLE,
   RELATED_MAX_EDGES,
   SKIP_RELATED_LLM_REASON,
   applyRelations,
+  buildRelationMessages,
   createRelationRunner,
   parseRelationOutput,
   recallNeighbors,
@@ -69,11 +72,19 @@ async function seed(
   return memoryNodeId(args.layer ?? LAYER, key)
 }
 
-async function auditRows(action: string): Promise<Array<{ reason: string; outcome: string }>> {
-  const rows = await queryAll(
-    store.connection,
-    "MATCH (g:generation_log {action: '" + action + "'}) RETURN g.reason AS reason, g.outcome AS outcome",
-  )
+/**
+ * 审计行（可按 l0_refs 里的 itemId 过滤）。
+ * 评审 P18d①（T22）：不限 itemId 的计数会与前序用例的顺序耦合——同一 action 的行会累积。
+ */
+async function auditRows(
+  action: string,
+  itemId?: string,
+): Promise<Array<{ reason: string; outcome: string }>> {
+  const where =
+    itemId === undefined
+      ? "MATCH (g:generation_log {action: '" + action + "'})"
+      : "MATCH (g:generation_log {action: '" + action + "'}) WHERE '" + itemId + "' IN g.l0_refs"
+  const rows = await queryAll(store.connection, where + ' RETURN g.reason AS reason, g.outcome AS outcome')
   return rows.map((row) => ({ reason: String(row.reason ?? ''), outcome: String(row.outcome ?? '') }))
 }
 
@@ -119,9 +130,9 @@ describe('parseRelationOutput（schema 原样 snake_case）', () => {
 describe('selectRelatedTargets（应用层校验）', () => {
   const candidate = { id: 'cand', layer: 'L1', kind: 'work_fact' }
   const neighbors: RecallNeighbor[] = [
-    { id: 'n-same-kind-far', layer: 'L1', kind: 'work_fact', distance: 0.05 },
-    { id: 'n-other-kind-near', layer: 'L1', kind: 'persona', distance: 0.01 },
-    { id: 'n-cross-layer', layer: 'L2', kind: 'work_fact', distance: 0.02 },
+    { id: 'n-same-kind-far', layer: 'L1', kind: 'work_fact', text: '同类较远', distance: 0.05 },
+    { id: 'n-other-kind-near', layer: 'L1', kind: 'persona', text: '异类较近', distance: 0.01 },
+    { id: 'n-cross-layer', layer: 'L2', kind: 'work_fact', text: '跨层', distance: 0.02 },
   ]
 
   it('同 kind 优先是排序权重：同 kind 更远的排在异 kind 更近的前面，但都保留', () => {
@@ -152,13 +163,36 @@ describe('selectRelatedTargets（应用层校验）', () => {
   it('上限 5 条：多出的候选进 rejectedOther', () => {
     const many: RecallNeighbor[] = []
     for (let i = 0; i < 8; i += 1) {
-      many.push({ id: 'm' + String(i), layer: 'L1', kind: 'work_fact', distance: 0.01 * (i + 1) })
+      many.push({ id: 'm' + String(i), layer: 'L1', kind: 'work_fact', text: 't' + String(i), distance: 0.01 * (i + 1) })
     }
     const proposals: RelationProposal[] = many.map((n) => ({ targetId: n.id, edgeType: 'RELATED' as const, reason: null }))
     const selection = selectRelatedTargets(candidate, proposals, many)
     expect(selection.accepted.length).toBe(RELATED_MAX_EDGES)
     expect(selection.accepted.map((edge) => edge.toId)).toEqual(['m0', 'm1', 'm2', 'm3', 'm4'])
     expect(selection.rejectedOther).toEqual(['m5', 'm6', 'm7'])
+  })
+})
+
+describe('buildRelationMessages（prompt 与 schema 同文件）', () => {
+  it('含 sentinel 逐字串 + 输出 schema + 候选 id + 邻居文本（截断 120 字符）', () => {
+    const longText = '甲'.repeat(200)
+    const messages = buildRelationMessages(
+      { id: 'cand-1', layer: 'L1', kind: 'work_fact', text: '新记忆正文' },
+      [
+        { id: 'nb-1', layer: 'L1', kind: 'work_fact', text: longText, distance: 0.01 },
+        { id: 'nb-2', layer: 'L1', kind: 'persona', text: '短文本', distance: 0.02 },
+      ],
+    )
+    const text = String((messages[0]?.content?.[0] as { text?: string } | undefined)?.text ?? '')
+    expect(text).toContain(RELATION_SENTINEL_PREAMBLE)
+    expect(text).toContain(RELATION_OUTPUT_SCHEMA)
+    expect(text).toContain('cand-1')
+    expect(text).toContain('nb-1')
+    expect(text).toContain('nb-2')
+    expect(text).toContain('短文本')
+    // 邻居文本截断到 120 字符：整条 200 字的邻居不会原样出现。
+    expect(text).not.toContain(longText)
+    expect(text).toContain('甲'.repeat(120))
   })
 })
 
@@ -190,6 +224,17 @@ describe('recallNeighbors（真 KNN）', () => {
     expect(await recallNeighbors(store.connection, { embedding: [], k: 8, now: NOW })).toEqual([])
     expect(await recallNeighbors(store.connection, { embedding: [1, 0, 0], k: 8, now: NOW })).toEqual([])
   })
+
+  it('评审 P19b（T24）：excludeId 下推到查询 ⇒ 自身不占名额，仍能取满 k 条', async () => {
+    // 自身（E1，distance 0）本会占掉第一名；k=2 时旧实现在 JS 里过滤后只剩 1 条。
+    const selfId = nid('k-self')
+    const withSelf = await recallNeighbors(store.connection, { embedding: E1, k: 2, now: NOW })
+    expect(withSelf.map((n) => n.id)).toEqual([selfId, nid('k-near')])
+
+    const excluded = await recallNeighbors(store.connection, { embedding: E1, k: 2, excludeId: selfId, now: NOW })
+    expect(excluded.length).toBe(2)
+    expect(excluded.map((n) => n.id)).toEqual([nid('k-near'), nid('k-mid')])
+  })
 })
 
 describe('applyRelations（写边 + 记账）', () => {
@@ -197,14 +242,15 @@ describe('applyRelations（写边 + 记账）', () => {
     const candId = await seed('a-cand', { embedding: E1, kind: 'work_fact' })
     const targetId = await seed('a-target', { embedding: vectorWithCosine(0.95), kind: 'work_fact' })
     const neighbors: RecallNeighbor[] = [
-      { id: targetId, layer: 'L1', kind: 'work_fact', distance: 0.05 },
-      { id: 'a-layer2', layer: 'L2', kind: 'work_fact', distance: 0.06 },
+      { id: targetId, layer: 'L1', kind: 'work_fact', text: '目标', distance: 0.05 },
+      { id: 'a-layer2', layer: 'L2', kind: 'work_fact', text: '跨层候选', distance: 0.06 },
     ]
     const proposals: RelationProposal[] = [
       { targetId, edgeType: 'RELATED', reason: '同主题' },
       { targetId: 'a-layer2', edgeType: 'EVIDENCE', reason: '编造的证据' },
     ]
     const result = await applyRelations(store.connection, {
+      itemId: 'item-apply',
       candidate: { id: candId, layer: 'L1', kind: 'work_fact' },
       proposals,
       neighbors,
@@ -213,10 +259,10 @@ describe('applyRelations（写边 + 记账）', () => {
     expect(result.written).toBe(1)
     expect(result.rejectedEvidence).toBe(1)
     expect(await relatedEdges()).toContainEqual({ from: candId, to: targetId, reason: '同主题' })
-    const rejected = await auditRows('reject_evidence')
+    const rejected = await auditRows('reject_evidence', 'item-apply')
     expect(rejected.length).toBe(1)
     expect(rejected[0]?.reason).toContain('target=a-layer2')
-    const written = await auditRows('write_related')
+    const written = await auditRows('write_related', 'item-apply')
     expect(written.length).toBe(1)
     expect(written[0]?.reason).toBe('edges=1')
   })
@@ -252,9 +298,63 @@ describe('createRelationRunner（生产降级路径）', () => {
       now: NOW,
       signal: AbortSignal.timeout(5_000),
     })
-    const skips = await auditRows('skip_related')
+    const skips = await auditRows('skip_related', 'item-disabled')
     expect(skips.length).toBe(1)
     expect(skips[0]?.reason).toBe('embedding-disabled')
+    expect(okLlm.calls()).toBe(0)
+  })
+
+  it('评审 P4a（T4）：signal 已中止 ⇒ 一次 LLM 都不发，且落一条 relation-budget-aborted', async () => {
+    const okLlm = scripted('[]')
+    const controller = new AbortController()
+    controller.abort()
+    const runner = createRelationRunner({
+      connection: () => store.connection,
+      llm: okLlm.llm,
+      embeddingEnabled: true,
+    })
+    await runner({
+      itemId: 'item-aborted',
+      route: { provider: 'p', model: 'm' },
+      entries: [{ id: nid('k-near'), layer: 'L1', kind: 'work_fact', text: 'y', embedding: E1 }],
+      now: NOW,
+      signal: controller.signal,
+    })
+    expect(okLlm.calls()).toBe(0)
+    const skips = await auditRows('skip_related', 'item-aborted')
+    expect(skips.length).toBe(1)
+    expect(skips[0]?.reason).toBe('relation-budget-aborted')
+  })
+
+  it('评审 P4b（T4）：recallNeighbors 抛错 ⇒ 记 warn、不抛出，后续节点仍处理', async () => {
+    const okLlm = scripted('[]')
+    const warn = vi.fn()
+    // 假连接：prepare 就抛 ⇒ recallNeighbors 抛、applyRelations 也抛；两者都被 catch 吞掉。
+    const brokenConnection = {
+      prepare: () => { throw new Error('db exploded') },
+      execute: () => { throw new Error('db exploded') },
+    } as unknown as Parameters<typeof createRelationRunner>[0]['connection'] extends () => infer C ? C : never
+    const runner = createRelationRunner({
+      connection: () => brokenConnection,
+      llm: okLlm.llm,
+      embeddingEnabled: true,
+      logger: { warn },
+    })
+    await expect(
+      runner({
+        itemId: 'item-broken',
+        route: { provider: 'p', model: 'm' },
+        entries: [
+          { id: nid('k-near'), layer: 'L1', kind: 'work_fact', text: 'a', embedding: E1 },
+          { id: nid('k-mid'), layer: 'L1', kind: 'work_fact', text: 'b', embedding: E1 },
+        ],
+        now: NOW,
+        signal: AbortSignal.timeout(5_000),
+      }),
+    ).resolves.toBeUndefined()
+    // 每个节点两条 warn：① recallNeighbors 抛错 ② 这条降级的审计写入也失败（同一个坏连接）。
+    // 关键是**不抛出**且循环继续（两个节点都被处理）。
+    expect(warn).toHaveBeenCalledTimes(4)
     expect(okLlm.calls()).toBe(0)
   })
 
@@ -276,10 +376,10 @@ describe('createRelationRunner（生产降级路径）', () => {
       now: NOW,
       signal: AbortSignal.timeout(5_000),
     })
-    const skips = await auditRows('skip_related')
-    // 上一用例 1 条 embedding-disabled + 本用例 2 条（节点级 + LLM 失败）
-    expect(skips.length).toBe(3)
-    expect(skips[1]?.reason).toContain('node=' + nid('k-novector'))
-    expect(skips[2]?.reason).toContain(SKIP_RELATED_LLM_REASON)
+    // 评审 P18d①（T22）：按本用例的 itemId 过滤，不再依赖前序用例的行数。
+    const skips = await auditRows('skip_related', 'item-mixed')
+    expect(skips.length).toBe(2)
+    expect(skips[0]?.reason).toContain('node=' + nid('k-novector'))
+    expect(skips[1]?.reason).toContain(SKIP_RELATED_LLM_REASON)
   })
 })

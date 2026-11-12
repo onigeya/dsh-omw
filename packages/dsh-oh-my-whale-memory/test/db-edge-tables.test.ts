@@ -114,6 +114,44 @@ describe('边表 DDL 与写边原语', () => {
     expect(result.skipped.map((s) => s.reason)).toEqual(['layer-order', 'layer-order', 'self-loop'])
     expect(await readEvidenceInEdgeIds(store.connection, 'e2-l2a')).toEqual(['e2-l1a'])
   })
+
+  it('评审 P6（T6）：全非法批 ⇒ written===0 且逐条给 skipped 原因（I-O 矩阵 #3）', async () => {
+    await seedMemory(store, { id: 'p6-l1a', layer: 'L1' })
+    await seedMemory(store, { id: 'p6-l1b', layer: 'L1' })
+    await seedMemory(store, { id: 'p6-l2a', layer: 'L2' })
+    const result = await writeEvidenceEdges(store.connection, [
+      { fromId: 'p6-l1a', fromLayer: 'L1', toId: 'p6-l1b', toLayer: 'L1' },
+      { fromId: 'p6-l2a', fromLayer: 'L2', toId: 'p6-l1a', toLayer: 'L1' },
+      { fromId: 'p6-l1a', fromLayer: 'L1', toId: 'p6-l1a', toLayer: 'L1' },
+    ])
+    expect(result.written).toBe(0)
+    expect(result.skipped.length).toBe(3)
+  })
+
+  it('评审 P6（T6）：端点缺失 ⇒ written===0 且记 endpoint-missing（不再与「成功」混淆）', async () => {
+    await seedMemory(store, { id: 'p6-target', layer: 'L1' })
+    const result = await writeEvidenceEdges(store.connection, [
+      { fromId: 'p6-absent-l0', fromLayer: 'L0', toId: 'p6-target', toLayer: 'L1' },
+    ])
+    expect(result.written).toBe(0)
+    expect(result.skipped.map((s) => s.reason)).toEqual(['endpoint-missing'])
+  })
+
+  it('评审 P10（T10）：重放传不同 reason ⇒ 保留首写（ON CREATE SET）', async () => {
+    await seedL0(store, 'p10-l0', '原文')
+    await seedMemory(store, { id: 'p10-m', layer: 'L1' })
+    await writeEvidenceEdges(store.connection, [
+      { fromId: 'p10-l0', fromLayer: 'L0', toId: 'p10-m', toLayer: 'L1', reason: 'source-ref' },
+    ])
+    await writeEvidenceEdges(store.connection, [
+      { fromId: 'p10-l0', fromLayer: 'L0', toId: 'p10-m', toLayer: 'L1', reason: 'refine' },
+    ])
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (:l0_raw {id: 'p10-l0'})-[e:EVIDENCE]->(:memory {id: 'p10-m'}) RETURN e.reason AS reason",
+    )
+    expect(String(rows[0]?.reason)).toBe('source-ref')
+  })
 })
 
 describe('只读可达性原语（2.5 判据②/判据①）', () => {

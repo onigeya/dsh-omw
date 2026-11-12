@@ -104,12 +104,26 @@ async function inboxStatus(id: string): Promise<string | null> {
   return rows[0] === undefined ? null : String(rows[0].status)
 }
 
-function makeProcessor(llm: unknown) {
+// 写时嵌入：processor 用它给 facts 产向量（relationEntries 的 embedding 由此而来）。
+// 取与既有邻居 E1 的 cosine≈0.90：低于语义合并阈值 0.97（否则新事实会合并进邻居、
+// 走 semantic-merge 而不进 relationEntries），又足够近以被 KNN 召回。
+const E_NEAR = [0.9, Math.sqrt(1 - 0.9 * 0.9), 0, 0]
+const embed = {
+  async embed(_model: string, inputs: readonly string[]): Promise<{ ok: true; vectors: number[][] }> {
+    return { ok: true, vectors: inputs.map(() => E_NEAR) }
+  },
+}
+
+function makeProcessor(llm: unknown, relations?: unknown) {
   return createInboxProcessor({
     connection: () => store.connection,
     llm: llm as never,
     resolveRoute: () => ROUTE,
     now: () => NOW,
+    embedding: embed as never,
+    embeddingModel: 'test-embed',
+    // 评审 P2/T11：把**真**关系跑者注入进来，钉住 processor→relations 这条接线。
+    relations: relations as never,
   })
 }
 
@@ -147,9 +161,16 @@ describe('F3：精炼写 L1 同事务建 EVIDENCE 边（AC2）', () => {
     expect(await reclaimProcessingInboxItems(store.connection, { now: NOW })).toBe(1)
     const reclaimed = await claimNextInboxItem(store.connection, { owner: 'test-owner', now: NOW })
     expect(reclaimed?.id).toBe(item.id)
+    // 回滚带向量的节点会让 HNSW 索引留下指向已回滚行的 offset（LadybugDB 0.22.3 实测），
+    // 所以这次重放的 ANN 扫描**必然失败**：事务被引擎中止 ⇒ 处理器应整段重试（跳过语义去重），
+    // 靠这次成功提交把索引一并修好。降级事实必须留痕（AD-21）。
     await makeProcessor(scriptedLlm(factsJson([{ text: '事务内崩溃事实', kind: 'work_fact', priority: 0 }])))(reclaimed!)
     expect(await queryAll(store.connection, 'MATCH (m:memory) RETURN count(m) AS c')).toEqual([{ c: 1 }])
     expect(await evidenceEdges()).toHaveLength(1)
+    const refine = await audits('refine_inbox')
+    const degraded = refine.filter((row) => row.reason.includes('semantic-scan-degraded'))
+    expect(degraded).toHaveLength(1)
+    expect(degraded[0]?.outcome).toBe('uncertain')
   })
 })
 
@@ -195,5 +216,99 @@ describe('F3：LLM 提议的 EVIDENCE 被拒绝建边并记审计（裁决 U4）
     const rejected = await audits('reject_evidence')
     expect(rejected).toHaveLength(1)
     expect(rejected[0]?.reason).toContain('target=' + neighborId)
+  })
+})
+
+async function relatedEdges(): Promise<Array<{ from: string; to: string; reason: string }>> {
+  const rows = await queryAll(
+    store.connection,
+    'MATCH (a:memory)-[r:RELATED]->(b:memory) RETURN a.id AS from_id, b.id AS to_id, r.reason AS reason',
+  )
+  return rows.map((row) => ({ from: String(row.from_id), to: String(row.to_id), reason: String(row.reason ?? '') }))
+}
+
+describe('P2/T11：processor→关系跑者接线（AC4 一次性决定 / AC3 ≤5 条）', () => {
+  it('新节点经真 createRelationRunner 写出 RELATED 边与 write_related 审计（EVIDENCE 边仍在）', async () => {
+    // 既有同层节点（带向量，可被 KNN 召回）。
+    const neighborText = '既有的同层记忆'
+    await upsertMemory(store.connection, {
+      layer: MEMORY_REMEMBER_LAYER,
+      text: neighborText,
+      embedding: E1,
+      embeddingModelId: 'test-embed',
+      kind: 'work_fact',
+      priority: 0,
+      validAt: NOW.toISOString(),
+      recordedAt: NOW.toISOString(),
+      actor: 'system',
+    })
+    const neighborId = memoryNodeId(MEMORY_REMEMBER_LAYER, neighborText)
+
+    const newText = '本次精炼产生的新事实'
+    const newNodeId = memoryNodeId(MEMORY_REMEMBER_LAYER, newText)
+    const relationLlm = scriptedLlm(JSON.stringify([{ target_id: neighborId, edge_type: 'RELATED', reason: '同主题' }]))
+    const runner = createRelationRunner({
+      connection: () => store.connection,
+      llm: relationLlm as never,
+      embeddingEnabled: true,
+      logger: { warn: () => {} },
+    })
+
+    const item = await claimWithL0('rel')
+    const processor = makeProcessor(
+      scriptedLlm(factsJson([{ text: newText, kind: 'work_fact', priority: 0 }])),
+      runner,
+    )
+    await processor(item)
+
+    // 关系：新节点 → 既有邻居。
+    expect(await relatedEdges()).toEqual([{ from: newNodeId, to: neighborId, reason: '同主题' }])
+    const written = await audits('write_related')
+    expect(written.length).toBe(1)
+    expect(written[0]?.reason).toBe('edges=1')
+    // 结构边仍在（两条路径互不干扰）。
+    expect(await evidenceEdges()).toEqual([{ from: item.id, to: newNodeId, reason: 'refine' }])
+  })
+
+  it('指纹合并命中既有节点 ⇒ **不**为它跑关系识别（不产生 RELATED / 不写 write_related）', async () => {
+    const text = '重复出现的事实'
+    const existingId = memoryNodeId(MEMORY_REMEMBER_LAYER, text)
+    await upsertMemory(store.connection, {
+      layer: MEMORY_REMEMBER_LAYER,
+      text,
+      embedding: E1,
+      embeddingModelId: 'test-embed',
+      kind: 'work_fact',
+      priority: 0,
+      validAt: NOW.toISOString(),
+      recordedAt: NOW.toISOString(),
+      actor: 'system',
+    })
+    let llmCalls = 0
+    const relationLlm = {
+      stream() {
+        llmCalls += 1
+        return (async function* generate() {
+          yield delta('[]')
+          yield finish({ kind: 'stop' })
+        })()
+      },
+    }
+    const runner = createRelationRunner({
+      connection: () => store.connection,
+      llm: relationLlm as never,
+      embeddingEnabled: true,
+      logger: { warn: () => {} },
+    })
+
+    const item = await claimWithL0('merge')
+    await makeProcessor(scriptedLlm(factsJson([{ text, kind: 'work_fact', priority: 0 }])), runner)(item)
+
+    // 命中既有节点 ⇒ relationEntries 为空 ⇒ 关系跑者一次 LLM 都不发。
+    expect(llmCalls).toBe(0)
+    expect(await relatedEdges()).toEqual([])
+    expect(await audits('write_related')).toEqual([])
+    // 但结构边照样要物化（该节点新增了 source_refs）。
+    expect(await evidenceEdges()).toEqual([{ from: item.id, to: existingId, reason: 'refine' }])
   })
 })

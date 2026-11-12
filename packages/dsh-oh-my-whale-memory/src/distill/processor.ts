@@ -13,11 +13,12 @@ import {
   REFINE_INBOX_ACTION,
   REFINE_KIND,
   WRITE_EVIDENCE_ACTION,
+  WRITE_EVIDENCE_SKIPPED_ACTION,
   insertGenerationLog,
   type GenerationLogOutcome,
 } from '../db/audit.js'
 import { memoryNodeId } from '../db/id.js'
-import { writeDeduplicatedMemory } from '../db/dedup.js'
+import { SemanticScanError, writeDeduplicatedMemory } from '../db/dedup.js'
 import { L0_LAYER, writeEvidenceEdges } from '../db/edges.js'
 import { getMemoryById } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
@@ -52,6 +53,16 @@ export const EMBEDDING_FAILED_REASON = 'embedding-failed'
 
 /** LLM 给了非法/缺失 kind 或 priority、已收敛为缺省常量（N10）。 */
 export const COERCED_CLASSIFICATION_REASON = 'coerced-kind-or-priority'
+
+/**
+ * 语义去重扫描失败、本次改为「只走指纹路径」写入的降级理由（评审补钉 P20）。
+ *
+ * 背景：LadybugDB 0.22.3 里事务内任一语句报错即**中止整个事务**（后续语句被静默丢弃），
+ * 所以「在事务里吞掉 ANN 失败继续写」是假降级——写入全丢、COMMIT 还会抛
+ * 'No active transaction for COMMIT.'。正确做法是让首次尝试干净回滚（scanFailure: 'throw'），
+ * 再跳过语义去重把整段重写一遍；降级事实必须留痕（AD-21）。
+ */
+export const SEMANTIC_SCAN_DEGRADED_REASON = 'semantic-scan-degraded'
 
 export interface InboxProcessorDeps {
   /** 惰性取连接（与消费者同一 accessor）。 */
@@ -214,71 +225,121 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     // 与刚写的 L1 节点构成 l0_raw→memory 的 EVIDENCE 边（2.5 判据②的链头）。
     let marked = false
     // 事务外仍需这份清单（关系识别在事务提交后跑），故声明在闭包之外。
+    // writtenL1 = 本次**每个**产出节点（含指纹合并 / 语义合并 / 版本作废命中既有节点）：
+    //   它们都新增了 source_refs，需要物化成 EVIDENCE 边（X1 语义）。
+    // relationEntries = **只含新节点**（outcome === 'created' | 'version-invalidated'）：
+    //   评审 P2（T2）——关系是一次性决定（AC4）。合并命中既有节点时它早已跑过关系识别，
+    //   再跑一次会突破「每条新记忆 ≤5 条 RELATED」并产生噪声边。
     const writtenL1: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
-    await runInTransaction(connection, async () => {
-      marked = await markInboxItemDone(connection, item.id, { now: now() })
-      if (!marked) return
-      for (let i = 0; i < refined.facts.length; i += 1) {
-        const fact = refined.facts[i]!
-        const vector = embedded.vectors[i] ?? null
-        // 评审 T3：coerced 表示「模型没判定」，不是一次重新分类。
-        // UPSERT_ON_MATCH 无条件以最新写入为准（Story 1.11 AC4），若直接把缺省值写下去，
-        // 会把先前 memory_remember 写在同指纹节点上的 kind（如 'persona'）静默清空。
-        // 故 coerced 时沿用既有节点的分类；同事务内读，节点不存在才用缺省。
-        const existing = fact.coerced
-          ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
-          : null
-        const result = await writeDeduplicatedMemory(
+    const relationEntries: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
+    // 评审补钉 P20：若本轮因语义扫描失败而退化成「只走指纹」，在**成功那次事务内**留一条痕迹。
+    let scanDegraded: string | null = null
+
+    /**
+     * 一次完整的写入事务（可整体重跑）。
+     *
+     * `skipSemanticScan=true` 用于「上一轮扫描把事务搞中止」后的降级重试：
+     * LadybugDB 0.22.3 中事务内任一语句报错即中止整个事务（COMMIT 抛 'No active transaction
+     * for COMMIT.'），因此那一次尝试的写入全部作废、必须整体重来；只有换一条不碰 ANN 的路径
+     * 才能真正把数据写进去，同时靠这次成功提交让失效的向量索引自愈。
+     */
+    const writeL1 = async (skipSemanticScan: boolean): Promise<void> => {
+      // 重跑前把闭包状态复位（首轮失败时可能已推进到一半）。
+      marked = false
+      writtenL1.length = 0
+      relationEntries.length = 0
+      await runInTransaction(connection, async () => {
+        marked = await markInboxItemDone(connection, item.id, { now: now() })
+        if (!marked) return
+        for (let i = 0; i < refined.facts.length; i += 1) {
+          const fact = refined.facts[i]!
+          const vector = embedded.vectors[i] ?? null
+          // 评审 T3：coerced 表示「模型没判定」，不是一次重新分类。
+          // UPSERT_ON_MATCH 无条件以最新写入为准（Story 1.11 AC4），若直接把缺省值写下去，
+          // 会把先前 memory_remember 写在同指纹节点上的 kind（如 'persona'）静默清空。
+          // 故 coerced 时沿用既有节点的分类；同事务内读，节点不存在才用缺省。
+          const existing = fact.coerced
+            ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
+            : null
+          const result = await writeDeduplicatedMemory(
+            connection,
+            {
+              layer: MEMORY_REMEMBER_LAYER,
+              text: fact.text,
+              embedding: vector,
+              embeddingModelId: vector ? (deps.embeddingModelId ?? null) : null,
+              kind: existing ? existing.kind : fact.kind,
+              priority: existing ? existing.priority : fact.priority,
+              sourceRefs: [item.id],
+              actor: 'system',
+            },
+            { now, logger: deps.logger, scanFailure: 'throw', skipSemanticScan },
+          )
+          const entry = { id: result.id, text: fact.text, kind: existing ? existing.kind : fact.kind, vector }
+          writtenL1.push(entry)
+          if (result.outcome === 'created' || result.outcome === 'version-invalidated') {
+            relationEntries.push(entry)
+          }
+        }
+        // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
+        // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
+        const edgeResult = await writeEvidenceEdges(
           connection,
-          {
-            layer: MEMORY_REMEMBER_LAYER,
-            text: fact.text,
-            embedding: vector,
-            embeddingModelId: vector ? (deps.embeddingModelId ?? null) : null,
-            kind: existing ? existing.kind : fact.kind,
-            priority: existing ? existing.priority : fact.priority,
-            sourceRefs: [item.id],
-            actor: 'system',
-          },
-          { now, logger: deps.logger },
+          writtenL1.map((node: { readonly id: string }) => ({
+            fromId: item.id,
+            fromLayer: L0_LAYER,
+            toId: node.id,
+            toLayer: MEMORY_REMEMBER_LAYER,
+            reason: 'refine',
+          })),
         )
-        writtenL1.push({ id: result.id, text: fact.text, kind: existing ? existing.kind : fact.kind, vector })
-      }
-      // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
-      // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
-      const edgeResult = await writeEvidenceEdges(
-        connection,
-        writtenL1.map((node: { readonly id: string }) => ({
-          fromId: item.id,
-          fromLayer: L0_LAYER,
-          toId: node.id,
-          toLayer: MEMORY_REMEMBER_LAYER,
-          reason: 'refine',
-        })),
+        await insertRefineAudit(connection, item.id, 'success', null, now)
+        if (edgeResult.skipped.length > 0) {
+          // 评审 P16（T18）：用独立 action（而非 refine_inbox 的 reason 文本），
+          // 这样 countRelatedSkips（status 的降级计数）能统计到（AD-21 降级必须可见）。
+          await insertRefineAudit(
+            connection,
+            item.id,
+            'uncertain',
+            WRITE_EVIDENCE_SKIPPED_ACTION + '-skipped=' + String(edgeResult.skipped.length),
+            now,
+          )
+        }
+        if (embedded.failure) {
+          await insertRefineAudit(
+            connection,
+            item.id,
+            'uncertain',
+            EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
+            now,
+          )
+        }
+        if (refined.facts.some((fact) => fact.coerced)) {
+          await insertRefineAudit(connection, item.id, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
+        }
+        if (scanDegraded !== null) {
+          await insertRefineAudit(
+            connection,
+            item.id,
+            'uncertain',
+            SEMANTIC_SCAN_DEGRADED_REASON + ': ' + scanDegraded,
+            now,
+          )
+        }
+      })
+    }
+
+    try {
+      await writeL1(false)
+    } catch (error) {
+      if (!(error instanceof SemanticScanError)) throw error
+      // 语义去重不可用（索引失效/扩展未装载）：首轮已整体回滚，这里换一条不碰 ANN 的路重跑。
+      scanDegraded = error.message
+      deps.logger?.warn(
+        'INBOX 语义去重降级为指纹路径（id=' + item.id + '）：' + error.message,
       )
-      await insertRefineAudit(connection, item.id, 'success', null, now)
-      if (edgeResult.skipped.length > 0) {
-        await insertRefineAudit(
-          connection,
-          item.id,
-          'uncertain',
-          WRITE_EVIDENCE_ACTION + '-skipped=' + String(edgeResult.skipped.length),
-          now,
-        )
-      }
-      if (embedded.failure) {
-        await insertRefineAudit(
-          connection,
-          item.id,
-          'uncertain',
-          EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
-          now,
-        )
-      }
-      if (refined.facts.some((fact) => fact.coerced)) {
-        await insertRefineAudit(connection, item.id, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
-      }
-    })
+      await writeL1(true)
+    }
 
     // marked=false：条目已被处理过（R1 的 at-most-once 命中），本次不写任何产出。
     if (!marked) return { completed: true, kinds: [] }
@@ -291,7 +352,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         await deps.relations({
           itemId: item.id,
           route,
-          entries: writtenL1.map((node) => ({
+          entries: relationEntries.map((node) => ({
             id: node.id,
             layer: MEMORY_REMEMBER_LAYER,
             kind: node.kind,
