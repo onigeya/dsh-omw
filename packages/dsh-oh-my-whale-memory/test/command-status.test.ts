@@ -36,6 +36,7 @@ const STATUS_BASE: MemoryStatusSnapshot = {
   inboxes: { L1: 3, L2: 0 },
   failed: 0,
   embeddingMode: 'enabled',
+  unembedded: 0,
   readonly: false,
   auditGap: 0,
 }
@@ -112,10 +113,24 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
     expect(text).toContain('embedding: enabled')
   })
 
+  it('Story 2.4 / U5：enabled 且存在未嵌入节点时，embedding 行追加条数（0 时逐字不变）', () => {
+    const zero = renderMemoryStatus({ ...STATUS_BASE, unembedded: 0 })
+    expect(zero).toContain('embedding: enabled')
+    expect(zero).not.toContain('未嵌入')
+
+    const some = renderMemoryStatus({ ...STATUS_BASE, unembedded: 7 })
+    expect(some).toContain('embedding: enabled（未嵌入 7 条）')
+
+    // disabled 行逐字固定：即便有未嵌入节点也不渲染计数（回填不可用，数字无意义）。
+    const disabled = renderMemoryStatus({ ...STATUS_BASE, embeddingMode: 'disabled', unembedded: 7 })
+    expect(disabled).toContain('embedding: disabled（降级检索）')
+    expect(disabled).not.toContain('未嵌入')
+  })
   it('disabled × 只读：两种降级同时可见', () => {
     const text = renderMemoryStatus({
       ...STATUS_BASE,
       embeddingMode: 'disabled',
+      unembedded: 0,
       readonly: true,
       readonlyReason: 'another instance owns the writer lock',
     })

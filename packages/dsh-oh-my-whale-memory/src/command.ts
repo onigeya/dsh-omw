@@ -154,8 +154,13 @@ export interface MemoryStatusSnapshot {
    * 既有 status 逐行输出保持不变。
    */
   readonly failedEntries?: readonly MemoryFailedEntry[]
-  /** embedding 可用性：token 或 model 缺失即 'disabled'（降级检索）。 */
+  /** embedding 可用性：endpoint / token / model 任一缺失即 'disabled'（降级检索）。 */
   readonly embeddingMode: 'enabled' | 'disabled'
+  /**
+   * 仍有效但**没有向量**的节点数（Story 2.4 / U5）：这些节点进不了 HNSW，对语义去重与
+   * 语义检索隐形。仅在 embedding enabled 且该值 > 0 时追加渲染，0 时输出逐字不变。
+   */
+  readonly unembedded: number
   /** 本窗口是否降级只读（写者锁被另一实例持有）。 */
   readonly readonly: boolean
   /** 只读原因，逐字取 `READONLY_REASON`；非只读时缺省。 */
@@ -375,7 +380,11 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     `L2_INBOX: ${snapshot.inboxes.L2}`,
     `failed: ${snapshot.failed}`,
     `audit_gap: ${snapshot.auditGap ?? '未知（审计表缺失）'}`,
-    snapshot.embeddingMode === 'disabled' ? 'embedding: disabled（降级检索）' : 'embedding: enabled',
+    snapshot.embeddingMode === 'disabled'
+      ? 'embedding: disabled（降级检索）'
+      : snapshot.unembedded > 0
+        ? `embedding: enabled（未嵌入 ${snapshot.unembedded} 条）`
+        : 'embedding: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ]
   // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。

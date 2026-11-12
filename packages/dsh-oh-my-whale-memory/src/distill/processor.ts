@@ -11,7 +11,8 @@
 import type * as lbug from '@ladybugdb/core'
 import { REFINE_INBOX_ACTION, REFINE_KIND, insertGenerationLog, type GenerationLogOutcome } from '../db/audit.js'
 import { memoryNodeId } from '../db/id.js'
-import { getMemoryById, writeMemoryVersion } from '../db/memory.js'
+import { writeDeduplicatedMemory } from '../db/dedup.js'
+import { getMemoryById } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
 import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
@@ -193,7 +194,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       )
     }
 
-    // ④ 单事务：条件转 done → 写 L1 → 写 outcome 审计行（R1 / N9）。
+    // ④ 单事务：条件转 done → 经**去重原语**写 L1（Story 2.4：指纹/语义/版本三路）→ 写 outcome 审计行（R1 / N9）。
     let marked = false
     await runInTransaction(connection, async () => {
       marked = await markInboxItemDone(connection, item.id, { now: now() })
@@ -208,7 +209,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         const existing = fact.coerced
           ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
           : null
-        await writeMemoryVersion(
+        await writeDeduplicatedMemory(
           connection,
           {
             layer: MEMORY_REMEMBER_LAYER,
@@ -220,7 +221,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
             sourceRefs: [item.id],
             actor: 'system',
           },
-          { now },
+          { now, logger: deps.logger },
         )
       }
       await insertRefineAudit(connection, item.id, 'success', null, now)

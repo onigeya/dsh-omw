@@ -404,3 +404,80 @@ export async function countMemoriesByLayer(connection: MemoryConnection): Promis
   for (const row of rows) addLayerCount(counts, row.layer, Number(row.total))
   return counts
 }
+
+/**
+ * Story 2.4 / U5：`/memory status` 的「未嵌入节点数」——把路径②（向量去重）看不见的节点
+ * 变成可见数字。只数**仍有效**的行（与回填目标集同一口径：embedding 为 NULL 且未失效/未过期），
+ * 这样数字会随回填收敛到 0。只读。
+ */
+const COUNT_UNEMBEDDED_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  'RETURN count(m) AS total',
+].join(' ')
+
+export async function countUnembeddedMemories(connection: MemoryConnection): Promise<number> {
+  const rows = await queryAll(connection, COUNT_UNEMBEDDED_STATEMENT)
+  const total = Number(rows[0]?.total ?? 0)
+  return Number.isFinite(total) && total > 0 ? Math.trunc(total) : 0
+}
+
+/** 回填候选行（最小投影：回填只需要 id 与原文）。 */
+export interface UnembeddedMemoryEntry {
+  id: string
+  layer: string
+  text: string
+}
+
+/**
+ * 取前 `limit` 条**仍有效**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
+ * 只读。回填侧对每轮的条数另有上界（U5：≤50）。
+ */
+const LIST_UNEMBEDDED_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  'RETURN m.id AS id, m.layer AS layer, m.text AS text',
+  'ORDER BY m.recorded_at ASC, m.id ASC',
+  'LIMIT $limit',
+].join(' ')
+
+export async function listUnembeddedMemories(
+  connection: MemoryConnection,
+  limit: number,
+): Promise<UnembeddedMemoryEntry[]> {
+  const rows = await queryRows(connection, LIST_UNEMBEDDED_STATEMENT, {
+    limit: Math.max(0, Math.trunc(limit)),
+  })
+  return rows.map((row) => ({
+    id: String(row.id),
+    layer: String(row.layer ?? ''),
+    text: String(row.text ?? ''),
+  }))
+}
+
+/**
+ * 幂等回填一条节点的向量三列（Story 2.4 / U5）。
+ * `WHERE m.embedding IS NULL` 让并发/重放安全：第二次调用不再命中，返回 false ——
+ * 因此**绝不覆盖**已有向量（Epic 1 遗留 NULL 是唯一目标，不会污染既有 HNSW 条目）。
+ */
+const SET_MEMORY_EMBEDDING_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.id = $id AND m.embedding IS NULL',
+  'SET m.embedding = $embedding, m.embedding_model_id = $embedding_model_id, m.embedding_dim = $embedding_dim',
+  'RETURN m.id AS id',
+].join(' ')
+
+export async function setMemoryEmbedding(
+  connection: MemoryConnection,
+  id: string,
+  embedding: readonly number[],
+  embeddingModelId: string,
+): Promise<boolean> {
+  const rows = await queryRows(connection, SET_MEMORY_EMBEDDING_STATEMENT, {
+    id,
+    embedding: embedding.map((value) => Number(value)),
+    embedding_model_id: embeddingModelId,
+    embedding_dim: embedding.length,
+  })
+  return rows.length > 0
+}
