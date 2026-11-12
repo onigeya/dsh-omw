@@ -5,7 +5,9 @@
  * ① 第二条消费链真的绑在 l2_inbox 上、intervalMs 是 30s 慢节律（AC:721 不与 L1 争资源）；
  * ② 让路闸门真的按「L1 有待处理条目」为假（brief §5.4）——闸门接反了宿主级测试看不出来；
  * ③ L2 队列的启动回收真的在 apply 里跑了（U7 口径）；
- * ④ /memory status 的 systemOne 行取自配置态与运行态两个来源（U6/U12）。
+ * ④ /memory status 的 systemOne 行取自配置态与运行态两个来源（U6/U12）；
+ * ⑤ 评审 P15（T14）：dispose 时**两条**消费链都被停掉（此前只断言到 L1 那条）；
+ * ⑥ 评审 P14⑥（T26）：注入 L2 处理器的 systemOne 客户端真的跟着配置开关为 null / 非 null。
  */
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
@@ -24,7 +26,16 @@ const EMBEDDING_CONFIG = { embedding: { token: 'sk-test', model: MODEL_ID, dim: 
 const at = (seconds: number): Date => new Date(Date.UTC(2026, 10, 11, 0, 0, seconds))
 
 /** createInboxConsumer 的捕获点：按创建顺序留下每次 options（L1 先、L2 后）。 */
-const captured = vi.hoisted(() => ({ all: [] as unknown[] }))
+/** createInboxConsumer / createL2PromotionProcessor 的捕获点（评审 P15、P14⑥）。 */
+const captured = vi.hoisted(() => ({
+  all: [] as unknown[],
+  /** dispose 断言用：每次 createInboxConsumer 的 stop 都被包一层。 */
+  stops: [] as ReturnType<typeof vi.fn>[],
+  /** P14⑥：createL2PromotionProcessor 收到的 deps（取最后一次）。 */
+  processorDeps: [] as unknown[],
+  /** apply 注册的 effect closers（宿主负责 await 它们）。 */
+  closers: [] as (() => unknown)[],
+}))
 
 vi.mock('../src/inbox/consumer.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/inbox/consumer')>()
@@ -32,7 +43,21 @@ vi.mock('../src/inbox/consumer.js', async (importOriginal) => {
     ...actual,
     createInboxConsumer: (options: Parameters<typeof actual.createInboxConsumer>[0]) => {
       captured.all.push(options)
-      return actual.createInboxConsumer(options)
+      const consumer = actual.createInboxConsumer(options)
+      const stop = vi.fn(() => consumer.stop())
+      captured.stops.push(stop)
+      return { ...consumer, stop }
+    },
+  }
+})
+
+vi.mock('../src/distill/promotion.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/distill/promotion')>()
+  return {
+    ...actual,
+    createL2PromotionProcessor: (deps: Parameters<typeof actual.createL2PromotionProcessor>[0]) => {
+      captured.processorDeps.push(deps)
+      return actual.createL2PromotionProcessor(deps)
     },
   }
 })
@@ -64,11 +89,20 @@ function makeCtx(profileDir: string): Harness {
       }
       return undefined
     },
-    effect: (factory: () => () => unknown) => factory(),
+    // 评审 P15：closer 必须被收下来才能在用例里验证 dispose 顺序（此前直接丢弃）。
+    effect: (factory: () => () => unknown) => { captured.closers.push(factory()); return () => {} },
     tools: { register: () => () => {} },
     on: () => () => {},
   } as unknown as Parameters<typeof plugin.apply>[0]
   return { ctx, registeredDefs, info }
+}
+
+/** 每个用例独立库 + 独立 apply ⇒ 捕获点也要清干净（否则跨用例累积）。 */
+function resetCaptured(): void {
+  captured.all.length = 0
+  captured.stops.length = 0
+  captured.processorDeps.length = 0
+  captured.closers.length = 0
 }
 
 async function openStore(prefix: string): Promise<{ store: MemoryDatabase, dbPath: string, dir: string }> {
@@ -81,7 +115,7 @@ async function openStore(prefix: string): Promise<{ store: MemoryDatabase, dbPat
 
 describe('Story 2.5：apply 装配第二条消费链', () => {
   it('L2 消费者绑 l2_inbox、30s 慢节律、带让路闸门；闸门按 L1 队列是否为空作答', async () => {
-    captured.all.length = 0
+    resetCaptured()
     const { store, dir } = await openStore('omw-l2-wire-')
     const harness = makeCtx(dir)
 
@@ -109,7 +143,7 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
   })
 
   it('apply 启动回收 L2 队列的 processing（U7：单写者下必属已死进程）并打日志', async () => {
-    captured.all.length = 0
+    resetCaptured()
     const { store, dir } = await openStore('omw-l2-reclaim-')
     // 预置一条 L2 processing 行：模拟上个进程崩在提升中途。
     await l2InboxQueue.enqueue(store.connection, { id: 'l2-stuck', payload: '{"l1Ids":["x"]}', now: at(1) })
@@ -126,14 +160,41 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
     await drainInboxBackgroundTasks()
     await store.close()
   })
+
+  // 评审 P15（T14）：dispose 顺序的**两条链**都必须被停。此前 makeCtx 丢弃了 closer，
+  // 且捕获点只在 options.queue === undefined 时记录 consumer ⇒ L2 的 dispose 无断言。
+  it('dispose 时 L1 与 L2 两条消费链都被 stop（且先于关库）', async () => {
+    resetCaptured()
+    const { store, dir } = await openStore('omw-l2-dispose-')
+    const harness = makeCtx(dir)
+    await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
+
+    expect(captured.stops).toHaveLength(2)
+    expect(captured.closers.length).toBeGreaterThan(0)
+    expect(captured.stops[1]!.mock.calls).toHaveLength(0)
+
+    // 宿主 await 每一个 closer（entry-exports 同款用法）⇒ 第二条（db）closer 内停两条消费者。
+    for (const closer of captured.closers) {
+      try { await closer() } catch { /* 锁释放等其它 closer 的失败与本用例无关 */ }
+    }
+    expect(captured.stops[0]!.mock.calls).toHaveLength(1)
+    expect(captured.stops[1]!.mock.calls).toHaveLength(1)
+
+    await drainInboxBackgroundTasks()
+    await store.close()
+  })
 })
 
 describe('Story 2.5 / U6：status 的 systemOne 行', () => {
   it('配置开启且未降级 ⇒ systemOne: enabled', async () => {
-    captured.all.length = 0
+    resetCaptured()
     const { store, dir } = await openStore('omw-l2-status-')
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
+
+    // 评审 P14⑥（T26）：配置开启 ⇒ 真客户端被注入提升处理器（此前无任何断言）。
+    expect(captured.processorDeps.at(-1)).toMatchObject({ systemOne: expect.anything() })
+    expect((captured.processorDeps.at(-1) as { systemOne?: unknown } | undefined)?.systemOne).not.toBeNull()
 
     const result = await harness.registeredDefs[0]!.handler({ rawInput: ' status' })
     expect(result.kind).toBe('success')
@@ -144,10 +205,13 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
   })
 
   it('配置关闭（systemOne.enabled=false）⇒ systemOne: disabled-by-config（降级回 ctx.llm）', async () => {
-    captured.all.length = 0
+    resetCaptured()
     const { store, dir } = await openStore('omw-l2-status-off-')
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, { ...EMBEDDING_CONFIG, systemOne: { enabled: false } })
+
+    // 评审 P14⑥（T26）：配置关闭 ⇒ 处理器拿到的是 null（整体回落 ctx.llm）。
+    expect((captured.processorDeps.at(-1) as { systemOne?: unknown } | undefined)?.systemOne).toBeNull()
 
     const result = await harness.registeredDefs[0]!.handler({ rawInput: ' status' })
     expect(result.kind).toBe('success')

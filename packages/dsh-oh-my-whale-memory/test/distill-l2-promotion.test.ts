@@ -20,6 +20,8 @@ import { memoryNodeId } from '../src/db/id'
 import { queryAll } from '../src/db/memory'
 import { l2InboxQueue, type InboxItem } from '../src/inbox/queue'
 import { InboxRefineError } from '../src/inbox/consumer'
+import { WRITE_EVIDENCE_SKIPPED_ACTION } from '../src/db/audit'
+import { EMBEDDING_FAILED_REASON, SEMANTIC_SCAN_DEGRADED_REASON } from '../src/distill/processor'
 import {
   L2_INBOX_KIND,
   L2_LAYER,
@@ -38,15 +40,42 @@ const NOW = new Date('2026-11-11T00:00:00.000Z')
 const ROUTE = { provider: 'test-provider', model: 'test-model' }
 const NOW_ISO = NOW.toISOString()
 
-/** 注入点：'drop-l2' 时丢掉终点为 L2 的边（模拟判据② 无法成立）。 */
-const edgeState = vi.hoisted(() => ({ mode: 'real' as 'real' | 'drop-l2' }))
+/**
+ * 注入点：
+ * - 'drop-l2' ⇒ 丢掉终点为 L2 的边（模拟判据② 无法成立）；
+ * - 'skip-l2' ⇒ 边照写，但**回报一条 skipped**（评审 P14① T19：edges.skipped>0 的降级审计分支
+ *   在真库里需要端点缺失/层序错误才可达，端到端造不稳定，故在返回值上补一条）。
+ */
+const edgeState = vi.hoisted(() => ({ mode: 'real' as 'real' | 'drop-l2' | 'skip-l2' }))
 vi.mock('../src/db/edges.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/db/edges')>()
   return {
     ...actual,
-    writeEvidenceEdges: async (connection: never, entries: readonly { toLayer?: string }[]) => {
+    writeEvidenceEdges: async (connection: never, entries: readonly { toLayer?: string; fromId?: string; toId?: string }[]) => {
       const kept = edgeState.mode === 'drop-l2' ? entries.filter((e) => e.toLayer !== 'L2') : entries
-      return actual.writeEvidenceEdges(connection, kept as never)
+      const result = await actual.writeEvidenceEdges(connection, kept as never)
+      if (edgeState.mode !== 'skip-l2') return result
+      const first = entries[0]
+      return {
+        ...result,
+        skipped: [...result.skipped, { reason: 'layer-order', fromId: String(first?.fromId ?? ''), toId: String(first?.toId ?? '') }],
+      }
+    },
+  }
+})
+
+/** 评审 P14①（T13）：语义去重扫描失败的降级重试（真实 ANN 索引损坏难造 ⇒ 在首调注入）。 */
+const dedupState = vi.hoisted(() => ({ scanErrors: 0 }))
+vi.mock('../src/db/dedup.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/db/dedup')>()
+  return {
+    ...actual,
+    writeDeduplicatedMemory: async (connection: never, input: never, options: never) => {
+      if (dedupState.scanErrors > 0) {
+        dedupState.scanErrors -= 1
+        throw new actual.SemanticScanError(new Error('Index contains an invalid node offset'))
+      }
+      return actual.writeDeduplicatedMemory(connection, input, options)
     },
   }
 })
@@ -64,9 +93,21 @@ afterAll(async () => {
   await cleanupTempDirs()
 })
 
-beforeEach(() => {
+beforeEach(async () => {
   edgeState.mode = 'real'
+  dedupState.scanErrors = 0
+  // 评审 P18（T44）：判据① 的分级取决于证据回填游标。默认清成「未回填」；
+  // 需要终局丢弃的用例自行置 'done'（共享单库 ⇒ 每次必须显式复位）。
+  await setEvidenceCursor('')
 })
+
+/** 直接改 omw_meta 的证据回填游标（P18 分级用）。 */
+async function setEvidenceCursor(value: string): Promise<void> {
+  await store.connection.query(
+    "MERGE (m:omw_meta {key: 'evidence_backfill_cursor'}) ON CREATE SET m.value = '" + value +
+    "' ON MATCH SET m.value = '" + value + "'",
+  )
+}
 
 /** 假客户端的运行态：评审 P19 后 `runtimeState()` 是接口的一部分（judgeStatement 会先读它）。 */
 const IDLE_RUNTIME: SystemOneRuntimeState = {
@@ -103,16 +144,31 @@ function makeLlm(options: { readonly refine?: string; readonly verify?: string }
 }
 
 /** 造一组 L1：一条 l0_raw + 一条 L1 节点 + L0→L1 的 EVIDENCE 边（判据① 可达）。 */
-async function seedL1(tag: string, options: { readonly withEdge?: boolean; readonly sourceRefs?: string[] } = {}) {
+async function seedL1(
+  tag: string,
+  options: {
+    readonly withEdge?: boolean
+    readonly sourceRefs?: string[]
+    /** 评审 P14③（T21）：把来源 L0 写成 redact 墓碑（raw_text IS NULL）⇒ 判据① 失败。 */
+    readonly tombstoneL0?: boolean
+    /** 评审 P14③（T25）：valid_at 走在 NOW 之后 ⇒ checkReachableToL0 判 'not-effective'。 */
+    readonly futureValidAt?: boolean
+    readonly kind?: string
+    readonly priority?: number
+  } = {},
+) {
   const l0 = 'l0-' + tag + '-' + String(seq++)
   const l1 = 'l1-' + tag + '-' + String(seq++)
   const refs = options.sourceRefs ?? [l0]
+  const rawText = options.tombstoneL0 === true ? 'NULL' : "'原文 " + tag + "'"
+  const validAt = options.futureValidAt === true ? '2027-01-01T00:00:00.000Z' : NOW_ISO
   await store.connection.query(
-    "CREATE (l:l0_raw {id: '" + l0 + "', raw_text: '原文 " + tag + "', recorded_at: '" + NOW_ISO + "', actor: 'system'})",
+    "CREATE (l:l0_raw {id: '" + l0 + "', raw_text: " + rawText + ", recorded_at: '" + NOW_ISO + "', actor: 'system'})",
   )
   await store.connection.query(
-    "CREATE (m:memory {id: '" + l1 + "', layer: 'L1', kind: 'work_fact', priority: 3, text: 'L1 事实 " + tag +
-    "', valid_at: '" + NOW_ISO + "', recorded_at: '" + NOW_ISO + "', source_refs: [" +
+    "CREATE (m:memory {id: '" + l1 + "', layer: 'L1', kind: '" + (options.kind ?? 'work_fact') + "', priority: " +
+    String(options.priority ?? 3) + ", text: 'L1 事实 " + tag +
+    "', valid_at: '" + validAt + "', recorded_at: '" + NOW_ISO + "', source_refs: [" +
     refs.map((ref) => "'" + ref + "'").join(', ') + ']})',
   )
   if (options.withEdge !== false) {
@@ -135,6 +191,20 @@ async function claimL2(l1Id: string, payload?: string): Promise<InboxItem> {
   })
   const item = await l2InboxQueue.claimNext(store.connection, { owner: 'test-owner', now: NOW })
   if (!item || item.id !== id) throw new Error('夹具取不到自己的队头：' + id)
+  return item
+}
+
+/** 评审 P14④（T26）：同一来源 L1 需要第二个条目时，id 由调用方给（默认 id 是内容确定的）。 */
+async function claimL2As(l1Id: string, itemId: string): Promise<InboxItem> {
+  await l2InboxQueue.enqueue(store.connection, {
+    id: itemId,
+    payload: JSON.stringify({ l1Ids: [l1Id] }),
+    kind: L2_INBOX_KIND,
+    sessionId: 'sess-l2',
+    now: NOW,
+  })
+  const item = await l2InboxQueue.claimNext(store.connection, { owner: 'test-owner', now: NOW })
+  if (!item || item.id !== itemId) throw new Error('夹具取不到自己的队头：' + itemId)
   return item
 }
 
@@ -264,6 +334,9 @@ describe('LLM 判定只标注、不丢弃（AC:662）', () => {
 describe('判据①③ 写前失败 ⇒ 丢弃候选（AC:742-745）', () => {
   it('判据①（L0 引用不可达）⇒ 不写 L2、条目标 done、来源 L1 标 gate-fail、不调 LLM', async () => {
     // 有 L1 节点但**没有** L0→L1 的 EVIDENCE 边 ⇒ checkReachableToL0 失败。
+    // 评审 P18（T44）：no-evidence-edge 在「证据回填已跑完」之前是**暂时**的 ⇒ 这里把游标
+    // 钉成 'done'，才轮到终局丢弃（暂时那一支另有一条用例）。
+    await setEvidenceCursor('done')
     const { l1 } = await seedL1('unreach', { withEdge: false })
     const item = await claimL2(l1)
     const { llm, calls } = makeLlm({ refine: JSON.stringify({ text: '不该被写 ' + String(seq++) }) })
@@ -277,6 +350,41 @@ describe('判据①③ 写前失败 ⇒ 丢弃候选（AC:742-745）', () => {
     expect(rows[0]!.outcome).toBe('failure')
     expect(String(rows[0]!.reason)).toMatch(/no-valid-path-to-l0|no-evidence-edge/)
     expect(await audits('gate_fail', l1)).toHaveLength(1)
+  })
+
+  // 评审 P18（T44）主路径：2.6 边表之前的 L1 没有边，而回填按 recorded_at ASC 每轮 ≤50，
+  // 可能还没跑到它。此时候选**改期重试**（不标 gate-fail、不丢），等回填补上边再提升。
+  it('判据① 遇 no-evidence-edge 且回填未跑完 ⇒ 抛 InboxRefineError(fatal:false)、不标 gate-fail', async () => {
+    await setEvidenceCursor('2026-11-10T00:00:00.000Z|l1-x')
+    const { l1 } = await seedL1('pending-edge', { withEdge: false })
+    const item = await claimL2(l1)
+    const { llm, calls } = makeLlm({ refine: JSON.stringify({ text: '不该被写 ' + String(seq++) }) })
+    const run = processor({ llm })
+
+    await expect(run(item)).rejects.toBeInstanceOf(InboxRefineError)
+    expect(calls).toHaveLength(0)
+    // 条目留在 processing，交给消费者 failInboxItem 退避重试。
+    expect(await statusOf(item.id)).toBe('processing')
+    const rows = await audits('l2_promotion', l1)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.outcome).toBe('uncertain')
+    expect(String(rows[0]!.reason)).toContain('no-evidence-edge')
+    expect(await audits('gate_fail', l1)).toHaveLength(0)
+  })
+
+  // 评审 P18③：source_refs 为空的来源没有「等回填」的余地（它永远不会有边）⇒ 仍然终局丢弃。
+  it('判据① 遇 no-evidence-edge 但来源 source_refs 为空 ⇒ 不等待回填、直接丢弃', async () => {
+    const { l0, l1 } = await seedL1('no-refs', { withEdge: false })
+    await store.connection.query("MATCH (m:memory {id: '" + l1 + "'}) SET m.source_refs = []")
+    const item = await claimL2(l1)
+    const run = processor({})
+
+    await run(item)
+    expect(await statusOf(item.id)).toBe('done')
+    const rows = await audits('l2_promotion', l1)
+    expect(rows[0]!.outcome).toBe('failure')
+    expect(await audits('gate_fail', l1)).toHaveLength(1)
+    void l0
   })
 
   it('判据③（存活 L0 计数为 0）⇒ 丢弃且 reason=support-below-1', async () => {
@@ -376,6 +484,145 @@ describe('payload 与来源校验（丢弃而非重试）', () => {
     const rows = await audits('l2_promotion', missing)
     expect(String(rows[0]!.reason)).toBe('source-not-found')
     expect(await audits('gate_fail', missing)).toHaveLength(1)
+  })
+})
+
+describe('评审 P14：降级审计与重试分支（T13/T19/T21/T24/T25/T26）', () => {
+  /** 假 embedding 客户端：按脚本回答。 */
+  const embedFailing = {
+    async embed() { return { ok: false as const, reason: 'http-500', message: 'embed boom' } },
+  }
+
+  it('① 语义去重扫描失败 ⇒ 换指纹路径重跑 writeL2，并补一条 scan-degraded 审计', async () => {
+    const { l1 } = await seedL1('scanfail')
+    const item = await claimL2(l1)
+    const statement = 'L2 综合陈述 scanfail-' + String(seq++)
+    dedupState.scanErrors = 1
+    const run = processor({ llm: makeLlm({ refine: JSON.stringify({ text: statement }) }).llm })
+
+    await run(item)
+    const l2 = await l2ByText(statement)
+    expect(l2).not.toBeNull()
+    expect(await statusOf(item.id)).toBe('done')
+    const rows = await audits('l2_promotion', l1)
+    expect(rows).toHaveLength(2)
+    expect(rows.map((row) => row.outcome).sort()).toEqual(['success', 'uncertain'])
+    const degraded = rows.find((row) => String(row.reason).startsWith('semantic-scan-degraded'))
+    expect(degraded).toBeDefined()
+  })
+
+  it('② 来源 L0 是 redact 墓碑 ⇒ not-effective/no-valid-path 一类判据① 失败、终局丢弃', async () => {
+    const { l1 } = await seedL1('tombstone', { tombstoneL0: true })
+    const item = await claimL2(l1)
+    const run = processor({})
+
+    await run(item)
+    expect(await statusOf(item.id)).toBe('done')
+    const rows = await audits('l2_promotion', l1)
+    expect(rows[0]!.outcome).toBe('failure')
+    expect(String(rows[0]!.reason)).toMatch(/no-valid-path-to-l0|l0-tombstone|no-evidence-edge/)
+    expect(await audits('gate_fail', l1)).toHaveLength(1)
+  })
+
+  it('③ 来源 L1 的 valid_at 走在 now 之后 ⇒ 判据① 判 not-effective、终局丢弃', async () => {
+    const { l1 } = await seedL1('future', { futureValidAt: true })
+    const item = await claimL2(l1)
+    const run = processor({})
+
+    await run(item)
+    expect(await statusOf(item.id)).toBe('done')
+    const rows = await audits('l2_promotion', l1)
+    expect(String(rows[0]!.reason)).toContain('not-effective')
+    expect(await audits('gate_fail', l1)).toHaveLength(1)
+  })
+
+  it('④ 模型输出不是 JSON ⇒ refineToL2 ok:false、抛 InboxRefineError、条目不标 done', async () => {
+    const { l1 } = await seedL1('badjson')
+    const item = await claimL2(l1)
+    const run = processor({ llm: makeLlm({ refine: '这不是 JSON' }).llm })
+
+    await expect(run(item)).rejects.toBeInstanceOf(InboxRefineError)
+    expect(await statusOf(item.id)).toBe('processing')
+    const rows = await audits('l2_promotion', l1)
+    expect(rows[0]!.outcome).toBe('uncertain')
+    expect(String(rows[0]!.reason)).toContain('json-parse-failed')
+    expect(await audits('gate_fail', l1)).toHaveLength(0)
+  })
+
+  it('⑤ 写时嵌入失败 ⇒ L2 照常落库 + embedding-failed 审计（三列留空）', async () => {
+    const { l1 } = await seedL1('embedfail')
+    const item = await claimL2(l1)
+    const statement = 'L2 综合陈述 embedfail-' + String(seq++)
+    const run = processor({
+      llm: makeLlm({ refine: JSON.stringify({ text: statement }) }).llm,
+      embedding: embedFailing as never,
+      embeddingModel: 'test-embed',
+    })
+
+    await run(item)
+    const l2 = await l2ByText(statement)
+    expect(l2).not.toBeNull()
+    const details = await queryAll(
+      store.connection,
+      "MATCH (m:memory) WHERE m.id = '" + String(l2!.id) + "' RETURN m.embedding AS embedding, m.embedding_model_id AS model_id, m.embedding_dim AS dim",
+    )
+    expect(details[0]!.embedding).toBeNull()
+    expect(details[0]!.model_id).toBeNull()
+    expect(details[0]!.dim).toBeNull()
+    const rows = await audits('l2_promotion', l1)
+    expect(rows.some((row) => String(row.reason).startsWith('embedding-failed'))).toBe(true)
+  })
+
+  it('⑦ EVIDENCE 边被跳过 ⇒ 补一条 write_evidence_skipped 审计（但仍成功落库）', async () => {
+    const { l1 } = await seedL1('skipedge')
+    const item = await claimL2(l1)
+    const statement = 'L2 综合陈述 skipedge-' + String(seq++)
+    edgeState.mode = 'skip-l2'
+    const run = processor({ llm: makeLlm({ refine: JSON.stringify({ text: statement }) }).llm })
+
+    await run(item)
+    expect(await l2ByText(statement)).not.toBeNull()
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (g:generation_log) WHERE g.action = '" + WRITE_EVIDENCE_SKIPPED_ACTION + "' AND '" + l1 +
+      "' IN g.l0_refs RETURN g.outcome AS outcome, g.reason AS reason",
+    )
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toMatchObject({ outcome: 'uncertain' })
+    expect(String(rows[0]!.reason)).toContain('skipped=1')
+  })
+
+  it('⑧ gate-fail 幂等：同一来源 L1 被两个条目判失败，只留一条 gate_fail 账', async () => {
+    await setEvidenceCursor('done')
+    const { l1 } = await seedL1('idem', { withEdge: false })
+    const run = processor({})
+
+    await run(await claimL2As(l1, 'l2-idem-1'))
+    await run(await claimL2As(l1, 'l2-idem-2'))
+    expect(await audits('gate_fail', l1)).toHaveLength(1)
+  })
+
+  it('⑥ 多来源：support 取并集、kind 取主流、priority 取最大、边逐来源写', async () => {
+    const a = await seedL1('multi-a', { kind: 'persona', priority: 9 })
+    const b = await seedL1('multi-b', { kind: 'persona', priority: 2 })
+    const l1Ids = [a.l1, b.l1]
+    const item = await claimL2(a.l1, JSON.stringify({ l1Ids }))
+    const statement = 'L2 综合陈述 multi-' + String(seq++)
+    const run = processor({ llm: makeLlm({ refine: JSON.stringify({ text: statement }) }).llm })
+
+    await run(item)
+    const l2 = await l2ByText(statement)
+    expect(l2).not.toBeNull()
+    expect(l2).toMatchObject({ kind: 'persona', priority: 9, support: 2 })
+    const refs = String((await memoryRows(String(l2!.id)))[0]!.refs)
+    expect(refs).toContain(a.l1)
+    expect(refs).toContain(b.l1)
+    const edges = await queryAll(
+      store.connection,
+      "MATCH (x:memory)-[e:EVIDENCE]->(y:memory {id: '" + String(l2!.id) + "'}) RETURN count(e) AS total",
+    )
+    expect(Number(edges[0]!.total)).toBe(2)
+    await l2InboxQueue.complete(store.connection, item.id, { now: NOW })
   })
 })
 

@@ -57,7 +57,8 @@ async function readL2(id: string): Promise<Record<string, unknown>> {
   const rows = await queryAll(
     store.connection,
     `MATCH (q:l2_inbox) WHERE q.id = '${id}' RETURN q.id AS id, q.status AS status, ` +
-    'q.attempts AS attempts, q.lease_owner AS lease_owner, q.payload AS payload, q.kind AS kind',
+    'q.attempts AS attempts, q.lease_owner AS lease_owner, q.payload AS payload, q.kind AS kind, ' +
+    'q.last_error AS last_error',
   )
   return rows[0] as Record<string, unknown>
 }
@@ -110,7 +111,9 @@ describe('队列泛化与 l2_inbox（U1）', () => {
     }
     expect(last.status).toBe(INBOX_STATUS_FAILED)
     expect(last.attempts).toBe(INBOX_MAX_RETRIES + 1)
-    expect(String((await readL2(id)).last_error ?? '')).toBeUndefined // 投影未取该列，仅确认读回不抛
+    // 评审 P14⑤（T24）：此处原是空断言（投影不含该列 ⇒ String(undefined ?? '') 恒为 ''，
+    // 与 ``toBeUndefined()`` 永不相交，永远不可能变红）。改为真的钉住末次失败原因。
+    expect(String((await readL2(id)).last_error)).toContain('boom-' + String(INBOX_MAX_RETRIES + 1))
   })
 
   it('l2 的启动回收与按状态计数照常工作', async () => {
