@@ -34,6 +34,8 @@ export const META_KEYS = {
   embeddingDim: 'embedding_dim',
   embeddingModelId: 'embedding_model_id',
   createdAt: 'created_at',
+  /** Story 2.6 / X1：EVIDENCE 历史回填的断点游标（纯逻辑水位，不新增存储）。 */
+  evidenceBackfillCursor: 'evidence_backfill_cursor',
 } as const
 
 /** 维度必须是 ≥1 的整数——直接拼进 DDL，越界即拒绝（不信任外部配置）。 */

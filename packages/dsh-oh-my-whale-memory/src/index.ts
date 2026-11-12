@@ -74,6 +74,7 @@ import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingBackfill } from './embedding/backfill.js'
+import { createEvidenceBackfill } from './wiki/evidence-backfill.js'
 import { createEmbeddingClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
 import { routeFromSession } from './distill/session-route.js'
@@ -447,12 +448,22 @@ export async function apply(
       logger: ctx.logger,
     })
     : null
+  // Story 2.6 / X1：EVIDENCE 边历史回填（建表前的 L1/L2 没有边）——与向量回填共用同一个
+  // maintenance 钩子与空闲闸门，不新增 ctx.effect/定时器。
+  const evidenceBackfill = createEvidenceBackfill({
+    connection: () => db?.connection ?? null,
+    gate: idleGate,
+    logger: ctx.logger,
+  })
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,
     promotion: promotionTracker,
     process: inboxProcessor,
-    maintenance: embeddingBackfill ? () => embeddingBackfill.runOnce() : undefined,
+    maintenance: () => Promise.all([
+      embeddingBackfill ? embeddingBackfill.runOnce() : Promise.resolve(0),
+      evidenceBackfill.runOnce(),
+    ]),
     logger: ctx.logger,
   })
   inboxConsumer.start()
