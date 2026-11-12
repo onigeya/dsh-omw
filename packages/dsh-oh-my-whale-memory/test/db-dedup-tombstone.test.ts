@@ -13,11 +13,14 @@
  * - P5 向量长度不可用时**剥离向量再写**（含指纹命中路径），绝不绑未校验长度的向量
  * - P10 ANN 扫描失败只告警、按无候选写入（不阻塞写入）
  * - P14 精确余弦差一点（≈0.9695）不算语义重复
+ * - P20（Story 2.6 评审补钉）`scanFailure: 'throw'` / `skipSemanticScan`：事务内 ANN 失败必须让
+ *   调用方事务**干净回滚**，而不是吞掉后继续写——LadybugDB 0.22.3 里事务内任一语句报错即中止
+ *   整个事务，吞掉再写等于把数据写进一个已死的事务。
  */
 import { afterAll, describe, expect, it } from 'vitest'
 import { computeAuditGap } from '../src/db/audit'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { writeDeduplicatedMemory } from '../src/db/dedup'
+import { SemanticScanError, writeDeduplicatedMemory } from '../src/db/dedup'
 import { memoryNodeId } from '../src/db/id'
 import { upsertMemory, type MemoryConnection } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
@@ -182,7 +185,7 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
     }
   })
 
-  it('P1 用户 forget 优先：expired_at 置位后重写 ⇒ 不复活、保留失效态、只记 uncertain', async () => {
+  it('P1 用户 forget 优先：expired_at 置位后重写 ⇒ 不复活、保留失效态、只记 uncertain（P19a：仍合并 source_refs）', async () => {
     const store = await openDb('omw-tb-forget-')
     try {
       const id = memoryNodeId(LAYER, '用户点名遗忘的事实')
@@ -208,7 +211,11 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
       const node = await readNode(store, id)
       expect(node.expiredAt).toBe('2026-02-01T00:00:00.000Z')
       expect(node.validAt).toBe('2026-01-01T00:00:00.000Z')
-      expect(node.refs).toEqual(['s1'])
+      // 评审 P19a（T23）：不复活（expired_at / invalid_at 都不动），但 **source_refs 必须合并**。
+      // processor 仍会为本次观测建 l0_raw→该节点 的 EVIDENCE 边（事实层面为真），而
+      // EFFECTIVE_MEMORY_REFS / computeEvidenceDrift 都按 expired_at IS NULL 过滤 ⇒ 不合并的话
+      // 两个载体（边 / source_refs）永久不一致且都不可见。
+      expect(node.refs.slice().sort()).toEqual(['s1', 's2'])
       const audits = await readAudit(store, 'resurrect_memory')
       expect(audits).toHaveLength(1)
       expect(audits[0]!.outcome).toBe('uncertain')
@@ -411,4 +418,57 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
       await store.close()
     }
   })
+  it('P20 scanFailure=throw：ANN 失败抛 SemanticScanError，调用方事务干净回滚', async () => {
+    const store = await openDb('omw-tb-throw-')
+    try {
+      const conn = proxyConnection(store.connection, (statement) => {
+        if (statement.includes('QUERY_VECTOR_INDEX')) throw new Error('vector extension not loaded')
+      })
+      await expect(
+        writeDedup(
+          store,
+          { layer: LAYER, text: '扫描挂了必须让事务回滚', embedding: E1, sourceRefs: ['p20a'] },
+          { scanFailure: 'throw' },
+          conn,
+        ),
+      ).rejects.toThrow(SemanticScanError)
+      // 干净回滚：不留节点、不留审计——留给调用方带 skipSemanticScan 重写。
+      expect(await nodeCount(store)).toBe(0)
+      expect(await readAudit(store, 'merge_semantic')).toHaveLength(0)
+      expect(await readAudit(store, 'invalidate_version')).toHaveLength(0)
+    } finally {
+      await store.close()
+    }
+  })
+
+  it('P20 skipSemanticScan：不碰 ANN、指纹路径照常、向量仍写入（索引自愈靠它）', async () => {
+    const store = await openDb('omw-tb-skip-')
+    try {
+      const conn = proxyConnection(store.connection, (statement) => {
+        if (statement.includes('QUERY_VECTOR_INDEX')) throw new Error('本轮连 ANN 都不该发')
+      })
+      const warns: string[] = []
+      const result = await writeDedup(
+        store,
+        { layer: LAYER, text: '降级重试也要带向量落库', embedding: E1, sourceRefs: ['p20b'] },
+        { skipSemanticScan: true, logger: { warn: (m) => warns.push(m) } },
+        conn,
+      )
+      expect(result.outcome).toBe('created')
+      expect((await readNode(store, result.id)).hasEmbedding).toBe(true)
+      expect(warns.join('|')).toContain('语义去重扫描本轮跳过')
+      // 同文本再来一次（不带 skip）：指纹命中，同样不碰 ANN。
+      const again = await writeDedup(store, {
+        layer: LAYER,
+        text: '降级重试也要带向量落库',
+        embedding: E1,
+        sourceRefs: ['p20c'],
+      })
+      expect(again.outcome).toBe('fingerprint-merge')
+      expect((await readNode(store, again.id)).refs.slice().sort()).toEqual(['p20b', 'p20c'])
+    } finally {
+      await store.close()
+    }
+  })
 })
+

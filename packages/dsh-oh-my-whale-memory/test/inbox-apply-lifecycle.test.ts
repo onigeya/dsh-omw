@@ -259,21 +259,86 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(after).toHaveLength(1)
   }, 60_000)
 
-describe('P11/VG-3：U5 回填的 apply 级接线（enabled 接线为 maintenance，disabled 完全不接）', () => {
-  it('embedding enabled ⇒ 消费者拿到 maintenance 函数；disabled ⇒ undefined', async () => {
+/**
+ * Story 2.6 契约演进（Lead F1）：maintenance 从「embedding 回填（可选）」变成**恒存在的组合
+ * 函数**——`embedding 回填（有客户端才跑）+ EVIDENCE 回填（不依赖任何配置，X1 义务）`。
+ * 故 embedding disabled 时不再是 undefined；更强的新断言保证 disabled 下只跑 EVIDENCE 回填：
+ * 真跑一轮 maintenance，必须写下游标哨兵且**不产生任何 backfill_embedding 审计行**。
+ */
+describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => {
+  /**
+   * 评审 P12（T13）：光断言 `maintenance` 是函数，把 index.ts 里的向量回填整段删掉也全绿——
+   * Story 2.4 的 U5 义务会静默停摆。这里在 **enabled** 分支真跑一轮：种一条无向量的存量节点，
+   * 跑 maintenance，必须落一条 `backfill_embedding` 审计行（本夹具的 endpoint 指向死端口，
+   * 故落的是聚合 **失败** 行——正好也钉住「失败要可见、不静默」）。
+   */
+  it('enabled ⇒ maintenance 真跑向量回填并落 backfill_embedding 审计行', async () => {
     const enabledDir = await makeTempDir('omw-bf-wire-on-')
     captured.options = undefined
     const on = makeCtx(enabledDir)
     await plugin.apply(on.ctx, EMBEDDING_CONFIG_ENABLED)
-    // 删掉 index.ts:455 的 maintenance 那一行，这里立刻变红。
-    expect(typeof captured.options?.maintenance).toBe('function')
+    // 先停消费者并等在飞轮次结算：否则它的定时轮自身就会跑 maintenance，断言会变成假阳性。
     ;(captured.consumer as { stop(): void } | undefined)?.stop()
+    await drainInboxBackgroundTasks()
 
+    const connection = captured.options?.connection() ?? null
+    expect(connection).not.toBeNull()
+    const conn = connection as Parameters<typeof queryAll>[0]
+    await queryAll(
+      conn,
+      "CREATE (m:memory {id: 'wire-unembedded', layer: 'L1', kind: '', priority: 0, text: '待嵌入的存量节点', " +
+        "valid_at: '2026-01-01T00:00:00.000Z', recorded_at: '2026-01-02T00:00:00.000Z', source_refs: []})",
+    )
+    const maintenance = captured.options?.maintenance
+    if (maintenance) await maintenance()
+
+    const rows = await queryAll(
+      conn,
+      "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN g.outcome AS outcome, g.reason AS reason",
+    )
+    // 删掉 index.ts 的 embeddingBackfill 接线，这里立刻变红。
+    expect(rows.length).toBeGreaterThan(0)
+    expect(String(rows[0]?.reason ?? '')).toContain('failed=')
+    // 端点不可达 ⇒ 一条向量都没写进去，节点仍在待回填集里（幂等、不伪造成功）。
+    const still = await queryAll(
+      conn,
+      "MATCH (m:memory {id: 'wire-unembedded'}) WHERE m.embedding IS NULL RETURN count(*) AS c",
+    )
+    expect(Number(still[0]?.c ?? 0)).toBe(1)
+  }, 60_000)
+
+  it('disabled ⇒ 仍为函数且只跑 EVIDENCE 回填', async () => {
     const disabledDir = await makeTempDir('omw-bf-wire-off-')
     captured.options = undefined
     const off = makeCtx(disabledDir)
     await plugin.apply(off.ctx, EMBEDDING_CONFIG)
-    expect(captured.options?.maintenance).toBeUndefined()
+    const maintenance = captured.options?.maintenance
+    expect(typeof maintenance).toBe('function')
+    const connection = captured.options?.connection() ?? null
+    expect(connection).not.toBeNull()
+    const conn = connection as Parameters<typeof queryAll>[0]
+    // 评审 P15（T17）改了空库语义：游标为空 + 页为空 ⇒ 直接 return 0、**不写 done 哨兵**
+    //（done 是「扫完了」的断言，空库给不出这个结论；先写 done 会让后续新增的存量节点永远
+    // 不被回填）。所以这里先造一条**建表前就存在、source_refs 指向真 L0 行**的节点，
+    // 让回填真的扫到一页并写边，才能断言扫描跑完。
+    await queryAll(conn, "CREATE (l:l0_raw {id: 'wire-l0', raw_text: '原文', recorded_at: '2026-01-01T00:00:00.000Z', actor: 'system'})")
+    await queryAll(
+      conn,
+      "CREATE (m:memory {id: 'wire-m1', layer: 'L1', kind: '', priority: 0, text: '存量节点', " +
+        "valid_at: '2026-01-01T00:00:00.000Z', recorded_at: '2026-01-02T00:00:00.000Z', source_refs: ['wire-l0']})",
+    )
+    await maintenance?.()
+    // EVIDENCE 回填跑到了：写了边 + 游标推进到 done（纯逻辑水位，不新增存储）。
+    const edges = await queryAll(conn, "MATCH (:l0_raw {id: 'wire-l0'})-[e:EVIDENCE]->(:memory {id: 'wire-m1'}) RETURN count(e) AS c")
+    expect(Number(edges[0]?.c ?? 0)).toBe(1)
+    const cursor = await queryAll(conn, "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS v")
+    expect(cursor[0]?.v).toBe('done')
+    // 且**没有**任何 embedding 回填副作用（disabled ⇒ 不接 embeddingBackfill）。
+    const embeddingRuns = await queryAll(
+      connection as Parameters<typeof queryAll>[0],
+      "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN count(*) AS c",
+    )
+    expect(Number(embeddingRuns[0]?.c ?? -1)).toBe(0)
     ;(captured.consumer as { stop(): void } | undefined)?.stop()
   }, 60_000)
 })

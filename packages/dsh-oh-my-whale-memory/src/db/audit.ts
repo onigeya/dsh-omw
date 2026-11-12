@@ -80,6 +80,31 @@ export const BACKFILL_EMBEDDING_ACTION = 'backfill_embedding'
  */
 export const RESURRECT_MEMORY_ACTION = 'resurrect_memory'
 
+/**
+ * EVIDENCE 结构写边（Story 2.6 / AD-10）：精炼结构在写 L1 的**同一事务**内建
+ * l0_raw→memory 边。EVIDENCE 的唯一写者就是这条路径（裁决 U4）。
+ */
+export const WRITE_EVIDENCE_ACTION = 'write_evidence'
+
+/** X1 历史回填（Story 2.6 / 裁决 X1）：把建表前既有节点的 source_refs[] 物化为 EVIDENCE 边。 */
+export const BACKFILL_EVIDENCE_ACTION = 'backfill_evidence'
+
+/** 关系写入（Story 2.6 / FR-17）：LLM 提议、应用层校验后写 RELATED 边。 */
+export const WRITE_RELATED_ACTION = 'write_related'
+
+/** 关系写入整体跳过（Story 2.6 / AC5 / brief §5.1）：embedding 禁用或缺失、LLM 不可用/超时。 */
+export const SKIP_RELATED_ACTION = 'skip_related'
+
+/** LLM 提议的 EVIDENCE 被拒绝建边（Story 2.6 / 裁决 U4）：EVIDENCE 只由精炼结构写。 */
+export const REJECT_EVIDENCE_ACTION = 'reject_evidence'
+
+/**
+ * EVIDENCE 写边被跳过的边数（Story 2.6 评审 P16/T18）。原先 processor 把这行写成
+ * `refine_inbox` 的 reason 文本 ⇒ 审计在库里但 `countRelatedSkips` 统计不到。
+ * 独立成 action 后由 `/memory status` 的降级计数覆盖（AD-21：降级必须可见）。
+ */
+export const WRITE_EVIDENCE_SKIPPED_ACTION = 'write_evidence_skipped'
+
 /** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
 export const DIRECT_CASCADE_DEPTH = 0
 
@@ -181,8 +206,10 @@ const SET_INVALIDATED_BY = [
 
 /**
  * v1 只读校验器口径：audit_gap 的**可计算子集**——已失效（invalid_at 或 expired_at）
- * 却没有 keyed 裁决记录可重建的版本写入（AC :441 / AD-21 三集之一）。另两集
- * （EII 违例、EVIDENCE 边与 source_refs[] 漂移）依赖类型化边表，Epic 4 才建。
+ * 却没有 keyed 裁决记录可重建的版本写入（AC :441 / AD-21 三集之一）。另两集见
+ * `computeEvidenceGap`（Story 2.6，src/db/eii.ts）：EII 违例与 EVIDENCE 边/source_refs[] 漂移。
+ * 两者口径分工：**audit_gap = 缺裁决记录**（本语句，与边表无关）；
+ * **evidence_gap = 缺证据链/账边不一致**（`/memory status` 里单独一行渲染）。
  */
 const AUDIT_GAP_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',

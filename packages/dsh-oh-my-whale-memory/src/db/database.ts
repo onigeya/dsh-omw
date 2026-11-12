@@ -36,6 +36,7 @@ import { stat } from 'node:fs/promises'
 import * as lbug from '@ladybugdb/core'
 import { ensureAuditTables } from './audit.js'
 import { ensureInboxTables } from '../inbox/queue.js'
+import { ensureEdgeTables } from './edges.js'
 import { MemoryDbError } from './errors.js'
 import {
   META_KEYS,
@@ -277,6 +278,10 @@ async function initializeDatabase(
   await ensureAuditTables(connection)
   // Story 2.2：INBOX 队列表与审计表一样在唯一迁移点建（IF NOT EXISTS，幂等）。
   await ensureInboxTables(connection)
+  // Story 2.6：类型化边表（EVIDENCE GROUP + RELATED）。必须排在 memory / l0_raw 节点表之后
+  // ——0.22.3 对端点不存在的 GROUP DDL 直接 Binder 报错（brief §2.3 N14）；IF NOT EXISTS 幂等。
+  // 只读实例走 initializeReadOnlyDatabase，不经本函数（AC6 / AD-12）。
+  await ensureEdgeTables(connection)
 
   if (actualDim === null) {
     await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)

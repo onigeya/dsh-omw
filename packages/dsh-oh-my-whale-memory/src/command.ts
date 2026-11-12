@@ -167,6 +167,28 @@ export interface MemoryStatusSnapshot {
   readonly readonlyReason?: string
   /** audit_gap 计数；null = 审计表缺失、算不出来（不静默报 0）。 */
   readonly auditGap: number | null
+  /**
+   * 边侧差额（Story 2.6 / EII + 漂移合计）：null = 边表缺失、算不出来（渲染成未知，
+   * 绝不静默报 0，与 auditGap 同一约定）。仅 total > 0 或为 null 时追加渲染。
+   */
+  readonly evidenceGap: EvidenceGapCounts | null
+  /**
+   * 被跳过/拒绝的关系写入条数（Story 2.6 / AD-21：降级必须可见）。null = 审计表缺失、
+   * 算不出来（渲染成未知，不静默报 0，与 auditGap 同一约定）。0 时不追加渲染。
+   */
+  readonly relatedSkipped: number | null
+}
+
+/**
+ * 边侧差额计数（命令层镜像 `db/eii.ts` 的 `EvidenceGapSummary`）。命令层不 import db 模块，
+ * 形状在此重复声明——两个字段名与语义必须与 db 侧一致（`eii.ts` 的 `EvidenceGapSummary`）。
+ */
+export interface EvidenceGapCounts {
+  /** EII 违例（有效节点但无有效路径到 L0）。 */
+  readonly eiiViolations: number
+  /** 边 ↔ source_refs 漂移（双向合计）。 */
+  readonly drift: number
+  readonly total: number
 }
 
 /**
@@ -387,6 +409,21 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
         : 'embedding: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ]
+  // Story 2.6 / D7：边侧差额（EII + 漂移）与关系降级——都只在需要时追加，gap=0 时既有
+  // 逐行输出逐字不变。边表缺失（null）与审计表缺失一样渲染成未知，不静默报 0。
+  if (snapshot.evidenceGap === null) {
+    lines.push('evidence_gap: 未知（边表缺失）')
+  } else if (snapshot.evidenceGap.total > 0) {
+    lines.push(
+      `evidence_gap: ${snapshot.evidenceGap.total}` +
+      `（EII ${snapshot.evidenceGap.eiiViolations} / 漂移 ${snapshot.evidenceGap.drift}）`,
+    )
+  }
+  if (snapshot.relatedSkipped === null) {
+    lines.push('related_skipped: 未知（审计表缺失）')
+  } else if (snapshot.relatedSkipped > 0) {
+    lines.push(`related_skipped: ${snapshot.relatedSkipped}`)
+  }
   // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
   const entries = snapshot.failedEntries ?? []
   if (entries.length > 0) {

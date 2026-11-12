@@ -37,6 +37,8 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       unembedded: 0,
       readonly: false,
       auditGap: 0,
+      evidenceGap: { total: 0, eiiViolations: 0, drift: 0 },
+      relatedSkipped: 0,
     }),
     ...overrides,
   }
@@ -182,6 +184,8 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
       unembedded: 0,
       readonly: false,
       auditGap: 0,
+      evidenceGap: { total: 0, eiiViolations: 0, drift: 0 },
+      relatedSkipped: 0,
     }))
     const definition = createMemoryCommandDefinition(makeDeps({ writeInbox, getStatus }))
 

@@ -46,6 +46,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import { dirname, join } from 'node:path'
 import { resolveRuntimeConfig } from './config.js'
 import { computeAuditGap } from './db/audit.js'
+import { computeEvidenceGap } from './db/eii.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
@@ -74,6 +75,8 @@ import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingBackfill } from './embedding/backfill.js'
+import { createEvidenceBackfill } from './wiki/evidence-backfill.js'
+import { countRelatedSkips, createRelationRunner } from './wiki/relations.js'
 import { createEmbeddingClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
 import { routeFromSession } from './distill/session-route.js'
@@ -248,6 +251,10 @@ export async function apply(
     // Story 2.2 / AC4：failed 换成 l1_inbox 的真实计数；有条目才读明细（最近 5 条 + stale），
     // 无失败时不追加任何行，status 既有输出逐字不变。队列表缺失照抛（可见错误，不静默报 0）。
     const unembedded = await countUnembeddedMemories(connection)
+    // Story 2.6 / F2：边侧差额（EII 违例 + 边↔source_refs 漂移）与关系降级计数。
+    // computeEvidenceGap 在边表缺失时返回 null（渲染成未知，不静默报 0）。
+    const evidenceGap = await computeEvidenceGap(connection, new Date().toISOString())
+    const relatedSkipped = await countRelatedSkips(connection)
     const inboxCounts = await countInboxByStatus(connection)
     const failedEntries = inboxCounts.failed > 0
       ? await listRecentFailedInboxItems(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
@@ -262,6 +269,8 @@ export async function apply(
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
       auditGap,
+      evidenceGap,
+      relatedSkipped,
     }
   }
   const commandDependencies: MemoryCommandDependencies = {
@@ -426,9 +435,19 @@ export async function apply(
     const session = typeof sessions?.get === 'function' ? sessions.get(sessionId) : undefined
     return routeFromSession(session)
   }
+  // Story 2.6：关系维护跑者——在每个新 L1 节点上跑一次 KNN + 一次 ctx.llm 识别 + 应用层
+  // 校验 + 写 RELATED 边。调用点在精炼事务之外（AC:779-782：关系失败不影响记忆进库）。
+  // embedding 禁用 ⇒ 整体跳过 RELATED（记忆照常进库）并落一条 skip 审计供 status 可见。
+  const relationRunner = createRelationRunner({
+    connection: () => db?.connection ?? null,
+    llm: llmPort,
+    embeddingEnabled: embeddingClient !== null,
+    logger: ctx.logger,
+  })
   const inboxProcessor = createInboxProcessor({
     connection: () => db?.connection ?? null,
     llm: llmPort,
+    relations: relationRunner,
     resolveRoute: (sessionId) => configuredRoute ?? sessionRoute(sessionId),
     embedding: embeddingClient,
     embeddingModel: resolved.embedding.model ?? null,
@@ -447,12 +466,26 @@ export async function apply(
       logger: ctx.logger,
     })
     : null
+  // Story 2.6 / X1：EVIDENCE 边历史回填（建表前的 L1/L2 没有边）——与向量回填共用同一个
+  // maintenance 钩子与空闲闸门，不新增 ctx.effect/定时器。
+  const evidenceBackfill = createEvidenceBackfill({
+    connection: () => db?.connection ?? null,
+    gate: idleGate,
+    logger: ctx.logger,
+  })
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,
     promotion: promotionTracker,
     process: inboxProcessor,
-    maintenance: embeddingBackfill ? () => embeddingBackfill.runOnce() : undefined,
+    // 评审 P18a（T19）：**串行**跑两个回填。两者都在事务外做裸 prepare/execute，
+    // 并发会在同一条连接上交错（语句可能落进对方未结算的连接级事务）。串行代价可忽略
+    // （每轮各 ≤1 批），与 P7 的「游标进事务」是双保险。
+    maintenance: async () => {
+      const embedded = embeddingBackfill ? await embeddingBackfill.runOnce() : 0
+      const evidenced = await evidenceBackfill.runOnce()
+      return embedded + evidenced
+    },
     logger: ctx.logger,
   })
   inboxConsumer.start()
