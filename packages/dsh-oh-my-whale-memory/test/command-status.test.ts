@@ -146,6 +146,42 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
     expect(renderMemoryStatus({ ...STATUS_BASE, relatedSkipped: null })).toContain('related_skipped: 未知（审计表缺失）')
   })
 
+  it('Story 2.5 / 评审 P7（T7）：systemOne 三态逐字渲染（degraded 是运行态的独立一行）', () => {
+    expect(renderMemoryStatus({ ...STATUS_BASE, systemOne: 'enabled' })).toContain('systemOne: enabled')
+    const degraded = renderMemoryStatus({ ...STATUS_BASE, systemOne: 'degraded' })
+    expect(degraded).toContain('systemOne: degraded（已降级回 ctx.llm）')
+    expect(degraded).not.toContain('systemOne: enabled')
+    const off = renderMemoryStatus({ ...STATUS_BASE, systemOne: 'disabled-by-config' })
+    expect(off).toContain('systemOne: disabled-by-config（已降级回 ctx.llm）')
+    expect(off).not.toContain('systemOne: enabled')
+  })
+
+  it('Story 2.5 / 评审 P8（T8+T27）：l2_failed 与 uncertain 仅 >0 时追加，null 渲染成未知', () => {
+    // 0 / 未给：既有快照逐字不变（两条行都不出现）。
+    const zero = renderMemoryStatus({ ...STATUS_BASE, l2Failed: 0, uncertain: 0 })
+    expect(zero).not.toContain('l2_failed')
+    expect(zero).not.toContain('uncertain')
+    // N>0：两条行出现（L2 死信与疑似失效账目各有出口，T8/T27）。
+    const some = renderMemoryStatus({ ...STATUS_BASE, l2Failed: 2, uncertain: 5 })
+    expect(some).toContain('l2_failed: 2')
+    expect(some).toContain('uncertain: 5')
+    // 审计表缺失：照 2.6 的 null 范式渲染「未知」，不静默报 0。
+    const missing = renderMemoryStatus({ ...STATUS_BASE, uncertain: null })
+    expect(missing).toContain('uncertain: 未知（审计表缺失）')
+    expect(missing).not.toContain('uncertain: 0')
+  })
+
+  it('Story 2.5 / 评审 P8：l2_failed > 0 时附最近条目明细（值过 renderSingleLine）', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      l2Failed: 1,
+      l2FailedEntries: [{ id: 'l2-x', kind: 'l2-promotion', attempts: 4, updatedAt: '2026-11-11T00:00:01.000Z', lastError: 'boom', stale: false }],
+    })
+    expect(text).toContain('l2_failed: 1')
+    expect(text).toContain('l2_failed 最近条目:')
+    expect(text).toContain('l2-x')
+  })
+
   it('disabled × 只读：两种降级同时可见', () => {
     const text = renderMemoryStatus({
       ...STATUS_BASE,
