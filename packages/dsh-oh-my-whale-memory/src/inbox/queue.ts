@@ -191,6 +191,7 @@ interface InboxStatements {
   readonly reclaimExpired: string
   readonly reclaimProcessing: string
   readonly countByStatus: string
+  readonly countBusy: string
   readonly listFailed: string
 }
 
@@ -270,6 +271,18 @@ function createInboxStatements(table: string): InboxStatements {
 
   const COUNT_BY_STATUS = 'MATCH (q:' + table + ') RETURN q.status AS status, count(q) AS total'
 
+  /**
+   * 「这张表还有活儿要干吗」（Story 2.5 / 评审 P6+P6b）：processing 中的条目算忙，
+   * 且 **pending 只有「现在就能取」才算忙** —— 退避把 pending 的 lease_until 写到未来
+   * （最长 INBOX_BACKOFF_MAX_MS=120s），那些窗口不该让 L2 慢循环停摆。
+   */
+  const COUNT_BUSY = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $processing',
+    '   OR (q.status = $pending AND (q.lease_until IS NULL OR q.lease_until <= $now))',
+    'RETURN count(q) AS total',
+  ].join(' ')
+
   const LIST_FAILED = [
     'MATCH (q:' + table + ')',
     'WHERE q.status = $failed',
@@ -290,6 +303,7 @@ function createInboxStatements(table: string): InboxStatements {
     reclaimExpired: RECLAIM_EXPIRED,
     reclaimProcessing: RECLAIM_PROCESSING,
     countByStatus: COUNT_BY_STATUS,
+    countBusy: COUNT_BUSY,
     listFailed: LIST_FAILED,
   }
 }
@@ -313,6 +327,11 @@ export interface InboxQueue {
   reclaimExpired(connection: InboxConnection, options?: { readonly now?: Date }): Promise<number>
   reclaimProcessing(connection: InboxConnection, options?: { readonly now?: Date }): Promise<number>
   countByStatus(connection: InboxConnection): Promise<Record<InboxStatus, number>>
+  /**
+   * 还有「现在就该干」的活儿吗（processing，或 lease 已到期的 pending）。
+   * Story 2.5 的 L2 慢循环用它给 L1 主路径让路（评审 P6+P6b）。
+   */
+  countBusy(connection: InboxConnection, options?: { readonly now?: Date }): Promise<number>
   listRecentFailed(
     connection: InboxConnection,
     options?: { readonly now?: Date; readonly limit?: number },
@@ -490,6 +509,15 @@ export function createInboxQueue(table: string): InboxQueue {
         }
       }
       return counts
+    },
+    async countBusy(connection, options = {}) {
+      const now = options.now ?? new Date()
+      const rows = await queryRows(connection, statements.countBusy, {
+        processing: INBOX_STATUS_PROCESSING,
+        pending: INBOX_STATUS_PENDING,
+        now: now.toISOString(),
+      })
+      return Number(rows[0]?.total ?? 0)
     },
     async listRecentFailed(connection, options = {}) {
       const now = (options.now ?? new Date()).getTime()

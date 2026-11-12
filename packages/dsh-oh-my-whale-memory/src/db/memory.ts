@@ -118,7 +118,11 @@ export interface UpsertMemoryResult {
 const UPSERT_ON_MATCH_CLAUSE = [
   '  ON MATCH SET m.source_refs = list_distinct(list_concat(m.source_refs, $source_refs)),',
   '    m.kind = $kind, m.priority = $priority,',
-  '    m.support = CASE WHEN $support IS NULL THEN m.support WHEN m.support IS NULL THEN $support',
+  // 注意：**不要**写 `WHEN $support IS NULL THEN m.support` —— 0.22.3 的 binder 会因此把同一参数
+  // 先推成 BOOL 再推成 INT64，抛 `Binder exception: Cannot change parameter expression data type from
+  // BOOL to INT64.`（实测，评审 P9 首版即踩）。$support 为 NULL 时 `$support > m.support` 求值为
+  // NULL（非真）⇒ 落到 ELSE，语义与显式判空完全一致。
+  '    m.support = CASE WHEN m.support IS NULL THEN $support',
   '      WHEN $support > m.support THEN $support ELSE m.support END,',
   '    m.recorded_at = CASE WHEN $recorded_at < m.recorded_at THEN $recorded_at ELSE m.recorded_at END',
 ].join('')

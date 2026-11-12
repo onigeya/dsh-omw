@@ -236,6 +236,10 @@ const AUDIT_GAP_STATEMENT = [
 
 /** 审计表存在性探针：任一张缺失即按「算不出来」处理（矩阵行「审计表缺失」）。 */
 const GENERATION_LOG_PROBE = `CALL table_info('${GENERATION_LOG_TABLE}') RETURN name`
+
+/** 疑似失效账目计数（P8）：不需要索引，v1 规模下全扫可接受。 */
+const COUNT_UNCERTAIN_STATEMENT =
+  'MATCH (g:' + GENERATION_LOG_TABLE + ") WHERE g.outcome = 'uncertain' RETURN count(g) AS total"
 const KEYED_DECISION_PROBE = `CALL table_info('${KEYED_DECISION_TABLE}') RETURN name`
 
 /**
@@ -402,6 +406,27 @@ export async function appendInvalidationCause(
  * 返回 null 表示**算不出来**（审计表不存在）——调用方必须显式展示「未知」，绝不静默报 0。
  * 其它错误照抛。
  */
+/**
+ * 疑似失效账目计数（Story 2.5 / 评审 P8-T27）：`generation_log` 里 outcome='uncertain' 的行数。
+ *
+ * 存在的理由：U14 要求「LLM 标疑的候选进疑似失效队列且 status 可见」（epics.md:740、NFR12），
+ * 但在此之前只有**写侧**（promotion 记 uncertain）没有任何读取出口。
+ *
+ * 返回 null 表示算不出来（审计表不存在）——调用方渲染成「未知」，绝不静默报 0（同 computeAuditGap）。
+ */
+export async function countUncertainAudits(connection: lbug.Connection): Promise<number | null> {
+  try {
+    await queryAll(connection, GENERATION_LOG_PROBE)
+    const rows = await queryAll(connection, COUNT_UNCERTAIN_STATEMENT)
+    const value = rows[0]?.total
+    return Number(value ?? 0)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/does not exist/i.test(message)) return null
+    throw error
+  }
+}
+
 export async function computeAuditGap(connection: lbug.Connection): Promise<number | null> {
   try {
     // 账本不完整（任一张审计表缺失）时差额算不出来，绝不静默报 0。

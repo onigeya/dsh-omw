@@ -184,6 +184,18 @@ export interface MemoryStatusSnapshot {
    * 算不出来（渲染成未知，不静默报 0，与 auditGap 同一约定）。0 时不追加渲染。
    */
   readonly relatedSkipped: number | null
+  /**
+   * L2 提升的死信条数（Story 2.5 / 评审 P8-T8）：l2_inbox 里 status='failed' 的数量。
+   * 缺省/0 ⇒ 不追加渲染（既有逐行输出逐字不变）。
+   */
+  readonly l2Failed?: number
+  /** L2 死信最近条目明细（与 L1 的 failedEntries 同形，仅 > 0 时追加）。 */
+  readonly l2FailedEntries?: readonly MemoryFailedEntry[]
+  /**
+   * 疑似失效账目计数（Story 2.5 / 评审 P8-T27）：generation_log 里 outcome='uncertain' 的行数。
+   * null = 审计表缺失、算不出来（渲染成未知）；0/缺省 ⇒ 不追加渲染。
+   */
+  readonly uncertain?: number | null
 }
 
 /**
@@ -443,6 +455,26 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     lines.push('related_skipped: 未知（审计表缺失）')
   } else if (snapshot.relatedSkipped > 0) {
     lines.push(`related_skipped: ${snapshot.relatedSkipped}`)
+  }
+  // Story 2.5 / 评审 P8：L2 死信与疑似失效账目——都只在**需要时**追加，0/缺省时既有
+  // 逐行输出逐字不变；算不出来（null）照 2.6 的范式渲染「未知」，不静默报 0。
+  if (snapshot.l2Failed !== undefined && snapshot.l2Failed > 0) {
+    lines.push(`l2_failed: ${snapshot.l2Failed}`)
+  }
+  if (snapshot.uncertain === null) {
+    lines.push('uncertain: 未知（审计表缺失）')
+  } else if (snapshot.uncertain !== undefined && snapshot.uncertain > 0) {
+    lines.push(`uncertain: ${snapshot.uncertain}`)
+  }
+  const l2Entries = snapshot.l2FailedEntries ?? []
+  if (l2Entries.length > 0) {
+    lines.push('l2_failed 最近条目:')
+    for (const entry of l2Entries) {
+      lines.push(
+        `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
+        `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
+      )
+    }
   }
   // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
   const entries = snapshot.failedEntries ?? []

@@ -45,7 +45,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { dirname, join } from 'node:path'
 import { resolveRuntimeConfig } from './config.js'
-import { computeAuditGap } from './db/audit.js'
+import { computeAuditGap, countUncertainAudits } from './db/audit.js'
 import { computeEvidenceGap } from './db/eii.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
@@ -101,11 +101,7 @@ import {
   createL2PromotionProcessor,
   type L2PromotionPayload,
 } from './distill/promotion.js'
-import {
-  createSystemOneClient,
-  setSystemOneEnabled,
-  systemOneRuntimeState,
-} from './distill/system-one.js'
+import { createSystemOneClient, type SystemOneClient } from './distill/system-one.js'
 
 /**
  * `session/event` 宿主事件面（Story 2.2 / AD-6、Story 2.1）。
@@ -218,15 +214,20 @@ export async function apply(
   for (const message of resolved.warnings) {
     ctx.logger.warn(message)
   }
-  // Story 2.5 / U6：把配置态同步进 System One 的运行态槽——getStatus 读它渲染
-  // systemOne 行（配置关闭时清掉可能残留的运行态降级）。放在所有早退之前，
-  // 只读实例也要能正确渲染配置态。
-  setSystemOneEnabled(resolved.systemOne.enabled)
 
   // Story 1.6 / 1.7：命令与工具都在 profileContext 早退之前无条件注册（注册是 effect，
   // 自动挂 disposer），两者共用闭包可变量 `db`——库未就绪时命令给出明确错误、
   // 工具给出 db_unavailable，可用性不受 profile/建库问题牵连。
   let db: MemoryDatabase | undefined
+  /**
+   * Story 2.5 / 评审 P19：System One 客户端的实例化槽。
+   *
+   * 必须**实例级**：原先配置态与运行态都是模块级，而同进程第二次 apply 会重新同步配置，
+   * 把已构造 client 的 enabled 置成新配置 ⇒ 第一实例的候选收到 disabled-by-config 被当失败
+   * 抛出。`getStatus` 在客户端构造之前就注册了，但它在闭包里**调用时才求值**，故这里必须先声明。
+   * 只读实例不构造客户端（保持 null ⇒ 状态按配置渲染）。
+   */
+  let systemOneClient: SystemOneClient | null = null
   // Story 1.9：本实例自身的只读态。模块级 `runtimeState` 只表示「最近一次成功 apply」，
   // 同进程再次 apply 会让本实例的命令读到别的实例的锁结果，故 getStatus 只读这份局部值。
   let instanceReadonly = false
@@ -297,16 +298,24 @@ export async function apply(
       failed: inboxCounts.failed,
       failedEntries,
       embeddingMode: resolved.embeddingMode,
-      // Story 2.5 / U6：配置态（enabled=false）优先于运行态（端点持续不可达 ⇒ degraded）。
-      systemOne: resolved.systemOne.enabled
-        ? (systemOneRuntimeState().degraded ? 'degraded' : 'enabled')
-        : 'disabled-by-config',
+      // Story 2.5 / U6 + 评审 P19：配置态优先（enabled=false ⇒ 不构造客户端），
+      // 否则读**本实例**客户端的运行态（端点持续不可达 ⇒ degraded）。
+      systemOne: !resolved.systemOne.enabled
+        ? 'disabled-by-config'
+        : (systemOneClient?.runtimeState().degraded === true ? 'degraded' : 'enabled'),
       unembedded,
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
       auditGap,
       evidenceGap,
       relatedSkipped,
+      // Story 2.5 / 评审 P8：L2 死信（T8：此前 l2InboxCounts.failed 被整个丢弃 ⇒ L2 死信
+      // 在 status 完全不可见）与疑似失效账目（T27：U14 只有写侧、没有读取出口）。
+      l2Failed: l2InboxCounts.failed,
+      l2FailedEntries: l2InboxCounts.failed > 0
+        ? await l2InboxQueue.listRecentFailed(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
+        : [],
+      uncertain: await countUncertainAudits(connection),
     }
   }
   const commandDependencies: MemoryCommandDependencies = {
@@ -583,10 +592,16 @@ export async function apply(
   })
   inboxConsumer.start()
   // Story 2.5：L1→L2 提升的第二条消费链。
-  // - System One 客户端只在配置开启时构造（U9：端点/模型是模块常量，不扩 Config）；
-  //   配置关闭时就整体回落 ctx.llm 单次检查（AC:674）。
+  // - System One 客户端只在配置开启时构造（评审 P3 后端点/模型/凭据都可经 Config 覆盖，
+  //   缺省仍是 AD-15 的模块常量）；配置关闭时就整体回落 ctx.llm 单次检查（AC:674）。
   // - 慢循环：intervalMs 调到 30s（AC:721），并用 claimGuard 给 L1 主路径让路（L1 待处理时本轮不取件）。
-  const systemOneClient = resolved.systemOne.enabled ? createSystemOneClient() : null
+  systemOneClient = resolved.systemOne.enabled
+    ? createSystemOneClient({
+      endpoint: resolved.systemOne.endpoint,
+      model: resolved.systemOne.model,
+      token: resolved.systemOne.token,
+    })
+    : null
   const l2PromotionProcessor = createL2PromotionProcessor({
     connection: () => db?.connection ?? null,
     llm: llmPort,
@@ -603,8 +618,19 @@ export async function apply(
     intervalMs: L2_PROMOTION_INTERVAL_MS,
     queue: l2InboxQueue,
     process: l2PromotionProcessor,
-    // 让路规则（brief §5.4）：L1 队列还有待处理条目就跳过本轮，慢路径不抢主路径。
-    claimGuard: async () => (await l1InboxQueue.countByStatus(db!.connection)).pending === 0,
+    // 让路规则（brief §5.4 + 评审 P6/P6b）：L1 队列还有**现在就该干**的活儿就让路。
+    // - P6：不能只数 pending —— L1 正在精炼（processing）时同样不该起 L2；
+    // - P6b：也不能把**退避中**的 pending 算成忙 —— 退避窗口最长 120s，
+    //   那会让 L2 慢循环整段时间完全不取件（提升停顿）。
+    // 连接为空（dispose 之后）⇒ 按忙处理并 warn，不再用 `db!` 抛异常被吞。
+    claimGuard: async () => {
+      const connection = db?.connection
+      if (!connection) {
+        ctx.logger.warn('L2 提升让路闸门：数据库连接不可用（按忙处理）')
+        return false
+      }
+      return (await l1InboxQueue.countBusy(connection)) === 0
+    },
     logger: ctx.logger,
   })
   l2Consumer.start()

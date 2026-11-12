@@ -363,6 +363,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         // 与 audit_gap 同一约定显式渲染「未知」，绝不静默报 0。
         'evidence_gap: 未知（边表缺失）',
         'related_skipped: 未知（审计表缺失）',
+        // Story 2.5 / 评审 P8：疑似失效账目同样缺审计表 ⇒ 渲染「未知」（同一约定）。
+        'uncertain: 未知（审计表缺失）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {

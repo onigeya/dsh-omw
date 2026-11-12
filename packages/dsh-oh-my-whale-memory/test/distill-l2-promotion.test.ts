@@ -28,9 +28,8 @@ import {
 } from '../src/distill/promotion'
 import {
   createSystemOneClient,
-  resetSystemOneRuntimeState,
-  setSystemOneEnabled,
   type SystemOneClient,
+  type SystemOneRuntimeState,
 } from '../src/distill/system-one'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -67,9 +66,16 @@ afterAll(async () => {
 
 beforeEach(() => {
   edgeState.mode = 'real'
-  setSystemOneEnabled(true)
-  resetSystemOneRuntimeState()
 })
+
+/** 假客户端的运行态：评审 P19 后 `runtimeState()` 是接口的一部分（judgeStatement 会先读它）。 */
+const IDLE_RUNTIME: SystemOneRuntimeState = {
+  enabled: true,
+  degraded: false,
+  since: null,
+  consecutiveFailures: 0,
+  lastReason: null,
+}
 
 const delta = (text: string): StreamChunk => ({ type: 'text-delta', index: 0, text }) as StreamChunk
 const finish = (reason: unknown): StreamChunk => ({ type: 'finish', reason }) as StreamChunk
@@ -165,9 +171,11 @@ async function statusOf(id: string) {
 }
 
 const systemOnePassing = (faithful: number, noConflict: number): SystemOneClient => ({
+  runtimeState: () => IDLE_RUNTIME,
   async judge() { return { ok: true, answers: { faithful, 'no-conflict': noConflict } } },
 })
 const systemOneFailing = (reason: string): SystemOneClient => ({
+  runtimeState: () => IDLE_RUNTIME,
   async judge() { return { ok: false, reason, message: 'boom' } },
 })
 

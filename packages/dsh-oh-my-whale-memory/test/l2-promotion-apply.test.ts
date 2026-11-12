@@ -15,7 +15,6 @@ import { queryAll } from '../src/db/memory'
 import { l2InboxQueue, enqueueInboxItem } from '../src/inbox/queue'
 import { drainInboxBackgroundTasks, type InboxConsumerOptions } from '../src/inbox/consumer'
 import { L2_PROMOTION_INTERVAL_MS } from '../src/distill/promotion'
-import { resetSystemOneRuntimeState } from '../src/distill/system-one'
 import type { MemoryCommandDefinition } from '../src/command'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -83,7 +82,6 @@ async function openStore(prefix: string): Promise<{ store: MemoryDatabase, dbPat
 describe('Story 2.5：apply 装配第二条消费链', () => {
   it('L2 消费者绑 l2_inbox、30s 慢节律、带让路闸门；闸门按 L1 队列是否为空作答', async () => {
     captured.all.length = 0
-    resetSystemOneRuntimeState()
     const { store, dir } = await openStore('omw-l2-wire-')
     const harness = makeCtx(dir)
 
@@ -133,7 +131,6 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
 describe('Story 2.5 / U6：status 的 systemOne 行', () => {
   it('配置开启且未降级 ⇒ systemOne: enabled', async () => {
     captured.all.length = 0
-    resetSystemOneRuntimeState()
     const { store, dir } = await openStore('omw-l2-status-')
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
@@ -148,7 +145,6 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
 
   it('配置关闭（systemOne.enabled=false）⇒ systemOne: disabled-by-config（降级回 ctx.llm）', async () => {
     captured.all.length = 0
-    resetSystemOneRuntimeState()
     const { store, dir } = await openStore('omw-l2-status-off-')
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, { ...EMBEDDING_CONFIG, systemOne: { enabled: false } })

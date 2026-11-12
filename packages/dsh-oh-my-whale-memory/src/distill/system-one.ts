@@ -82,13 +82,28 @@ export interface SystemOneClient {
    * `signal` 是调用方的任务预算；与客户端自己的超时取并集。
    */
   judge(state: string, questions: SystemOneQuestions, signal: AbortSignal): Promise<SystemOneResult>
+  /**
+   * 读本实例的运行态（评审 P19：降级槽归实例，不再跨 apply 串味）。
+   * 纯读、不触发调用；`/memory status` 与提升处理器的降级分支都读它。
+   */
+  runtimeState(): SystemOneRuntimeState
 }
 
 export interface SystemOneClientOptions {
+  /**
+   * 配置态开关（AD-15 / AC:674）。缺省 true（与 SystemOneSchema 的缺省一致）。
+   * 关闭时 `judge` 直接返回 `disabled-by-config`（不尝试调用）。
+   */
+  readonly enabled?: boolean
   /** 缺省 {@link DEFAULT_SYSTEMONE_ENDPOINT}（测试注入本地假端点）。 */
   readonly endpoint?: string
   /** 缺省 {@link DEFAULT_SYSTEMONE_MODEL}。 */
   readonly model?: string
+  /**
+   * 可选凭据（评审 P3）：配了就带 `Authorization: Bearer <token>`，没配就不带。
+   * 值是秘密，绝不写日志 / 审计 / status（NFR9）。
+   */
+  readonly token?: string
   readonly fetch?: typeof fetch
   readonly timeoutMs?: number
   /** 连续失败多少次打开降级；缺省 {@link SYSTEMONE_DEGRADE_FAILURES}。 */
@@ -108,53 +123,46 @@ export interface SystemOneRuntimeState {
   readonly lastReason: string | null
 }
 
-let runtimeEnabled = true
-let runtimeDegradedAt: string | null = null
-let runtimeFailures = 0
-let runtimeLastReason: string | null = null
-
 /**
- * 配置态同步：apply 期间用解析出的 `systemOne.enabled` 初始化；关闭时清掉运行态降级
- * （否则「配置关闭 + 此前已降级」会渲染出互相矛盾的两行）。
+ * 运行态槽的构造与读写（评审 P19）。
+ *
+ * **必须是实例级**：原实现放在模块级，而 apply 每次启动都会同步配置态（且在只读早退之前），
+ * 于是同一进程里第二次 apply 会把已构造 client 的 enabled 置成新配置——第一实例的候选因此
+ * 收到 `disabled-by-config` 并被当作普通调用失败抛出，4 次退避后进死信（T45）。
+ * 收进闭包后，每个 apply 的 client 各自独立，跨实例不再串味。
  */
-export function setSystemOneEnabled(enabled: boolean): void {
-  runtimeEnabled = enabled
-  if (!enabled) {
-    runtimeDegradedAt = null
-    runtimeFailures = 0
-    runtimeLastReason = null
-  }
+interface RuntimeSlot {
+  enabled: boolean
+  degradedAt: string | null
+  failures: number
+  lastReason: string | null
 }
 
-/** 读运行态（/memory status 的输入；纯读、不触发任何调用）。 */
-export function systemOneRuntimeState(): SystemOneRuntimeState {
+function createRuntimeSlot(enabled: boolean): RuntimeSlot {
+  return { enabled, degradedAt: null, failures: 0, lastReason: null }
+}
+
+function slotState(slot: RuntimeSlot): SystemOneRuntimeState {
   return {
-    enabled: runtimeEnabled,
-    degraded: runtimeDegradedAt !== null,
-    since: runtimeDegradedAt,
-    consecutiveFailures: runtimeFailures,
-    lastReason: runtimeLastReason,
+    enabled: slot.enabled,
+    degraded: slot.degradedAt !== null,
+    since: slot.degradedAt,
+    consecutiveFailures: slot.failures,
+    lastReason: slot.lastReason,
   }
 }
 
-/** 测试接缝：把降级槽复位（生产路径不使用）。 */
-export function resetSystemOneRuntimeState(): void {
-  runtimeDegradedAt = null
-  runtimeFailures = 0
-  runtimeLastReason = null
+function markSuccess(slot: RuntimeSlot): void {
+  slot.failures = 0
+  slot.degradedAt = null
+  slot.lastReason = null
 }
 
-function markSuccess(): void {
-  runtimeFailures = 0
-  runtimeDegradedAt = null
-  runtimeLastReason = null
-}
-
-function markFailure(reason: string, degradeAfter: number, now: () => Date): void {
-  runtimeFailures += 1
-  runtimeLastReason = reason
-  if (runtimeFailures >= Math.max(1, degradeAfter) && runtimeDegradedAt === null) {
-    runtimeDegradedAt = now().toISOString()
+function markFailure(slot: RuntimeSlot, reason: string, degradeAfter: number, now: () => Date): void {
+  slot.failures += 1
+  slot.lastReason = reason
+  if (slot.failures >= Math.max(1, degradeAfter) && slot.degradedAt === null) {
+    slot.degradedAt = now().toISOString()
   }
 }
 
@@ -199,51 +207,59 @@ export function createSystemOneClient(options: SystemOneClientOptions = {}): Sys
   const url = resolveUrl(options.endpoint ?? DEFAULT_SYSTEMONE_ENDPOINT)
   const model = options.model ?? DEFAULT_SYSTEMONE_MODEL
   const timeoutMs = options.timeoutMs ?? SYSTEMONE_TIMEOUT_MS
+  const token = options.token?.trim() || ''
   const degradeAfter = options.degradeAfter ?? SYSTEMONE_DEGRADE_FAILURES
   const fetchImpl = options.fetch ?? globalThis.fetch
   const now = options.now ?? (() => new Date())
+  const slot = createRuntimeSlot(options.enabled ?? true)
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token !== '') headers.Authorization = 'Bearer ' + token
 
   return {
+    runtimeState: () => slotState(slot),
     async judge(state, questions, signal) {
       const keys = Object.keys(questions)
       if (keys.length === 0) {
         return { ok: false, reason: 'no-questions', message: 'systemone 需要至少一个问题' }
       }
-      // 配置态关闭：不尝试调用（AC:674 的配置态降级由调用方按 enabled 分支，这里兜底）。
-      if (!runtimeEnabled) {
+      // 配置态关闭：不尝试调用（AC:674：由调用方直接回落 ctx.llm，这里只兜底）。
+      if (!slot.enabled) {
         return { ok: false, reason: 'disabled-by-config', message: 'systemOne.enabled = false' }
       }
       let response: Response
       try {
         response = await fetchImpl(url, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({ model, state, questions }),
+          // 客户端自己的超时与调用方预算取并集：调用方中止（abort）不计入降级计数。
           signal: AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        markFailure('request-failed', degradeAfter, now)
-        return { ok: false, reason: 'request-failed', message }
+        // 评审 P4（T23）：调用方预算耗尽（abort）不是端点故障——LLM 慢会把健康的 System One
+        // 推进降级，只要 3 次候选都超预算即可。只有真正的端点不可达才记失败。
+        if (!signal.aborted) markFailure(slot, 'request-failed', degradeAfter, now)
+        return { ok: false, reason: signal.aborted ? 'aborted-by-caller' : 'request-failed', message }
       }
       if (!response.ok) {
         const reason = 'http-' + response.status
-        markFailure(reason, degradeAfter, now)
+        markFailure(slot, reason, degradeAfter, now)
         return { ok: false, reason, message: 'systemone HTTP ' + response.status }
       }
       let body: unknown
       try {
         body = await response.json()
       } catch {
-        markFailure('bad-json', degradeAfter, now)
+        markFailure(slot, 'bad-json', degradeAfter, now)
         return { ok: false, reason: 'bad-json', message: 'systemone 响应不是合法 JSON' }
       }
       const parsed = readAnswers(body, keys)
       if (!parsed.ok) {
-        markFailure(parsed.reason, degradeAfter, now)
+        markFailure(slot, parsed.reason, degradeAfter, now)
         return parsed
       }
-      markSuccess()
+      markSuccess(slot)
       return parsed
     },
   }
