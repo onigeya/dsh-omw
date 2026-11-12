@@ -105,6 +105,9 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     // Story 2.4 / U5 + 评审 P16（T17）：**固定期望值**，不复刻生产 SQL 现算期望——
     // 否则生产过滤条件写错时，测试会跟着一起错。本用例之前本文件只写了一条 L1 记忆
     //（且不带向量），所以 L1 与「未嵌入」都恒为 1；顺序变化会立刻变红，这是有意的。
+    // Story 2.6 / F2：`memory_remember` 工具写的是**没有 source_refs 的 L1 节点**（Epic 1 手动
+    // 写路径），按 AD-19 它构成 1 条 EII 违例（无 L0 前驱可达），故 evidence_gap 追加一行；
+    // 漂移为 0（无 source_refs 可漂）。related_skipped 为 0，不渲染。
     expect(result?.kind).toBe('success')
     expect(result?.text).toBe([
       '记忆状态',
@@ -116,6 +119,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'audit_gap: 0',
       'embedding: enabled（未嵌入 1 条）',
       'readonly: false',
+      'evidence_gap: 1（EII 1 / 漂移 0）',
     ].join('\n'))
   })
 
