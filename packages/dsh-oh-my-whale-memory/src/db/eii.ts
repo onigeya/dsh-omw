@@ -19,6 +19,7 @@
  * 但未被官方文档承诺；LadybugDB 升级（AD-3 四条件）时必须回归本模块的三条路径查询。
  */
 import type * as lbug from '@ladybugdb/core'
+import { MemoryDbError } from './errors.js'
 import { collectRows } from './rows.js'
 import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
 
@@ -71,30 +72,45 @@ const ALL_DIRECT_IN_EDGES = [
 
 const EDGE_TABLE_PROBE = "CALL table_info('" + EVIDENCE_TABLE + "') RETURN name"
 
+/**
+ * UTC ISO-8601 时刻（与库内时间列同形）。闭包谓词里的时刻必须**内联成字面量**：
+ * 0.22.3 的解析器在 `all(x IN nodes(p) WHERE …)` 里遇到参数表达式会直接
+ * 触发内部断言（`parsed_parameter_expression.h: UNREACHABLE_CODE`）——实测踩到过。
+ * 故这里先严格校验形状再内联，绝不把未校验的外部字符串拼进 SQL。
+ */
+const ISO_INSTANT_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?Z$/
+
+function sqlInstant(now: string): string {
+  if (!ISO_INSTANT_PATTERN.test(now)) {
+    throw new MemoryDbError('invalid_instant', '时间参数不是合法 UTC ISO-8601 时刻：' + now)
+  }
+  return "'" + now + "'"
+}
+
 /** 路径谓词（显式按标签，见文件头）：l0_raw 判非墓碑，memory 判 AD-19 三条件。 */
-function pathPredicate(): string {
+function pathPredicate(nowLiteral: string): string {
   return [
     '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND x.raw_text IS NOT NULL)',
-    '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND x.valid_at <= $now AND x.invalid_at IS NULL AND x.expired_at IS NULL)',
+    '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND x.valid_at <= ' + nowLiteral + ' AND x.invalid_at IS NULL AND x.expired_at IS NULL)',
   ].join('\n')
 }
 
 /** 单候选：至少一条有效且可达的向下路径直到 L0（2.5 判据②）。 */
-function reachableToIdStatement(): string {
+function reachableToIdStatement(nowLiteral: string): string {
   return [
     'MATCH p = (l0:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ' {id: $id})',
     'WHERE all(x IN nodes(p) WHERE',
-    pathPredicate() + ')',
+    pathPredicate(nowLiteral) + ')',
     'RETURN count(p) AS c',
   ].join('\n')
 }
 
 /** 全库正集：能从非墓碑 L0 走到、且链上节点有效的记忆 id 集。 */
-function reachableIdsStatement(): string {
+function reachableIdsStatement(nowLiteral: string): string {
   return [
     'MATCH p = (l0:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ')',
     'WHERE all(x IN nodes(p) WHERE',
-    pathPredicate() + ')',
+    pathPredicate(nowLiteral) + ')',
     'RETURN DISTINCT m.id AS id',
   ].join('\n')
 }
@@ -140,7 +156,7 @@ export async function checkReachableToL0(
   const edgeRows = await queryRows(connection, DIRECT_IN_EDGE_COUNT, { id })
   const inEdges = Number(edgeRows[0]?.c ?? 0)
   if (!(inEdges > 0)) return { id, pass: false, failingReasons: ['no-evidence-edge'] }
-  const pathRows = await queryRows(connection, reachableToIdStatement(), { id, now })
+  const pathRows = await queryRows(connection, reachableToIdStatement(sqlInstant(now)), { id })
   const paths = Number(pathRows[0]?.c ?? 0)
   if (!(paths > 0)) return { id, pass: false, failingReasons: ['no-valid-path-to-l0'] }
   return { id, pass: true, failingReasons: [] }
@@ -174,7 +190,7 @@ export async function checkRefReachableToL0(
  */
 export async function computeEiiViolations(connection: lbug.Connection, now: string): Promise<string[]> {
   const effective = await queryRows(connection, EFFECTIVE_MEMORY_IDS, { now })
-  const reachable = await queryRows(connection, reachableIdsStatement(), { now })
+  const reachable = await queryRows(connection, reachableIdsStatement(sqlInstant(now)))
   const reach = new Set(reachable.map((row) => String(row.id)))
   return effective.map((row) => String(row.id)).filter((id) => !reach.has(id))
 }
