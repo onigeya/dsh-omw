@@ -12,7 +12,7 @@ import { afterAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { writeDeduplicatedMemory } from '../src/db/dedup'
 import { memoryNodeId } from '../src/db/id'
-import { upsertMemory } from '../src/db/memory'
+import { upsertMemory, type MemoryConnection } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/rows'
 import { runInTransaction } from '../src/db/transaction'
@@ -75,6 +75,28 @@ async function readAudit(store: MemoryDatabase, action: string): Promise<Array<{
     `MATCH (g:generation_log) WHERE g.action = '${action}' RETURN g.reason AS reason, g.outcome AS outcome`,
   )
   return rows.map((row) => ({ reason: String(row.reason ?? ''), outcome: String(row.outcome ?? '') }))
+}
+
+/**
+ * 统计（或在特定语句上抛错）的代理连接：只拦截 `prepare`，其余方法一律绑回真实连接。
+ * 评审 P15 / T16：只断言结果时，「把 ANN 段挪到判空之前再丢结果」仍会全绿——必须直接数查询。
+ */
+function proxyConnection(
+  real: MemoryConnection,
+  onPrepare?: (statement: string) => void,
+): MemoryConnection {
+  return new Proxy(real, {
+    get(target, prop, receiver) {
+      if (prop === 'prepare') {
+        return async (statement: string) => {
+          onPrepare?.(statement)
+          return target.prepare(statement)
+        }
+      }
+      const value = Reflect.get(target, prop, receiver) as unknown
+      return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value
+    },
+  }) as MemoryConnection
 }
 
 afterAll(cleanupTempDirs)
@@ -253,7 +275,7 @@ describe('writeDeduplicatedMemory（Story 2.4 三路去重）', () => {
     }
   })
 
-  it('U8 无向量整段跳过：库里有近似节点也只写新节点（不查 ANN）', async () => {
+  it('U8 无向量整段跳过：库里有近似节点也只写新节点，且一次 ANN 查询都不发（P15 spy 钉住）', async () => {
     const store = await openDb('omw-dd-novec-')
     try {
       await upsertMemory(store.connection, {
@@ -262,7 +284,14 @@ describe('writeDeduplicatedMemory（Story 2.4 三路去重）', () => {
         embedding: vectorWithCosine(0.99),
         sourceRefs: ['m1'],
       })
-      const result = await writeDedup(store, { layer: LAYER, text: '无向量表述', embedding: null, sourceRefs: ['m2'] })
+      let annQueries = 0
+      const conn = proxyConnection(store.connection, (statement) => {
+        if (statement.includes('QUERY_VECTOR_INDEX')) annQueries += 1
+      })
+      const result = await runInTransaction(store.connection, () =>
+        writeDeduplicatedMemory(conn, { layer: LAYER, text: '无向量表述', embedding: null, sourceRefs: ['m2'] }),
+      )
+      expect(annQueries).toBe(0)
       expect(result.outcome).toBe('created')
       expect(await nodeCount(store)).toBe(2)
       expect(await readAudit(store, 'merge_semantic')).toHaveLength(0)

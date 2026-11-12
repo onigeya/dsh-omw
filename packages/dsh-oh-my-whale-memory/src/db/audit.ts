@@ -74,6 +74,12 @@ export const INVALIDATE_VERSION_ACTION = 'invalidate_version'
 /** NULL 向量回填（Story 2.4 / U5）：写者启动时为无向量节点补齐 embedding 三列。 */
 export const BACKFILL_EMBEDDING_ACTION = 'backfill_embedding'
 
+/**
+ * 墓碑复活（Story 2.4 评审 P1）：指纹命中一个被路径③作废的旧版本时清 invalid_at 并提 valid_at。
+ * 同时承载「用户已 forget ⇒ 不复活」的 uncertain 记录（同一 action、outcome 区分）。
+ */
+export const RESURRECT_MEMORY_ACTION = 'resurrect_memory'
+
 /** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
 export const DIRECT_CASCADE_DEPTH = 0
 

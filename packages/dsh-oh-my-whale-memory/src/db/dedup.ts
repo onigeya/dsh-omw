@@ -12,14 +12,27 @@
  *
  * 判定前置（U8）：`embedding` 缺省/null（Epic 1 直写、写时嵌入失败、embedding disabled）时
  * **整段跳过** ANN——不查库、不发网络，只走路径①。库内 pin 的 dim 缺失或与本次向量长度不符时
- * 同样跳过：绝不把未校验的维度拼进语句。
+ * 同样跳过 ANN，并且**剥离向量再写**（评审 P5）：绝不把未校验长度的向量绑进 FLOAT[dim]，
+ * 那是必抛错、并把调用方整个事务（一条精炼的全部事实）一起回滚的写法。
  *
- * 审计（U10，沿用写路径既有先例）：路径②写 `merge_semantic`、路径③写 `invalidate_version`，
- * 均 kind='capture'、policy=DEFAULT_CAPTURE_POLICY，reason 写明相似度/距离与阈值。
+ * 路径①的墓碑语义（评审 P1，EC-1）：指纹命中一个**已被路径③作废**的节点时必须**复活**它
+ * （清 invalid_at、valid_at 提到本次事实的时间，其余按既有 MERGE 语义合并）——id 由
+ * uuid5(layer:归一化文本) 决定，同文本无法生成第二个 id，不复活等于把重申的事实永久丢出 recall。
+ * 命中一个 **expired_at 置位**的节点（用户显式 forget，prd.md:293）则**不复活**：用户删除优先，
+ * 只记一条 uncertain 审计供 7.2 过滤。
+ *
+ * 审计（U10，沿用写路径既有先例）：路径①复活写 `resurrect_memory`、路径②写 `merge_semantic`、
+ * 路径③写 `invalidate_version`，均 kind='capture'、policy=DEFAULT_CAPTURE_POLICY，reason 写明
+ * 相似度/阈值与前值。
  * AD-10 置序：**同一事务内先写 log、后写节点/指针**（本原语不自开事务——必须由调用方开，
  * 与 writeMemoryVersion 同一契约；直接调 upsertMemory 会在事务内重入）。
- * 本 story **刻意不用 keyed_decision**：AD-18 的键式裁决属 Story 2.6 的核实/裁决范围，
- * 2.4 只做写入去重，复用既有 generation_log 15 列即可。
+ *
+ * 路径③还必须落一条 **keyed_decision**（评审 P4，Lead 改裁）：原裁决以为 2.4 不做裁决，但漏看
+ * 了用户可见后果——audit_gap 的判据是「已失效且无 `old_id = m.id` 的裁决行」，只写
+ * generation_log 会让**每一次正常版本替换都永久计入 audit_gap**（/memory status 单调上涨的假警报）。
+ * 故此处显式给出 action='supersede' + resolutionSource='auto' + policy=DEFAULT_CAPTURE_POLICY；
+ * audit.ts 早已预定义这三档，并注明「真出现版本写入时由裁决方显式给出 policy」。
+ * AD-18 的**读侧**裁决仍属 Story 2.6，本原语只负责把这次替代写成可重建的证据。
  *
  * 阈值语义（U7）：0.97 与 0.90 均为**自定初值**，原『取自 Hindsight 实测』已作废，
  * 待首周冒烟用真实语料标定——改动只允许动本文件的常量。
@@ -30,11 +43,16 @@ import {
   DEFAULT_CAPTURE_POLICY,
   INVALIDATE_VERSION_ACTION,
   MERGE_SEMANTIC_ACTION,
+  RESURRECT_MEMORY_ACTION,
+  buildJudgeKey,
   insertGenerationLog,
+  insertKeyedDecision,
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import {
+  DEFAULT_MEMORY_KIND,
+  DEFAULT_MEMORY_PRIORITY,
   getMemoryById,
   writeMemoryVersion,
   type MemoryConnection,
@@ -99,8 +117,7 @@ const ANN_CANDIDATE_STATEMENT = [
   '  AND node.valid_at <= $now AND node.recorded_at <= $now',
   '  AND node.invalid_at IS NULL AND node.expired_at IS NULL',
   '  AND distance <= $max_distance',
-  'RETURN node.id AS id, node.source_refs AS source_refs,',
-  '       node.invalid_at AS invalid_at, node.expired_at AS expired_at',
+  'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at',
   'ORDER BY distance',
 ].join('\n')
 
@@ -118,11 +135,25 @@ const INVALIDATE_NODE_STATEMENT = [
   'RETURN m.id AS id',
 ].join('\n')
 
+/**
+ * 路径①的复活（评审 P1）：清 invalid_at、把 valid_at 提到本次事实的时间；其余按既有 MERGE
+ * 语义——合并 source_refs、kind/priority 取最新、recorded_at 仍取最早。
+ */
+const RESURRECT_NODE_STATEMENT = [
+  `MATCH (m:${MEMORY_TABLE})`,
+  'WHERE m.id = $id',
+  'SET m.invalid_at = null, m.valid_at = $valid_at,',
+  '  m.source_refs = list_distinct(list_concat(m.source_refs, $source_refs)),',
+  '  m.kind = $kind, m.priority = $priority,',
+  '  m.recorded_at = CASE WHEN $recorded_at < m.recorded_at THEN $recorded_at ELSE m.recorded_at END',
+  'RETURN m.id AS id, m.recorded_at AS recorded_at',
+].join('\n')
+
 interface DedupCandidate {
   id: string
   sourceRefs: string[]
-  invalidAt: string | null
-  expiredAt: string | null
+  /** 旧节点自身的 valid_at（评审 P3）：作废上界必须不早于它，否则造出倒置区间。 */
+  validAt: string | null
   similarity: number
 }
 
@@ -143,8 +174,11 @@ async function queryRows(
   return collectRows(await connection.execute(prepared, params))
 }
 
-/** 库内 pin 的 embedding 维度；缺失或非正整数一律 null（不信任库外输入）。 */
-async function readPinnedEmbeddingDim(connection: MemoryConnection): Promise<number | null> {
+/**
+ * 库内 pin 的 embedding 维度；缺失或非正整数一律 null（不信任库外输入）。
+ * 导出给回填复用（评审 P9④：回填每轮也要按库内 pin 的维度校验向量长度，不复制这份判据）。
+ */
+export async function readPinnedEmbeddingDim(connection: MemoryConnection): Promise<number | null> {
   const rows = await queryRows(
     connection,
     `MATCH (m:${META_TABLE}) WHERE m.key = $key RETURN m.value AS value`,
@@ -156,21 +190,16 @@ async function readPinnedEmbeddingDim(connection: MemoryConnection): Promise<num
   return Number.isInteger(parsed) && parsed >= 1 ? parsed : null
 }
 
-/** 精确余弦复核（U4）：`array_cosine_similarity` + CAST 到库内 pin 的 dim，不用 float32 近似值。 */
-async function preciseSimilarity(
-  connection: MemoryConnection,
-  id: string,
-  vector: readonly number[],
-  dim: number,
-): Promise<number> {
-  const rows = await queryRows(
-    connection,
+/**
+ * 精确余弦复核（U4）的语句：`array_cosine_similarity` + CAST 到库内 pin 的 dim，不用 float32 近似值。
+ * 语句只随 dim 变，故在候选循环外 **prepare 一次、循环内复用**（评审 P7：原先每条候选各 prepare
+ * 一次，k=20 时单事务最坏 ~170 次往返，而且全程持写锁）。
+ */
+function preciseSimilarityStatement(dim: number): string {
+  return (
     `MATCH (m:${MEMORY_TABLE}) WHERE m.id = $id ` +
-      `RETURN array_cosine_similarity(m.embedding, CAST($q AS FLOAT[${dim}])) AS sim`,
-    { id, q: [...vector] },
+    `RETURN array_cosine_similarity(m.embedding, CAST($q AS FLOAT[${dim}])) AS sim`
   )
-  const sim = rows[0]?.sim
-  return typeof sim === 'number' ? sim : Number(sim ?? 0)
 }
 
 /** 同 layer（U6）+ 仍有效的候选；逐条再算精确相似度。 */
@@ -186,15 +215,17 @@ async function findSemanticCandidates(
     now: input.nowIso,
     max_distance: SEMANTIC_WINDOW_MAX_DISTANCE,
   })
+  const precise = await connection.prepare(preciseSimilarityStatement(input.dim))
   const candidates: DedupCandidate[] = []
   for (const row of rows) {
     const id = String(row.id)
+    const simRows = await collectRows(await connection.execute(precise, { id, q: [...input.vector] }))
+    const sim = simRows[0]?.sim
     candidates.push({
       id,
       sourceRefs: toStringArray(row.source_refs),
-      invalidAt: nullishString(row.invalid_at),
-      expiredAt: nullishString(row.expired_at),
-      similarity: await preciseSimilarity(connection, id, input.vector, input.dim),
+      validAt: nullishString(row.valid_at),
+      similarity: typeof sim === 'number' ? sim : Number(sim ?? 0),
     })
   }
   return candidates
@@ -207,20 +238,12 @@ function hasSourceRefOverlap(left: readonly string[], right: readonly string[]):
   return right.some((ref) => seen.has(ref))
 }
 
-/**
- * 旧版本的 invalid_at（X4，照 AD-19:177）：新旧事实区间**重叠**时对齐**触发事实的 valid_at**
- * （即新节点 valid_at），**不重叠**才用 now。旧节点仍有效时其区间上界为无穷，必然重叠。
+/*
+ * X4 收窄（评审 P3）：候选谓词已经排除 invalid_at / expired_at 非空的节点，所以旧版本此刻
+ * **必无上界区间**——原实现里「不重叠 ⇒ 用 now」的分支不可达（也没有任何测试能钉住），已删除。
+ * 保留的实质要求是「invalid_at 对齐触发事实的 valid_at，且绝不早于旧节点自身 valid_at」，
+ * 见路径③的 `invalidAt = newValidAt > oldValidAt ? newValidAt : oldValidAt`。
  */
-function computeInvalidationAt(
-  oldInvalidAt: string | null,
-  oldExpiredAt: string | null,
-  newValidAt: string,
-  nowIso: string,
-): string {
-  const oldEnd = oldInvalidAt ?? oldExpiredAt
-  if (oldEnd !== null && newValidAt >= oldEnd) return nowIso
-  return newValidAt
-}
 
 /** 路径②：向既有节点追加 source_refs，返回其 recorded_at。 */
 async function mergeSourceRefs(
@@ -252,6 +275,50 @@ async function invalidateMemoryNode(
 }
 
 /**
+ * 无向量写入（评审 P5）：三条「跳过 ANN」的分支共用同一实现，**绝不**把未校验长度的向量
+ * 交给 writeMemoryVersion（那会绑进 FLOAT[dim] 并抛错回滚调用方整个事务）。
+ */
+async function writeNoVector(
+  connection: MemoryConnection,
+  input: UpsertMemoryInput,
+  options?: DedupOptions,
+): Promise<{ id: string; recordedAt: string }> {
+  const written = await writeMemoryVersion(
+    connection,
+    { ...input, embedding: null, embeddingModelId: null },
+    options,
+  )
+  return { id: written.id, recordedAt: written.recordedAt }
+}
+
+/** 路径①的复活：清 invalid_at + 提 valid_at，返回节点最终 recorded_at（保留最早）。 */
+async function resurrectMemoryNode(
+  connection: MemoryConnection,
+  input: {
+    id: string
+    validAt: string
+    sourceRefs: readonly string[]
+    kind?: string | null
+    priority?: number | null
+    recordedAt: string
+  },
+): Promise<string> {
+  const rows = await queryRows(connection, RESURRECT_NODE_STATEMENT, {
+    id: input.id,
+    valid_at: input.validAt,
+    source_refs: [...input.sourceRefs],
+    kind: input.kind ?? DEFAULT_MEMORY_KIND,
+    priority: Math.trunc(input.priority ?? DEFAULT_MEMORY_PRIORITY),
+    recorded_at: input.recordedAt,
+  })
+  const row = rows[0]
+  if (row === undefined) {
+    throw new MemoryDbError('db_open_failed', `复活未命中节点（id=${input.id}）`)
+  }
+  return String(row.recorded_at)
+}
+
+/**
  * 写入一条记忆并按去重双路径归并（Story 2.4）。
  *
  * **必须由调用方开启事务**（与 writeMemoryVersion 同一契约）——三条路径都可能同时写
@@ -266,24 +333,78 @@ export async function writeDeduplicatedMemory(
   const nowIso = now.toISOString()
   const newValidAt = input.validAt ?? nowIso
   const sourceRefs = (input.sourceRefs ?? []).map(String)
-  const id = memoryNodeId(input.layer, input.text)
+  // 评审 P8：入口一次性归一化 layer，id 与 ANN 谓词共用同一个值。原先 id 用未 trim 的
+  // input.layer、ANN 谓词用 trim 后的值，writeMemoryVersion 的属性也用 trim 后的值 ⇒
+  // 含空白的 layer 会出现「id 归属 A 层、属性与 ANN 在 B 层」的分叉。
+  const layer = input.layer.trim()
+  const id = memoryNodeId(layer, input.text)
 
-  // ---- 路径①：指纹幂等（FR-15 路径①）----
+  // ---- 向量可用性（评审 P5 / EC-5）：绑进 FLOAT[dim] 之前先把长度校验掉 ----
+  // 原先「维度失配」分支只跳过 ANN、仍把原 input 交给 writeMemoryVersion ⇒ 未校验长度的向量被绑进
+  // FLOAT[dim]，必然抛错并回滚调用方整个事务（一条精炼的全部事实一起丢）。校验提到三条路径之前后，
+  // **本函数内任何写入都只绑已验证长度的向量**（指纹命中路径同样受保护）。
+  const vector = input.embedding == null ? null : Array.from(input.embedding, (value) => Number(value))
+  const dim = vector === null || vector.length === 0 ? null : await readPinnedEmbeddingDim(connection)
+  if (vector !== null && vector.length > 0 && (dim === null || dim !== vector.length)) {
+    options?.logger?.warn(
+      dim === null
+        ? `语义去重跳过：库内未 pin embedding 维度，本次向量长度=${vector.length}`
+        : `语义去重跳过：库内 pin 的 dim=${dim}，本次向量长度=${vector.length}`,
+    )
+  }
+  // embedding 为 null 时原样传（写入语句本就不绑三列）；空数组或维度不可用时剥离，绝不带未校验向量。
+  const writeInput: UpsertMemoryInput =
+    input.embedding == null || (vector !== null && vector.length > 0 && dim === vector.length)
+      ? input
+      : { ...input, embedding: null, embeddingModelId: null }
+
+  // ---- 路径①：指纹幂等（FR-15 路径①）+ 墓碑语义（评审 P1）----
   const existing = await getMemoryById(connection, id)
   if (existing !== null) {
-    const written = await writeMemoryVersion(connection, input, options)
+    if (existing.expiredAt !== null) {
+      // 用户显式 forget（prd.md:293）优先于自动复活：保留失效态，只记一条 uncertain 供 7.2 过滤。
+      await insertGenerationLog(connection, {
+        recordedAt: nowIso,
+        actor: input.actor ?? 'system',
+        kind: CAPTURE_KIND,
+        action: RESURRECT_MEMORY_ACTION,
+        policy: DEFAULT_CAPTURE_POLICY,
+        l0Refs: sourceRefs,
+        outcome: 'uncertain',
+        reason: `skip-resurrect expired_at=${existing.expiredAt}`,
+      })
+      return { id: existing.id, recordedAt: existing.recordedAt, outcome: 'fingerprint-merge' }
+    }
+    if (existing.invalidAt !== null) {
+      // 被路径③作废的旧版本被重申：**复活**。同文本生成不出第二个 id，不复活就等于把这条
+      // 事实永久留在 recall 之外（评审 P1 / EC-1）。
+      await insertGenerationLog(connection, {
+        recordedAt: nowIso,
+        actor: input.actor ?? 'system',
+        kind: CAPTURE_KIND,
+        action: RESURRECT_MEMORY_ACTION,
+        policy: DEFAULT_CAPTURE_POLICY,
+        l0Refs: sourceRefs,
+        outcome: 'success',
+        reason: `revive previous_invalid_at=${existing.invalidAt}`,
+      })
+      const recordedAt = await resurrectMemoryNode(connection, {
+        id,
+        validAt: newValidAt,
+        sourceRefs,
+        kind: input.kind,
+        priority: input.priority,
+        recordedAt: input.recordedAt ?? nowIso,
+      })
+      return { id, recordedAt, outcome: 'fingerprint-merge' }
+    }
+    const written = await writeMemoryVersion(connection, writeInput, options)
     return { id: written.id, recordedAt: written.recordedAt, outcome: 'fingerprint-merge' }
   }
 
-  // ---- 路径②③前置：无向量整段跳过（U8：不查库、不发网络）----
-  const vector = input.embedding == null ? null : Array.from(input.embedding, (value) => Number(value))
-  if (vector === null || vector.length === 0) {
-    const written = await writeMemoryVersion(connection, input, options)
-    return { id: written.id, recordedAt: written.recordedAt, outcome: 'created' }
-  }
-  const dim = await readPinnedEmbeddingDim(connection)
-  if (dim === null || dim !== vector.length) {
-    const written = await writeMemoryVersion(connection, input, options)
+  // ---- 路径②③前置：无向量 / 维度不可用 ⇒ 整段跳过（U8：不查库、不发网络）----
+  if (vector === null || vector.length === 0 || dim === null || dim !== vector.length) {
+    const written = await writeNoVector(connection, input, options)
     return { id: written.id, recordedAt: written.recordedAt, outcome: 'created' }
   }
 
@@ -291,7 +412,7 @@ export async function writeDeduplicatedMemory(
   let candidates: DedupCandidate[] = []
   try {
     candidates = await findSemanticCandidates(connection, {
-      layer: input.layer.trim(),
+      layer,
       vector,
       dim,
       selfId: id,
@@ -305,7 +426,13 @@ export async function writeDeduplicatedMemory(
   }
 
   // ---- 路径②：语义重复（cosine ≥ 0.97）----
-  const duplicate = candidates.find((candidate) => candidate.similarity >= SEMANTIC_DUP_THRESHOLD)
+  // 评审 P6：ANN 只给 ORDER BY distance 的粗排，精确复核后次序可能变——按**精确** similarity
+  // 取最大，不能依赖候选数组的顺序。
+  const duplicates = candidates.filter((candidate) => candidate.similarity >= SEMANTIC_DUP_THRESHOLD)
+  const duplicate =
+    duplicates.length === 0
+      ? undefined
+      : duplicates.reduce((best, candidate) => (candidate.similarity > best.similarity ? candidate : best))
   if (duplicate !== undefined) {
     await insertGenerationLog(connection, {
       recordedAt: nowIso,
@@ -345,8 +472,12 @@ export async function writeDeduplicatedMemory(
   }
   const oldVersion = versionHits[0]
   if (oldVersion !== undefined) {
-    const invalidAt = computeInvalidationAt(oldVersion.invalidAt, oldVersion.expiredAt, newValidAt, nowIso)
-    // AD-10 置序：先写 log，再动作废指针与新建节点。
+    // X4（评审 P3）：候选谓词已排除 invalid_at / expired_at 非空的节点，旧版本此刻必无上界区间，
+    // 所以 invalid_at 对齐**触发事实的 valid_at**；同时绝不早于旧节点自身 valid_at（EC-2 的
+    // 倒置区间：2.5 复用本原语时可能传入更早的 validAt）。
+    const oldValidAt = oldVersion.validAt ?? newValidAt
+    const invalidAt = newValidAt > oldValidAt ? newValidAt : oldValidAt
+    // AD-10 置序：先写 log，再写键式裁决，再动作废指针，最后写新节点。
     await insertGenerationLog(connection, {
       recordedAt: nowIso,
       actor: input.actor ?? 'system',
@@ -359,8 +490,26 @@ export async function writeDeduplicatedMemory(
         `version-presentation similarity=${oldVersion.similarity.toFixed(4)} ` +
         `window=[${VERSION_AFFINITY_MIN_SIMILARITY},${SEMANTIC_DUP_THRESHOLD}) invalid_at=${invalidAt}`,
     })
+    // 评审 P4：这次版本替换必须留下**可重建的键式裁决**，否则 AUDIT_GAP_STATEMENT
+    //（已失效且无 k.old_id = m.id 的裁决行）会把每一次正常替换都永久计成缺口。
+    await insertKeyedDecision(connection, {
+      judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, oldVersion.id, id),
+      newId: id,
+      oldId: oldVersion.id,
+      action: 'supersede',
+      policy: DEFAULT_CAPTURE_POLICY,
+      l0Refs: sourceRefs,
+      resolutionSource: 'auto',
+      ts: nowIso,
+    })
     await invalidateMemoryNode(connection, oldVersion.id, invalidAt)
-    const written = await writeMemoryVersion(connection, { ...input, parentId: oldVersion.id }, options)
+    // 评审 P2：把本次算定的 validAt 显式传给写入（否则 writeMemoryVersion 会再读一次时钟 T2，
+    // 新节点 valid_at = T2 ≥ T1 = invalid_at，X4 的对齐就只落到毫秒级巧合上）。
+    const written = await writeMemoryVersion(
+      connection,
+      { ...input, validAt: newValidAt, parentId: oldVersion.id },
+      options,
+    )
     return {
       id: written.id,
       recordedAt: written.recordedAt,

@@ -100,29 +100,21 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
   it('status 走正常路径：真实库上返回 success 与四层计数（Story 1.9，不再是 usage error）', async () => {
     // Story 1.11 层收敛后：本文件的写入全部落在 L1（实时计数，与用例顺序无关）；
     // L1_INBOX 只是 INBOX 队列标识的历史计数位，本文件不再有写入命中它，故恒 0。
-    const rows = await queryAll(connection, "MATCH (m:memory {layer: 'L1'}) RETURN count(m) AS total")
-    const l1Count = Number(rows[0]!['total'])
-
     const result = await registered?.handler({ rawInput: ' status' })
 
-    // Story 2.4 / U5：本文件的写入都不带向量，status 的 embedding 行会追加「未嵌入 N 条」。
-    // N 现算（口径 = 仍有效且 embedding IS NULL），与用例执行顺序无关。
-    const unembeddedRows = await queryAll(
-      connection,
-      'MATCH (m:memory) WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL RETURN count(m) AS total',
-    )
-    const unembedded = Number(unembeddedRows[0]?.['total'] ?? 0)
-
+    // Story 2.4 / U5 + 评审 P16（T17）：**固定期望值**，不复刻生产 SQL 现算期望——
+    // 否则生产过滤条件写错时，测试会跟着一起错。本用例之前本文件只写了一条 L1 记忆
+    //（且不带向量），所以 L1 与「未嵌入」都恒为 1；顺序变化会立刻变红，这是有意的。
     expect(result?.kind).toBe('success')
     expect(result?.text).toBe([
       '记忆状态',
-      `L1: ${l1Count}`,
+      'L1: 1',
       'L2: 0',
       'L1_INBOX: 0',
       'L2_INBOX: 0',
       'failed: 0',
       'audit_gap: 0',
-      unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
+      'embedding: enabled（未嵌入 1 条）',
       'readonly: false',
     ].join('\n'))
   })

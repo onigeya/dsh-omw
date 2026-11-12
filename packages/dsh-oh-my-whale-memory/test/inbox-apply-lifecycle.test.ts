@@ -22,6 +22,10 @@ import { cleanupTempDirs, makeTempDir } from './tmp'
 const DIM = 4
 const MODEL_ID = 'bge-m3'
 const EMBEDDING_CONFIG = { embedding: { token: 'sk-test', model: MODEL_ID, dim: DIM } }
+/** P11（T12/VG-3）：enabled 需要 endpoint（config.ts:139-148 起 endpoint 是必要项）。 */
+const EMBEDDING_CONFIG_ENABLED = {
+  embedding: { endpoint: 'http://127.0.0.1:1/v1', token: 'sk-test', model: MODEL_ID, dim: DIM },
+}
 const at = (seconds: number): Date => new Date(Date.UTC(2026, 10, 11, 0, 0, seconds))
 
 /** createInboxConsumer 的捕获点：证明 apply 把哪个 gate 交给了消费者（V3）。 */
@@ -254,3 +258,22 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     const after = await queryAll(store.connection, "MATCH (l:l0_raw) WHERE l.actor = 'apply-flush' RETURN l.id AS id")
     expect(after).toHaveLength(1)
   }, 60_000)
+
+describe('P11/VG-3：U5 回填的 apply 级接线（enabled 接线为 maintenance，disabled 完全不接）', () => {
+  it('embedding enabled ⇒ 消费者拿到 maintenance 函数；disabled ⇒ undefined', async () => {
+    const enabledDir = await makeTempDir('omw-bf-wire-on-')
+    captured.options = undefined
+    const on = makeCtx(enabledDir)
+    await plugin.apply(on.ctx, EMBEDDING_CONFIG_ENABLED)
+    // 删掉 index.ts:455 的 maintenance 那一行，这里立刻变红。
+    expect(typeof captured.options?.maintenance).toBe('function')
+    ;(captured.consumer as { stop(): void } | undefined)?.stop()
+
+    const disabledDir = await makeTempDir('omw-bf-wire-off-')
+    captured.options = undefined
+    const off = makeCtx(disabledDir)
+    await plugin.apply(off.ctx, EMBEDDING_CONFIG)
+    expect(captured.options?.maintenance).toBeUndefined()
+    ;(captured.consumer as { stop(): void } | undefined)?.stop()
+  }, 60_000)
+})
