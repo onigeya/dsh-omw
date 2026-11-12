@@ -105,6 +105,14 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
 
     const result = await registered?.handler({ rawInput: ' status' })
 
+    // Story 2.4 / U5：本文件的写入都不带向量，status 的 embedding 行会追加「未嵌入 N 条」。
+    // N 现算（口径 = 仍有效且 embedding IS NULL），与用例执行顺序无关。
+    const unembeddedRows = await queryAll(
+      connection,
+      'MATCH (m:memory) WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL RETURN count(m) AS total',
+    )
+    const unembedded = Number(unembeddedRows[0]?.['total'] ?? 0)
+
     expect(result?.kind).toBe('success')
     expect(result?.text).toBe([
       '记忆状态',
@@ -114,7 +122,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'L2_INBOX: 0',
       'failed: 0',
       'audit_gap: 0',
-      'embedding: enabled',
+      unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
       'readonly: false',
     ].join('\n'))
   })

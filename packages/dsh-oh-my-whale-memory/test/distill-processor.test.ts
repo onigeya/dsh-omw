@@ -203,10 +203,18 @@ describe('评审补钉（T3 / T7 / T20 / P4 追加项）', () => {
   it('评审 T20：facts 超过单请求上限时按 EMBEDDING_MAX_BATCH 分批（客户端被调 2 次）', async () => {
     const item = await claimFixture('embed-batch', '原文')
     const batches: number[] = []
+    // Story 2.4 起写入去重按 cosine 合并节点：本用例必须给 9 条事实**互不相似**的向量，
+    // 否则同向量事实会合并成 1 个节点。取 4 维超立方体的 9 个顶点：两两 |cos| ≤ 0.5
+    // ⇒ distance ≥ 0.5 > ANN 粗筛上界 0.1001，既不合并也不触发版本链，且每条都带向量。
+    const cube = (index: number): number[] => {
+      const bits = index + 1
+      return [0, 1, 2, 3].map((axis) => (((bits >> axis) & 1) === 1 ? 0.5 : -0.5))
+    }
+    let cursor = 0
     const counting: EmbedClient = {
       embed: async (_model, input) => {
         batches.push(input.length)
-        return { ok: true, vectors: input.map(() => [1, 0, 0, 0]) }
+        return { ok: true, vectors: input.map(() => cube(cursor++)) }
       },
     }
     const facts = Array.from({ length: EMBEDDING_MAX_BATCH + 1 }, (_unused, index) => ({

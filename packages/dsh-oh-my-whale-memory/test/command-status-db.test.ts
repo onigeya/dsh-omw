@@ -101,10 +101,15 @@ async function setTombstone(column: 'invalid_at' | 'expired_at', id: string, at:
   await queryAll(connection, `MATCH (m:memory) WHERE m.id = '${id}' SET m.${column} = '${at}' RETURN m.id AS id`)
 }
 
-/** auditGap 缺省 1：主夹具里那条 L1 墓碑没有 keyed 裁决记录（AD-21 的差额）。 */
+/**
+ * auditGap 缺省 1：主夹具里那条 L1 墓碑没有 keyed 裁决记录（AD-21 的差额）。
+ * unembedded 缺省 0（Story 2.4 / U5）：>0 时 embedding 行追加「未嵌入 N 条」；
+ * 计数口径 = 仍有效（invalid_at / expired_at 均 NULL）且 embedding 为 NULL 的行。
+ */
 function statusText(
   overrides: Partial<Record<string, number>> = {},
   auditGap: number = 1,
+  unembedded: number = 0,
 ): string {
   return [
     '记忆状态',
@@ -114,7 +119,7 @@ function statusText(
     `L2_INBOX: ${overrides.L2_INBOX ?? 0}`,
     'failed: 0',
     `audit_gap: ${auditGap}`,
-    'embedding: enabled',
+    unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
     'readonly: false',
   ].join('\n')
 }
@@ -164,7 +169,8 @@ describe('AC1：层计数来自 memory.layer 的真实分布', () => {
     const result = await registered!.handler({ rawInput: ' status' })
 
     expect(result.kind).toBe('success')
-    expect(result.text).toBe(statusText())
+    // Story 2.4 / U5：6 条种子全无向量（那条 L1 墓碑已失效，不计入）。
+    expect(result.text).toBe(statusText({}, 1, 6))
   })
 
   it('计数读取不改变库内容（只读语义：再查一次层分布不变）', async () => {
@@ -331,7 +337,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'failed: 0',
         // 只读实例的库缺审计表（夹具不建）→ 差额不可用；队列表在（Story 2.2 起 status 读它算 failed）。
         'audit_gap: 未知（审计表缺失）',
-        'embedding: enabled',
+        // Story 2.4 / U5：只读夹具 4 条节点（L1×2 / L2×1 / L1_INBOX×1）全无向量。
+        'embedding: enabled（未嵌入 4 条）',
         `readonly: true, reason: '${READONLY_REASON}'`,
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
