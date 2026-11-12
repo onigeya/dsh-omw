@@ -18,8 +18,10 @@
  * 调用方（L2 提升处理器）据此 **throw**，由 INBOX 队列重试——**绝不**当成「判定不通过」。
  *
  * 降级（AC:674 / 裁决 U12）：连续 N=3 次失败打开降级开关，随后一次成功立即复原。
- * 「端点持续不可达」是**运行态**，故用模块级可变槽记录，由 /memory status 读取——
- * 不照抄 embeddingMode 那种「只在校验期 resolve 一次」的静态形态。
+ * 「端点持续不可达」是**运行态**，故用运行态槽记录、由 /memory status 读取——
+ * 不照抄 embeddingMode 那种「只在校验期 resolve 一次」的静态形态。该槽是**每个 client 实例
+ * 一份**（闭包内的 `RuntimeSlot`，见 `createRuntimeSlot`），不是模块级：模块级槽会被同进程里
+ * 第二次 apply 的配置同步覆盖，让第一实例的候选收到 `disabled-by-config` 而进死信（评审 P19/T45）。
  *
  * v1 不做调用层退避（裁决 U5）：单次尝试，`≤4 次` 预算全归任务层（INBOX attempts）。
  *
