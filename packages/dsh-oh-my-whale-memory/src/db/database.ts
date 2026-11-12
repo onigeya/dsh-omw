@@ -41,9 +41,11 @@ import {
   META_KEYS,
   MEMORY_TABLE,
   META_TABLE,
+  PARENT_ID_COLUMN,
   SCHEMA_VERSION,
   FTS_INDEX_NAME,
   VECTOR_INDEX_NAME,
+  alterMemoryAddParentIdStatement,
   assertEmbeddingDim,
   createFtsIndexStatement,
   createL0RawTableStatement,
@@ -264,6 +266,13 @@ async function initializeDatabase(
 
   await connection.query(createMetaTableStatement())
   await connection.query(createMemoryTableStatement(dim))
+  // Story 2.4（U1）：memory.parent_id 的旧库补列。新库由上面的 CREATE 直接带上；
+  // 旧库的 CREATE ... IF NOT EXISTS 是 no-op（实测不会加列），故用幂等 ALTER 补。
+  // `columns` 是建表**之前**读的列清单：新库为 null（跳过），旧库缺列才 ALTER。
+  // 只读实例走 initializeReadOnlyDatabase，不经过本函数——绝不执行任何写语句（AC2）。
+  if (columns !== null && !columns.has(PARENT_ID_COLUMN)) {
+    await connection.query(alterMemoryAddParentIdStatement())
+  }
   await connection.query(createL0RawTableStatement())
   await ensureAuditTables(connection)
   // Story 2.2：INBOX 队列表与审计表一样在唯一迁移点建（IF NOT EXISTS，幂等）。

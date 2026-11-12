@@ -83,6 +83,12 @@ export interface UpsertMemoryInput {
   sourceRefs?: readonly string[]
   /** 发起写入的主体（AD-21 三档），只进 generation_log 的 actor 列，不参与节点指纹；缺省 system。 */
   actor?: MemoryActor
+  /**
+   * 被作废的旧版本节点 id（Story 2.4 / U1、U10）：挂在**新节点**上，值 = 旧版本 id。
+   * 只有版本作废路径（sim∈[0.90,0.97) 且 source_refs 有交集）会传；其余写入省略。
+   * 写 memory.parent_id 列（旧库由初始化期幂等 ALTER 补出，见 database.ts）。
+   */
+  parentId?: string | null
 }
 
 export interface UpsertMemoryResult {
@@ -108,7 +114,8 @@ const UPSERT_STATEMENT = [
   `MERGE (m:${MEMORY_TABLE} {id: $id})`,
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
   '    m.embedding = $embedding, m.valid_at = $valid_at, m.recorded_at = $recorded_at,',
-  '    m.source_refs = $source_refs, m.embedding_model_id = $embedding_model_id, m.embedding_dim = $embedding_dim',
+  '    m.source_refs = $source_refs, m.embedding_model_id = $embedding_model_id, m.embedding_dim = $embedding_dim,',
+  '    m.parent_id = $parent_id',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -121,7 +128,8 @@ const UPSERT_STATEMENT = [
 const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
   `MERGE (m:${MEMORY_TABLE} {id: $id})`,
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
-  '    m.valid_at = $valid_at, m.recorded_at = $recorded_at, m.source_refs = $source_refs',
+  '    m.valid_at = $valid_at, m.recorded_at = $recorded_at, m.source_refs = $source_refs,',
+  '    m.parent_id = $parent_id',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -176,6 +184,7 @@ export async function writeMemoryVersion(
     valid_at: validAt,
     recorded_at: recordedAt,
     source_refs: sourceRefs,
+    parent_id: input.parentId ?? null,
   }
   if (embedding !== undefined) {
     params.embedding = embedding
