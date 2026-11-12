@@ -60,6 +60,8 @@ export interface InboxProcessorDeps {
   /** 写入 embedding_model_id 列的值（N4：失败时该列与 dim 留空）。 */
   readonly embeddingModelId?: string | null
   readonly timeoutMs?: number
+  /** 测试接缝：LLM 子预算（评审 P11/P18），缺省 INBOX_LLM_TIMEOUT_MS。 */
+  readonly llmTimeoutMs?: number
   readonly now?: () => Date
   readonly logger?: { warn(message: string): void }
 }
@@ -127,6 +129,7 @@ async function recordRefineFailure(
 export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem) => Promise<InboxProcessResult> {
   const now = deps.now ?? (() => new Date())
   const timeoutMs = deps.timeoutMs ?? INBOX_PROCESS_TIMEOUT_MS
+  const llmTimeoutMs = deps.llmTimeoutMs ?? INBOX_LLM_TIMEOUT_MS
 
   return async (item: InboxItem): Promise<InboxProcessResult> => {
     const connection = deps.connection()
@@ -152,7 +155,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
 
     // ② 一次尝试 = 一次 ctx.llm.stream（R2：重试不在同一次尝试内）；总上界 30s，LLM 只吃 20s（T13）。
     const signal = AbortSignal.timeout(timeoutMs)
-    const llmSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.min(timeoutMs, INBOX_LLM_TIMEOUT_MS))])
+    const llmSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.min(timeoutMs, llmTimeoutMs))])
     const refined = await refineTranscript({
       llm: deps.llm,
       route,
