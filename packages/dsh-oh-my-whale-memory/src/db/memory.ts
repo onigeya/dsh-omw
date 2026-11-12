@@ -41,6 +41,14 @@ export { queryAll } from './rows.js'
 
 export type MemoryConnection = lbug.Connection
 
+/**
+ * kind / priority 的**单一缺省常量**（Story 2.3 / N10）：这两列的语义归 db 层，
+ * 写路径（本文件）与精炼路径（src/distill/*）都必须引用它们，不得再写字面量。
+ * kind 缺省空串、priority 缺省 0；合法 kind 值域见 src/tools/memory-remember.ts 的 MEMORY_KINDS。
+ */
+export const DEFAULT_MEMORY_KIND = ''
+export const DEFAULT_MEMORY_PRIORITY = 0
+
 export interface UpsertMemoryInput {
   /**
    * 记忆层：spine 枚举 `L0|L1|L2|L3`；禁空、禁冒号。
@@ -162,8 +170,8 @@ export async function writeMemoryVersion(
   const params: Record<string, lbug.LbugValue> = {
     id,
     layer: input.layer.trim(),
-    kind: input.kind ?? '',
-    priority: Math.trunc(input.priority ?? 0),
+    kind: input.kind ?? DEFAULT_MEMORY_KIND,
+    priority: Math.trunc(input.priority ?? DEFAULT_MEMORY_PRIORITY),
     text: input.text,
     valid_at: validAt,
     recorded_at: recordedAt,

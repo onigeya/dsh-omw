@@ -59,6 +59,12 @@ export const UPSERT_MEMORY_ACTION = 'upsert_memory'
  */
 export const DEFAULT_CAPTURE_POLICY = 'last-writer-wins'
 
+/** 精炼写路径的 kind 取值（Story 2.3 / N9；AD-21 的 refine 档，复用既有 15 列、不新增表）。 */
+export const REFINE_KIND = 'refine'
+
+/** 精炼写路径的 action 取值（Story 2.3 / N9）。 */
+export const REFINE_INBOX_ACTION = 'refine_inbox'
+
 /** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
 export const DIRECT_CASCADE_DEPTH = 0
 

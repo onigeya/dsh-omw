@@ -136,13 +136,16 @@ export function resolveRuntimeConfig(config: {
   // dim 可留空（由 db 层按模型表/默认值解析），填了就必须是正整数（AC2：按配置 pin）。
   const embeddingDim = embeddingRaw.dim === undefined ? undefined : requirePositiveInt('embedding.dim', embeddingRaw.dim)
 
-  // Embedding token / model：任一缺失即降级，不抛错（FR-18）
+  // Embedding endpoint / token / model：任一缺失即降级，不抛错（FR-18）。
+  // endpoint 也纳入判据（评审 T6）：客户端构造要求 endpoint，只按 token+model 判 enabled
+  // 会造出「假启用态」——L1 静默写 NULL 向量且无审计，而 /memory status 仍打印 enabled。
   const token = embeddingRaw.token?.trim() || ''
   const model = embeddingRaw.model?.trim() || ''
   let embeddingMode: RuntimeConfig['embeddingMode'] = 'enabled'
-  if (!token || !model) {
+  if (!embeddingEndpoint || !token || !model) {
     embeddingMode = 'disabled'
     const missing = [
+      !embeddingEndpoint ? 'embedding.endpoint' : null,
       !token ? 'embedding.token' : null,
       !model ? 'embedding.model' : null,
     ].filter(Boolean).join(' / ')

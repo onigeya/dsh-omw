@@ -170,6 +170,15 @@ describe('可降级路径（FR-18：不抛错，warn + disabled）', () => {
     expect(resolved.warnings[0]).toContain('embedding.model')
   })
 
+  it('评审 T6：endpoint 缺失也降级（避免「假启用态」），warn 点名字段', () => {
+    const cfg = validConfig()
+    delete (cfg.embedding as { endpoint?: string }).endpoint
+    const resolved = resolveRuntimeConfig(cfg)
+    expect(resolved.embeddingMode).toBe('disabled')
+    expect(resolved.warnings).toHaveLength(1)
+    expect(resolved.warnings[0]).toContain('embedding.endpoint')
+  })
+
   it('两者都缺失时 warn 同时列出两个字段', () => {
     const cfg = validConfig()
     cfg.embedding.token = ''

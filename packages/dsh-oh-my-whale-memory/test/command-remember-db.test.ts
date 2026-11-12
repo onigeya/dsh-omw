@@ -38,7 +38,9 @@ beforeAll(async () => {
     tools: { register: () => () => {} },
   } as unknown as Parameters<typeof plugin.apply>[0]
 
-  await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
+  await plugin.apply(ctx, {
+    embedding: { endpoint: 'http://127.0.0.1:1/v1', token: 'sk-test', model: 'bge-m3', dim: 4 },
+  })
   registered = registeredDefs[0]
 
   // 同路径复用 apply 建好的 facade（database.ts 按绝对路径缓存），拿连接做断言。
@@ -218,7 +220,9 @@ describe('库未就绪：无 profileContext 时命令仍可用且明确报错（
       tools: { register: () => () => {} },
     } as unknown as Parameters<typeof plugin.apply>[0]
 
-    await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
+    await plugin.apply(ctx, {
+    embedding: { endpoint: 'http://127.0.0.1:1/v1', token: 'sk-test', model: 'bge-m3', dim: 4 },
+  })
     expect(registeredDefs).toHaveLength(1)
 
     const result = await registeredDefs[0]!.handler({ rawInput: ' remember 我偏好 ESM 不要 CJS' })

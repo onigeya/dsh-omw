@@ -48,6 +48,9 @@ describe('memory 插件入口导出形态', () => {
     // Story 1.6：memory_remember 经 ctx.tools.register 注册，缺 'tools' 注入
     // 则 apply 里的 ctx.tools 不可用。
     expect(plugin.inject).toContain('tools')
+    // Story 2.3：INBOX 精炼走宿主单通道 ctx.llm（AD-5），路由回退链读 session（AC:567）。
+    expect(plugin.inject).toContain('llm')
+    expect(plugin.inject).toContain('sessions')
   })
 
   it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无降级 warn', async () => {
@@ -104,7 +107,7 @@ describe('memory 插件入口导出形态', () => {
       tools: { register: (def: { name?: string }) => { registered.push(def); return () => {} } },
     } as unknown as Parameters<typeof plugin.apply>[0]
 
-    await plugin.apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
+    await plugin.apply(ctx, { embedding: { endpoint: 'https://api.example.com/v1', token: 'sk-test', model: 'bge-m3', dim: 4 } })
     expect(warn).not.toHaveBeenCalled()
     await expect(access(resolveMemoryDbPath(dir))).resolves.toBeUndefined()
     // Story 1.5：apply 注册库 facade（1.4）与写者锁（AC1/AD-12）两个 disposer；
@@ -144,7 +147,7 @@ describe('memory 插件入口导出形态', () => {
       // 替身只需可调用；closers 仍只统计 ctx.effect 注册的收尾器。
       tools: { register: () => () => {} },
     } as unknown as Parameters<typeof plugin.apply>[0]
-    const config = { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } }
+    const config = { embedding: { endpoint: 'https://api.example.com/v1', token: 'sk-test', model: 'bge-m3', dim: 4 } }
 
     // 宿主 dispose→apply 抖动 / 同进程重复 apply 会走到这里：withFileLock 自己不会接管
     // 本进程的锁，所以插件必须按路径复用，否则第二个实例会把自己误判成"第二实例"。

@@ -156,8 +156,9 @@ describe('AC3：lease 回收', () => {
     await claimNextInboxItem(store.connection, { now: at(51) })
     // 先制造一次失败，让 attempts=1，验证回收不动 attempts。
     await failInboxItem(store.connection, id, { error: new Error('第一次失败'), now: at(52) })
-    await claimNextInboxItem(store.connection, { now: at(53) })
-    const leaseUntil = new Date(at(53).getTime() + INBOX_LEASE_MS).toISOString()
+    // R3①：失败回 pending 会写退避截止（lease_until = now + 5s/10s/20s…），必须越过窗口才能再取。
+    await claimNextInboxItem(store.connection, { now: at(58) })
+    const leaseUntil = new Date(at(58).getTime() + INBOX_LEASE_MS).toISOString()
 
     // lease 未过期不回收（活着的持有者不被抢）。
     expect(await reclaimExpiredLeases(store.connection, { now: at(60) })).toBe(0)
@@ -180,19 +181,23 @@ describe('AC4：失败重试与死信', () => {
     await drainPending()
     const id = nextId('fail')
     await enqueueInboxItem(store.connection, { id, payload: 'F', now: at(80) })
+    // R3①：失败后 lease_until = now + 退避（5s/10s/20s…），每轮必须越过窗口才能再取。
+    let stamp = at(80)
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      const claimed = await claimNextInboxItem(store.connection, { now: at(80 + attempt) })
+      stamp = new Date(stamp.getTime() + 30_000)
+      const claimed = await claimNextInboxItem(store.connection, { now: stamp })
       expect(claimed?.id).toBe(id)
       const result = await failInboxItem(store.connection, id, {
         error: new Error(`精炼失败 ${attempt}`),
-        now: at(80 + attempt),
+        now: stamp,
       })
       expect(result).toEqual({ status: INBOX_STATUS_PENDING, attempts: attempt })
     }
     expect((await readRow(id)).status).toBe(INBOX_STATUS_PENDING)
 
-    await claimNextInboxItem(store.connection, { now: at(84) })
-    const dead = await failInboxItem(store.connection, id, { error: new Error('第四次失败'), now: at(84) })
+    stamp = new Date(stamp.getTime() + 30_000)
+    await claimNextInboxItem(store.connection, { now: stamp })
+    const dead = await failInboxItem(store.connection, id, { error: new Error('第四次失败'), now: stamp })
 
     expect(dead).toEqual({ status: INBOX_STATUS_FAILED, attempts: 4 })
     const row = await readRow(id)
@@ -239,9 +244,11 @@ describe('状态计数与最近死信视图', () => {
       const id = nextId(`dead-${i}`)
       ids.push(id)
       await enqueueInboxItem(store.connection, { id, payload: `dead ${i}`, kind: 'work_fact', now: at(200 + i) })
-      for (let attempt = 1; attempt <= 4; attempt += 1) {
-        await claimNextInboxItem(store.connection, { now: at(300 + i) })
-        await failInboxItem(store.connection, id, { error: new Error(`dead ${i}`), now: at(300 + i) })
+      for (let round = 0; round < 4; round += 1) {
+        // R3①：每轮必须越过退避窗口（30s > 5s/10s/20s）才能再取。
+        const stamp = new Date(at(300 + i).getTime() + round * 30_000)
+        await claimNextInboxItem(store.connection, { now: stamp })
+        await failInboxItem(store.connection, id, { error: new Error(`dead ${i}`), now: stamp })
       }
     }
     const fresh = await listRecentFailedInboxItems(store.connection, { now: at(400) })
@@ -381,33 +388,36 @@ describe('P9-⑥：processing 条目不会被再次取出', () => {
 })
 
 describe('P7：写者启动回收全部 processing（AC3 超集，U7）', () => {
-  it('lease 未过期也回收：reclaimExpiredLeases=0 而 reclaimProcessingInboxItems=2，attempts 保留', async () => {
+  it('lease 未过期也回收：reclaimExpiredLeases=0 而 reclaimProcessingInboxItems=2，崩溃各记一次失败（R3②）', async () => {
     await drainPending()
     const expired = nextId('reclaim-all-e')
     const fresh = nextId('reclaim-all-f')
     await enqueueInboxItem(store.connection, { id: expired, payload: 'E', now: at(900) })
     await enqueueInboxItem(store.connection, { id: fresh, payload: 'F', now: at(901) })
 
-    // expired：先失败一次（attempts=1）再取一次 → processing。
+    // expired：先失败一次（attempts=1、退避到 at(907)）再取一次 → processing。
     await claimNextInboxItem(store.connection, { now: at(901) })
-    await failInboxItem(store.connection, expired, { error: new Error('第一次失败'), now: at(902) })
-    await claimNextInboxItem(store.connection, { now: at(903) })
+    await failInboxItem(store.connection, expired, { error: new Error('第一次失败'), now: at(901) })
+    await claimNextInboxItem(store.connection, { now: at(950) })
     // fresh：lease 刻意放到 10 倍 —— 「只回收过期」的原语必须放过它。
-    await claimNextInboxItem(store.connection, { now: at(903), leaseMs: 10 * INBOX_LEASE_MS })
+    await claimNextInboxItem(store.connection, { now: at(950), leaseMs: 10 * INBOX_LEASE_MS })
     expect((await readRow(expired)).status).toBe(INBOX_STATUS_PROCESSING)
     expect((await readRow(fresh)).status).toBe(INBOX_STATUS_PROCESSING)
 
-    expect(await reclaimExpiredLeases(store.connection, { now: at(904) })).toBe(0)
-    expect(await reclaimProcessingInboxItems(store.connection, { now: at(904) })).toBe(2)
+    expect(await reclaimExpiredLeases(store.connection, { now: at(951) })).toBe(0)
+    expect(await reclaimProcessingInboxItems(store.connection, { now: at(951) })).toBe(2)
 
     const expiredRow = await readRow(expired)
     expect(expiredRow.status).toBe(INBOX_STATUS_PENDING)
     expect(expiredRow.lease_owner).toBeNull()
     expect(expiredRow.lease_until).toBeNull()
-    expect(Number(expiredRow.attempts)).toBe(1)
+    // R3②：启动回收把这次崩溃记成一次失败 —— 1 次普通失败 + 1 次回收 = 2。
+    expect(Number(expiredRow.attempts)).toBe(2)
+    expect(String(expiredRow.last_error)).toContain('reclaimed after crash')
     const freshRow = await readRow(fresh)
     expect(freshRow.status).toBe(INBOX_STATUS_PENDING)
     expect(freshRow.lease_owner).toBeNull()
-    expect(Number(freshRow.attempts)).toBe(0)
+    expect(Number(freshRow.attempts)).toBe(1)
+    expect(String(freshRow.last_error)).toContain('reclaimed after crash')
   })
 })

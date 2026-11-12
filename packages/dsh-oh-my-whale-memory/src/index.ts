@@ -68,6 +68,10 @@ import { createIdleGate } from './inbox/idle-gate.js'
 import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
+import { createEmbeddingClient } from './embedding/client.js'
+import { createInboxProcessor } from './distill/processor.js'
+import { routeFromSession } from './distill/session-route.js'
+import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
   countInboxByStatus,
@@ -147,8 +151,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * `'settings'`：/settings 表单投影与后续 /memory status 的设置读取通道（AD-11）。
  * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
  * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
+ * `'llm'`：INBOX 精炼的宿主单通道 `ctx.llm`（Story 2.3 / AD-5，显式 provider+model）。
  */
-export const inject = ['commands', 'settings', 'tools', 'sessions'] as const
+export const inject = ['commands', 'settings', 'tools', 'sessions', 'llm'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -344,8 +349,7 @@ export async function apply(
   // Story 2.2：写者实例的最后一段接线（只读实例在上面已 return，不回收 lease、不启动消费者，AC7）。
   // 1) 启动回收：**全部** processing → pending（进程 kill -9 后的自愈，AC3；理由见下方注释）；
   // 2) 空闲闸门由 session/event 的 turn/start~turn/end 驱动（AD-6）；
-  // 3) 消费者当前**没有**精炼处理器（Story 2.3 注入 ctx.llm）——按设计此时不取队头，
-  //    取队会丢条目或把未精炼的条目误标 done；本 story 只保证它被 apply 启动、dispose 停止；
+  // 3) 消费者由本 story 注入精炼处理器（ctx.llm 单通道）；它只在空闲闸门放开时取队头；
   // 4) 生命周期挂在既有 db effect 的 disposer 上，不新增 ctx.effect（entry-exports 钉死 closer 数）。
   const idleGate = createIdleGate()
   const promotionTracker = createPromotionTracker({
@@ -387,10 +391,47 @@ export async function apply(
   if (replayedSnapshots > 0) {
     ctx.logger.info(`孤儿快照重放：${replayedSnapshots} 条已重放入 INBOX`)
   }
+  // Story 2.3：精炼处理器接线（R4）。
+  // - embedding 客户端只在配置齐全时构造（FR-18 降级）；它的失败只记审计、不阻塞 L1 写入（N4）；
+  // - 路由：Config 的 llmProvider/llmModel 优先，缺省从 session 的已记录请求目标解析（AC:567）；
+  // - N2：apply 期间**不得求值** ctx.llm —— 用惰性端口，真正取用发生在消费轮次里；
+  //   裸 ctx（单测）没有 llm/sessions 时也不会在 apply 阶段抛错。
+  const embeddingClient = resolved.embeddingMode === 'enabled' && resolved.embedding.endpoint
+    ? createEmbeddingClient({
+      endpoint: resolved.embedding.endpoint,
+      token: resolved.embedding.token ?? '',
+      dim: embedding.dim,
+    })
+    : null
+  const llmPort: LlmPort = {
+    stream: (options) => (ctx as unknown as { llm: LlmPort }).llm.stream(options),
+  }
+  const configuredRoute: RefineRoute | null =
+    resolved.llmProvider && resolved.llmModel
+      ? { provider: resolved.llmProvider, model: resolved.llmModel }
+      : null
+  // 回退链与解析规则在 distill/session-route.ts（纯函数，评审 T21 要求可单测）。
+  const sessionRoute = (sessionId: string): RefineRoute | null => {
+    const sessions = (ctx as unknown as {
+      sessions?: { get?: (id: string) => unknown }
+    }).sessions
+    const session = typeof sessions?.get === 'function' ? sessions.get(sessionId) : undefined
+    return routeFromSession(session)
+  }
+  const inboxProcessor = createInboxProcessor({
+    connection: () => db?.connection ?? null,
+    llm: llmPort,
+    resolveRoute: (sessionId) => configuredRoute ?? sessionRoute(sessionId),
+    embedding: embeddingClient,
+    embeddingModel: resolved.embedding.model ?? null,
+    embeddingModelId: embedding.modelId,
+    logger: ctx.logger,
+  })
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,
     promotion: promotionTracker,
+    process: inboxProcessor,
     logger: ctx.logger,
   })
   inboxConsumer.start()

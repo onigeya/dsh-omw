@@ -15,7 +15,7 @@ import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
 import { INBOX_LEASE_MS, claimNextInboxItem, enqueueInboxItem } from '../src/inbox/queue'
 import { drainInboxBackgroundTasks, type InboxConsumerOptions } from '../src/inbox/consumer'
-import { captureStableKey, l0InboxId, l0RawId } from '../src/db/l0'
+import { captureStableKey, l0RawId } from '../src/db/l0'
 import type { MemoryCommandDefinition } from '../src/command'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -213,7 +213,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(l0?.raw_text).toBe('user: 轮末原文')
     expect(l0?.actor).toBe('apply-capture')
 
-    const inbox = await readInboxRow(store.connection, l0InboxId(stableKey))
+    const inbox = await readInboxRow(store.connection, l0RawId(stableKey))
     expect(inbox.status).toBe('pending')
 
     // 确定性 id + 每轮至多一次：同一 (session, turn) 再回放不新增第二行队列条目。
@@ -221,7 +221,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     await drainInboxBackgroundTasks()
     const rows = await queryAll(
       store.connection,
-      "MATCH (q:l1_inbox) WHERE q.id = '" + l0InboxId(stableKey) + "' RETURN q.id AS id",
+      "MATCH (q:l1_inbox) WHERE q.id = '" + l0RawId(stableKey) + "' RETURN q.id AS id",
     )
     expect(rows).toHaveLength(1)
   }, 60_000)
