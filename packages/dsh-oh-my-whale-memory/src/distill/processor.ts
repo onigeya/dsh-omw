@@ -9,9 +9,16 @@
  * 记队列失败（attempts+1 + 退避；`fatal` 时直接进死信，AC:581）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { REFINE_INBOX_ACTION, REFINE_KIND, insertGenerationLog, type GenerationLogOutcome } from '../db/audit.js'
+import {
+  REFINE_INBOX_ACTION,
+  REFINE_KIND,
+  WRITE_EVIDENCE_ACTION,
+  insertGenerationLog,
+  type GenerationLogOutcome,
+} from '../db/audit.js'
 import { memoryNodeId } from '../db/id.js'
 import { writeDeduplicatedMemory } from '../db/dedup.js'
+import { L0_LAYER, writeEvidenceEdges } from '../db/edges.js'
 import { getMemoryById } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
 import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../embedding/client.js'
@@ -194,11 +201,16 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       )
     }
 
-    // ④ 单事务：条件转 done → 经**去重原语**写 L1（Story 2.4：指纹/语义/版本三路）→ 写 outcome 审计行（R1 / N9）。
+    // ④ 单事务：条件转 done → 经**去重原语**写 L1（Story 2.4：指纹/语义/版本三路）
+    //    → 按 source_refs 建 EVIDENCE 边（Story 2.6 / AD-10：精炼结构是 EVIDENCE 唯一写者）
+    //    → 写 outcome 审计行（R1 / N9）。
+    // item.id 就是 l0_raw 行 id（2.3 P1 已把 L0 与 INBOX 统一成同一身份），故它的层是 L0，
+    // 与刚写的 L1 节点构成 l0_raw→memory 的 EVIDENCE 边（2.5 判据②的链头）。
     let marked = false
     await runInTransaction(connection, async () => {
       marked = await markInboxItemDone(connection, item.id, { now: now() })
       if (!marked) return
+      const writtenL1: string[] = []
       for (let i = 0; i < refined.facts.length; i += 1) {
         const fact = refined.facts[i]!
         const vector = embedded.vectors[i] ?? null
@@ -209,7 +221,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         const existing = fact.coerced
           ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
           : null
-        await writeDeduplicatedMemory(
+        const result = await writeDeduplicatedMemory(
           connection,
           {
             layer: MEMORY_REMEMBER_LAYER,
@@ -223,8 +235,30 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
           },
           { now, logger: deps.logger },
         )
+        writtenL1.push(result.id)
       }
+      // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
+      // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
+      const edgeResult = await writeEvidenceEdges(
+        connection,
+        writtenL1.map((id) => ({
+          fromId: item.id,
+          fromLayer: L0_LAYER,
+          toId: id,
+          toLayer: MEMORY_REMEMBER_LAYER,
+          reason: 'refine',
+        })),
+      )
       await insertRefineAudit(connection, item.id, 'success', null, now)
+      if (edgeResult.skipped.length > 0) {
+        await insertRefineAudit(
+          connection,
+          item.id,
+          'uncertain',
+          WRITE_EVIDENCE_ACTION + '-skipped=' + String(edgeResult.skipped.length),
+          now,
+        )
+      }
       if (embedded.failure) {
         await insertRefineAudit(
           connection,
