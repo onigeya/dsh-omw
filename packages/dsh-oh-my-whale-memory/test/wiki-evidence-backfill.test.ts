@@ -262,4 +262,38 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     expect(await readEvidenceInEdgeIds(db.connection, 'p1-head')).toEqual(['p1-l0'])
     expect(await readEvidenceInEdgeIds(db.connection, 'p1-tail')).toEqual(['p1-l0'])
   })
+
+  it('评审 P1（T1）变异审计 M1 补钉：页内已推进过再转忙（不足一页）⇒ 仍不得落 done', async () => {
+    // M1 撤掉 completed = false（只留 break）时，本用例变红：
+    // processed < batchSize 会被误判「末批扫完」写 done，尾部行永久丢失回填机会。
+    // 自定义 gate：第 1 次（入口）与第 2 次（第 1 行前复查）为 true，之后转忙。
+    let calls2 = 0
+    const flaky2 = {
+      enterTurn: () => {},
+      exitTurn: () => {},
+      isIdle: () => { calls2 += 1; return calls2 <= 2 },
+      depthFor: () => 0,
+    }
+    await seedL0(db, 'm1-l0', 'M1 原文')
+    await exec(db, [
+      "CREATE (m:memory {id: 'm1-a', layer: 'L1', kind: '', priority: 0, text: 'm1-a',",
+      "  valid_at: '2026-06-01T00:00:00.000Z', recorded_at: '2026-06-01T00:00:00.000Z', invalid_at: NULL, expired_at: NULL, source_refs: ['m1-l0']})",
+    ].join(' '))
+    await exec(db, [
+      "CREATE (m:memory {id: 'm1-b', layer: 'L1', kind: '', priority: 0, text: 'm1-b',",
+      "  valid_at: '2026-06-02T00:00:00.000Z', recorded_at: '2026-06-02T00:00:00.000Z', invalid_at: NULL, expired_at: NULL, source_refs: ['m1-l0']})",
+    ].join(' '))
+    await setCursor(db, '2026-05-31T00:00:00.000Z|cursor')
+    const backfill2 = createEvidenceBackfill({ connection: () => db.connection, gate: flaky2, batchSize: 5 })
+    // 第 1 行（m1-a）处理完后，第 2 行前复查转忙 ⇒ break：m1-a 的边已写、游标推进但绝不 done。
+    expect(await backfill2.runOnce()).toBe(1)
+    const cursor2 = await readCursor(db)
+    expect(cursor2).not.toBe(EVIDENCE_BACKFILL_DONE)
+    expect(String(cursor2)).toContain('m1-a')
+    // 恢复后剩余行仍能被扫（done 只属于真正扫完的那一轮）。
+    const healthy2 = createIdleGate()
+    const resumed2 = createEvidenceBackfill({ connection: () => db.connection, gate: healthy2, batchSize: 5 })
+    expect(await resumed2.runOnce()).toBe(1)
+    expect(await readEvidenceInEdgeIds(db.connection, 'm1-b')).toEqual(['m1-l0'])
+  })
 })

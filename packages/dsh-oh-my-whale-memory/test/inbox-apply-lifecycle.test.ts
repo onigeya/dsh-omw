@@ -266,15 +266,48 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
  * 真跑一轮 maintenance，必须写下游标哨兵且**不产生任何 backfill_embedding 审计行**。
  */
 describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => {
-  it('enabled ⇒ 拿到 maintenance 函数；disabled ⇒ 仍为函数且只跑 EVIDENCE 回填', async () => {
+  /**
+   * 评审 P12（T13）：光断言 `maintenance` 是函数，把 index.ts 里的向量回填整段删掉也全绿——
+   * Story 2.4 的 U5 义务会静默停摆。这里在 **enabled** 分支真跑一轮：种一条无向量的存量节点，
+   * 跑 maintenance，必须落一条 `backfill_embedding` 审计行（本夹具的 endpoint 指向死端口，
+   * 故落的是聚合 **失败** 行——正好也钉住「失败要可见、不静默」）。
+   */
+  it('enabled ⇒ maintenance 真跑向量回填并落 backfill_embedding 审计行', async () => {
     const enabledDir = await makeTempDir('omw-bf-wire-on-')
     captured.options = undefined
     const on = makeCtx(enabledDir)
     await plugin.apply(on.ctx, EMBEDDING_CONFIG_ENABLED)
-    // 删掉 index.ts 的 maintenance 那一行，这里立刻变红。
-    expect(typeof captured.options?.maintenance).toBe('function')
+    // 先停消费者并等在飞轮次结算：否则它的定时轮自身就会跑 maintenance，断言会变成假阳性。
     ;(captured.consumer as { stop(): void } | undefined)?.stop()
+    await drainInboxBackgroundTasks()
 
+    const connection = captured.options?.connection() ?? null
+    expect(connection).not.toBeNull()
+    const conn = connection as Parameters<typeof queryAll>[0]
+    await queryAll(
+      conn,
+      "CREATE (m:memory {id: 'wire-unembedded', layer: 'L1', kind: '', priority: 0, text: '待嵌入的存量节点', " +
+        "valid_at: '2026-01-01T00:00:00.000Z', recorded_at: '2026-01-02T00:00:00.000Z', source_refs: []})",
+    )
+    const maintenance = captured.options?.maintenance
+    if (maintenance) await maintenance()
+
+    const rows = await queryAll(
+      conn,
+      "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN g.outcome AS outcome, g.reason AS reason",
+    )
+    // 删掉 index.ts 的 embeddingBackfill 接线，这里立刻变红。
+    expect(rows.length).toBeGreaterThan(0)
+    expect(String(rows[0]?.reason ?? '')).toContain('failed=')
+    // 端点不可达 ⇒ 一条向量都没写进去，节点仍在待回填集里（幂等、不伪造成功）。
+    const still = await queryAll(
+      conn,
+      "MATCH (m:memory {id: 'wire-unembedded'}) WHERE m.embedding IS NULL RETURN count(*) AS c",
+    )
+    expect(Number(still[0]?.c ?? 0)).toBe(1)
+  }, 60_000)
+
+  it('disabled ⇒ 仍为函数且只跑 EVIDENCE 回填', async () => {
     const disabledDir = await makeTempDir('omw-bf-wire-off-')
     captured.options = undefined
     const off = makeCtx(disabledDir)
