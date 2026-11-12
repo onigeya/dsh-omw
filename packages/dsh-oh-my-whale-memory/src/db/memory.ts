@@ -363,18 +363,6 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
 }
 
 /**
- * Story 1.9 读路径：`/memory status` 的层计数。
- *
- * 计数事实源只有 `memory` 表的 `layer` 列——Epic 1 无 INBOX 表、无 failed 存储
- * （`schema.ts` 只有 memory / l0_raw / omw_meta），队列与状态机属 Epic 2 Story 2.2。
- * 口径（spec Design Notes）：按 `layer` 聚合**全部行**，不套 `invalid_at` / `expired_at`
- * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
- *
- * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
- * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`；`'L1_INBOX'` / `'L2_INBOX'`
- * 现在只作 INBOX 队列标识/表名的历史计数位保留（Story 1.7 存量行仍会命中 `L1_INBOX` 计数）。
- */
-/**
  * L1→L2 提升候选的分页语句（Story 2.5 / 评审 P1+T43）。
  *
  * 用 `(recorded_at, id)` 复合游标**升序**扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
@@ -474,6 +462,23 @@ export async function writeL2PromotionCursor(
   await connection.execute(prepared, { key: META_KEYS.l2PromotionCursor, value })
 }
 
+/**
+ * Story 1.9 读路径：`/memory status` 的层计数。
+ *
+ * 计数事实源只有 `memory` 表的 `layer` 列——Epic 1 无 INBOX 表、无 failed 存储
+ * （`schema.ts` 只有 memory / l0_raw / omw_meta），队列与状态机属 Epic 2 Story 2.2。
+ * 口径（spec Design Notes）：按 `layer` 聚合**全部行**，不套 `invalid_at` / `expired_at`
+ * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
+ *
+ * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
+ * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`。
+ *
+ * 评审 P16②/T41 的**口径漂移**（2.5 之后这里只对 L1_INBOX 成立）：
+ * - `'L1_INBOX'` 仍是「memory 表 layer 列的历史计数位」（Story 1.7 的存量行会命中）；
+ * - `'L2_INBOX'` 已**不再**由此计数——`/memory status` 读的是 `l2_inbox` 队列深度
+ *   （pending + processing，见 `index.ts` 的 getStatus）。保留它在本枚举里只为不破坏
+ *   既有调用方与 Epic 1 的形状；本原语返回的 L2_INBOX 计数已无人消费。
+ */
 export const COUNTED_MEMORY_LAYERS = ['L1', 'L2', 'L1_INBOX', 'L2_INBOX'] as const
 export type CountedMemoryLayer = (typeof COUNTED_MEMORY_LAYERS)[number]
 export type MemoryLayerCounts = Record<CountedMemoryLayer, number>

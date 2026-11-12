@@ -7,12 +7,12 @@
  */
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../src/db/memory'
 import { MEMORY_KINDS } from '../src/tools/memory-remember'
 import { MAX_REFINE_FACT_TOKENS, type LlmPort } from '../src/distill/llm-refine'
 import {
   L2_MAX_OUTPUT_TOKENS,
   L2_OUTPUT_SCHEMA,
+  L2_PROMPT_VERSION,
   L2_SENTINEL_PREAMBLE,
   L2_VERIFY_MAX_OUTPUT_TOKENS,
   L2_VERIFY_SCHEMA,
@@ -82,17 +82,15 @@ describe('prompt 与 schema 同文件 + sentinel（AC:573 的 L2 延续）', () 
 })
 
 describe('parseL2Output', () => {
-  it('合法输出：text 原样、kind/priority 保留', () => {
+  it('合法输出：只取 text（评审 P16①：分类不再由模型给）', () => {
     const result = parseL2Output(JSON.stringify({ text: '复合经验', kind: 'work_fact', priority: 7 }))
-    expect(result).toEqual({ ok: true, statement: { text: '复合经验', kind: 'work_fact', priority: 7 } })
+    // 即使模型硬塞 kind/priority，也只保留 text —— 分类恒由调用方从来源继承。
+    expect(result).toEqual({ ok: true, statement: { text: '复合经验' } })
   })
 
-  it('kind 非法 / priority 越界 → 收敛缺省值（不抛、不整条丢弃）', () => {
+  it('模型输出多余字段不影响解析（不抛、不整条丢弃）', () => {
     const result = parseL2Output(JSON.stringify({ text: 'x', kind: '不存在的类', priority: 9999 }))
-    expect(result).toEqual({
-      ok: true,
-      statement: { text: 'x', kind: DEFAULT_MEMORY_KIND, priority: DEFAULT_MEMORY_PRIORITY },
-    })
+    expect(result).toEqual({ ok: true, statement: { text: 'x' } })
   })
 
   it('无 JSON / text 为空 / 超 token 预算 → 失败，且超预算是不可重试', () => {
@@ -113,7 +111,7 @@ describe('refineToL2：一次尝试 = 一次 llm.stream', () => {
       finish({ kind: 'stop' }),
     ])
     const result = await refineToL2({ llm, route: ROUTE, facts: FACTS, signal })
-    expect(result).toMatchObject({ ok: true, statement: { text: '经验陈述', kind: 'work_fact', priority: 3 } })
+    expect(result).toMatchObject({ ok: true, statement: { text: '经验陈述' } })
     expect(calls).toHaveLength(1)
     expect(calls[0]).toMatchObject({ provider: 'test-provider', model: 'test-model', maxTokens: L2_MAX_OUTPUT_TOKENS })
     expect(calls[0]!.text).toContain('id=l1-a')
@@ -191,11 +189,18 @@ describe('verifyL2Statement（AD-15 降级通道）', () => {
   })
 })
 
-describe('七类 kind 的单一来源', () => {
-  it('schema 与指令里逐字枚举 MEMORY_KINDS', () => {
-    for (const kind of MEMORY_KINDS) {
-      expect(L2_OUTPUT_SCHEMA).toContain(kind)
-      expect(buildL2Messages(FACTS)[0]!.content[0]!.text).toContain(kind)
-    }
+describe('评审 P16①：分类不再进 prompt / schema', () => {
+  it('schema 只问 text；指令明说分类由调用方继承', () => {
+    expect(L2_OUTPUT_SCHEMA).toContain('text')
+    expect(L2_OUTPUT_SCHEMA).not.toContain('kind')
+    expect(L2_OUTPUT_SCHEMA).not.toContain('priority')
+    const message = buildL2Messages(FACTS)[0]!.content[0]!.text
+    expect(message).toContain('分类（kind / priority）由调用方从来源事实继承')
+    // 来源事实行仍带 kind=（那是输入元信息，调用方要用它做多数表决），指令里不再枚举七类。
+    expect(message).not.toContain(MEMORY_KINDS[0]! + '；')
+  })
+
+  it('版本已从 1 升到 2（改 prompt / schema 必须同时递增）', () => {
+    expect(L2_PROMPT_VERSION).toBe('2')
   })
 })

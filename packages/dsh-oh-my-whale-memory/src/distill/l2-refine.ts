@@ -9,8 +9,6 @@
  * 综合陈述（不是数组）——L2 的语义是「那次为什么失败 / 那次怎么解决」（PRD:104），
  * 故 prompt 要求保留跨事实的因果与教训，而不是罗列。
  */
-import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
-import { MEMORY_KINDS } from '../tools/memory-remember.js'
 import { MAX_REFINE_FACT_TOKENS, estimateTokens, type LlmPort } from './llm-refine.js'
 import { foldStream } from './stream-fold.js'
 
@@ -18,9 +16,12 @@ import { foldStream } from './stream-fold.js'
 export const L2_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
 
 /** prompt 版本；改 prompt 或 schema 必须同时递增。 */
-export const L2_PROMPT_VERSION = '1'
-
-const KIND_ENUM = MEMORY_KINDS.join(' / ')
+/**
+ * 评审 P16①（T20）：从 '1' 升到 '2' —— 模型不再被问 kind / priority。
+ * 提升路径恒用来源 L1 的`dominantKind`/`maxPriority` 覆盖（AC:723-726），模型输出这两个字段
+ * 是**死数据**：既白耗输出预算，也让「prompt 与 schema 同源」失去意义。
+ */
+export const L2_PROMPT_VERSION = '2'
 
 /** 单条 L2 陈述的 token 上限（与 L1 卡片同一上限；AC 未另给 L2 值）。 */
 export const MAX_L2_STATEMENT_TOKENS = MAX_REFINE_FACT_TOKENS
@@ -28,12 +29,10 @@ export const MAX_L2_STATEMENT_TOKENS = MAX_REFINE_FACT_TOKENS
 /** 单次请求的输出预算（不是任务预算）。 */
 export const L2_MAX_OUTPUT_TOKENS = 1024
 
-/** 输出 schema（与 prompt 同文件）。 */
+/** 输出 schema（与 prompt 同文件）。只问 text —— 分类由调用方从来源继承（评审 P16①）。 */
 export const L2_OUTPUT_SCHEMA = [
   '{',
-  '  "text": string,          // L2 综合陈述：跨来源事实成立的经验/教训，必填、非空',
-  '  "kind": string|null,     // 七类之一：' + KIND_ENUM + '；判定不了填 null',
-  '  "priority": number|null  // -1..100 的整数，判定不了填 null',
+  '  "text": string   // L2 综合陈述：跨来源事实成立的经验/教训，必填、非空',
   '}',
 ].join('\n')
 
@@ -44,8 +43,7 @@ export const L2_INSTRUCTION = [
   '只使用给定 L1 里已经成立的事实，不要推测、不要补全、不要引入外部知识。',
   '必须能顺着这些 L1 回溯到原始上下文；无法回溯的内容不要写。',
   '陈述不超过 ' + String(MAX_L2_STATEMENT_TOKENS) + ' token；只输出一条。',
-  'kind 取这七类之一（逐字，别改写）：' + KIND_ENUM + '；判定不了就填 null。',
-  'priority 取 -1..100 的整数（-1 = 全局强规则），判定不了就填 null。',
+  '只输出 text 一个字段：分类（kind / priority）由调用方从来源事实继承，不需要你判断。',
   '严格只输出一个 JSON 对象，不要解释、不要 markdown 代码块。',
 ].join('\n')
 
@@ -77,11 +75,12 @@ export function buildL2Messages(
   return [{ role: 'user', content: [{ type: 'text', text: instruction }] }]
 }
 
-/** L2 综合结果：文本 + 模型给的分类（缺失即缺省值；来源主流值由调用方覆盖）。 */
+/**
+ * L2 综合结果（评审 P16①）：**只有** text —— 分类恒由调用方按来源继承
+ * （`dominantKind` / `maxPriority`），模型给出的一律不采信，故不再索要。
+ */
 export interface L2Statement {
   readonly text: string
-  readonly kind: string
-  readonly priority: number
 }
 
 export interface L2RefineFailure {
@@ -110,7 +109,7 @@ export function parseL2Output(raw: string): L2RefineResult {
   } catch {
     return { ok: false, failure: { reason: 'json-parse-failed', message: 'L2 输出不是合法 JSON', retryable: true } }
   }
-  const record = parsed as { readonly text?: unknown; readonly kind?: unknown; readonly priority?: unknown } | null
+  const record = parsed as { readonly text?: unknown } | null
   const text = typeof record?.text === 'string' ? record.text.trim() : ''
   if (text.length === 0) {
     return { ok: false, failure: { reason: 'empty-statement', message: 'L2 输出缺少非空 text', retryable: true } }
@@ -125,19 +124,8 @@ export function parseL2Output(raw: string): L2RefineResult {
       },
     }
   }
-  const kindOk = typeof record?.kind === 'string' && (MEMORY_KINDS as readonly string[]).includes(record.kind)
-  const rawPriority = typeof record?.priority === 'number' && Number.isFinite(record.priority)
-    ? Math.trunc(record.priority)
-    : Number.NaN
-  const priorityOk = Number.isFinite(rawPriority) && rawPriority >= -1 && rawPriority <= 100
-  return {
-    ok: true,
-    statement: {
-      text,
-      kind: kindOk ? (record?.kind as string) : DEFAULT_MEMORY_KIND,
-      priority: priorityOk ? rawPriority : DEFAULT_MEMORY_PRIORITY,
-    },
-  }
+  // 评审 P16①：kind / priority 不再从模型输出读取 —— 调用方恒用来源 L1 的 taboo/主流值覆盖。
+  return { ok: true, statement: { text } }
 }
 
 export interface L2RefineInput {
