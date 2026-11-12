@@ -25,6 +25,7 @@ import {
   SCHEMA_VERSION,
   createL0RawTableStatement,
   createL1InboxTableStatement,
+  createL2InboxTableStatement,
   createMemoryTableStatement,
   createMetaTableStatement,
 } from '../src/db/schema'
@@ -285,6 +286,9 @@ function buildReadonlyStatements(dim: number): string[] {
     createL0RawTableStatement(),
     // Story 2.2：/memory status 读 l1_inbox 的 failed 计数（缺表照抛），只读夹具必须带这张表。
     createL1InboxTableStatement(),
+    // Story 2.5 / U1：L2_INBOX 行改读 l2_inbox 的真实队列深度，同样缺表照抛（与 l1_inbox
+    // 同一约定，不静默报 0），故只读夹具也必须带这张表。
+    createL2InboxTableStatement(),
     mergeMeta(META_KEYS.schemaVersion, SCHEMA_VERSION),
     mergeMeta(META_KEYS.embeddingDim, String(dim)),
     mergeMeta(META_KEYS.embeddingModelId, MODEL_ID),

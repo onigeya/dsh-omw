@@ -108,9 +108,17 @@ export function createL0RawTableStatement(): string {
  */
 export const L1_INBOX_TABLE = 'l1_inbox'
 
-export function createL1InboxTableStatement(): string {
+/**
+ * Story 2.5 / U1：L2 提升队列（与 l1_inbox **同列、同状态机**，只有表名不同）。
+ * 泛化的语句生成在 src/inbox/queue.ts 的 createInboxQueue(table)；
+ * 表名只能是本文件导出的常量，绝不接受外部输入（不把用户数据拼进 DDL）。
+ */
+export const L2_INBOX_TABLE = 'l2_inbox'
+
+/** 队列 DDL（按表名生成，列契约的唯一来源）。 */
+export function createInboxTableStatement(table: string): string {
   return [
-    'CREATE NODE TABLE IF NOT EXISTS ' + L1_INBOX_TABLE + ' (',
+    'CREATE NODE TABLE IF NOT EXISTS ' + table + ' (',
     '  id STRING,',
     '  session_id STRING,',
     '  kind STRING,',
@@ -125,6 +133,14 @@ export function createL1InboxTableStatement(): string {
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
+}
+
+export function createL1InboxTableStatement(): string {
+  return createInboxTableStatement(L1_INBOX_TABLE)
+}
+
+export function createL2InboxTableStatement(): string {
+  return createInboxTableStatement(L2_INBOX_TABLE)
 }
 
 export function createMetaTableStatement(): string {

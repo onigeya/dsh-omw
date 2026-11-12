@@ -84,6 +84,7 @@ import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
   countInboxByStatus,
+  l2InboxQueue,
   listRecentFailedInboxItems,
   reclaimProcessingInboxItems,
 } from './inbox/queue.js'
@@ -256,12 +257,18 @@ export async function apply(
     const evidenceGap = await computeEvidenceGap(connection, new Date().toISOString())
     const relatedSkipped = await countRelatedSkips(connection)
     const inboxCounts = await countInboxByStatus(connection)
+    // Story 2.5 / U1：L2_INBOX 行从「memory.layer 的历史计数槽」换成 **l2_inbox 的真实队列深度**
+    // （pending + processing = 待提升条目；done/failed 不计入——failed 另有 failed 行）。
+    const l2InboxCounts = await l2InboxQueue.countByStatus(connection)
     const failedEntries = inboxCounts.failed > 0
       ? await listRecentFailedInboxItems(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
       : []
     return {
       layers: { L1: counts.L1, L2: counts.L2 },
-      inboxes: { L1: counts.L1_INBOX, L2: counts.L2_INBOX },
+      inboxes: {
+        L1: counts.L1_INBOX,
+        L2: l2InboxCounts.pending + l2InboxCounts.processing,
+      },
       failed: inboxCounts.failed,
       failedEntries,
       embeddingMode: resolved.embeddingMode,

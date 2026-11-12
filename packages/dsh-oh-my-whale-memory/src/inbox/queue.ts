@@ -12,11 +12,16 @@
  * 取队头是「读队头 + 条件写 lease」两步，但**两条语句在同一个 runInTransaction 里**：
  * 同一连接上的所有事务由 transaction.ts 的 per-connection promise 链串行化，跨进程由写者
  * 文件锁保证只有一个写者，故不存在 read-then-write 竞态。
+ *
+ * Story 2.5 / U1（泛化）：同一套状态机由 L1 精炼队列与 L2 提升队列共用，只有表名不同，
+ * 故语句集由 {@link createInboxStatements} 按表名生成、API 由 {@link createInboxQueue} 绑定。
+ * **表名只取自 src/db/schema.ts 的常量**（绝不接受外部输入——那是把用户数据拼进 DDL 的口子）。
+ * 文件末尾的既有导出名一律保留为绑定 `l1_inbox` 的薄包装：2.2 起的调用点与测试零改动。
  */
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
 import { collectRows } from '../db/rows.js'
-import { L1_INBOX_TABLE, createL1InboxTableStatement } from '../db/schema.js'
+import { L1_INBOX_TABLE, L2_INBOX_TABLE, createInboxTableStatement } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 
 export type InboxConnection = lbug.Connection
@@ -100,103 +105,31 @@ export interface InboxItemInput {
   readonly id?: string
 }
 
-const COLUMNS = [
-  'q.id AS id',
-  'q.session_id AS session_id',
-  'q.kind AS kind',
-  'q.payload AS payload',
-  'q.status AS status',
-  'q.attempts AS attempts',
-  'q.lease_owner AS lease_owner',
-  'q.lease_until AS lease_until',
-  'q.enqueued_at AS enqueued_at',
-  'q.updated_at AS updated_at',
-  'q.last_error AS last_error',
-].join(', ')
+export interface ClaimInboxOptions {
+  /** lease 持有者标识，缺省进程 id（AC1）。 */
+  readonly owner?: string
+  readonly now?: Date
+  /** lease 时长，缺省 INBOX_LEASE_MS（60s）。 */
+  readonly leaseMs?: number
+  /** FIFO 游标：只取严格晚于该条目的队头（一轮内跳过已尝试条目）。 */
+  readonly after?: { readonly enqueuedAt: string; readonly id: string }
+}
 
-/** 入队：id 是 randomUUID（或调用方注入的确定性 id），MERGE 只为幂等，不会覆盖既有行。 */
-const INSERT_ITEM = [
-  'MERGE (q:' + L1_INBOX_TABLE + ' {id: $id})',
-  '  ON CREATE SET q.session_id = $session_id, q.kind = $kind, q.payload = $payload,',
-  '    q.status = $status, q.attempts = $attempts, q.lease_owner = $lease_owner,',
-  '    q.lease_until = $lease_until, q.enqueued_at = $enqueued_at, q.updated_at = $updated_at,',
-  '    q.last_error = $last_error',
-].join('')
+export interface FailInboxResult {
+  /** 落库后的状态；条目本就不在 processing 时原样返回其当前状态（N8 no-op）。 */
+  readonly status: InboxStatus
+  readonly attempts: number
+}
 
-const CLAIM_HEAD = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.status = $pending',
-  '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
-  'RETURN ' + COLUMNS,
-  'ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1',
-].join(' ')
-
-/** 带游标的取队头：跳过本轮已尝试过的条目（失败回 pending 后不在同一轮被重复取出）。 */
-const CLAIM_HEAD_AFTER = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.status = $pending',
-  '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
-  '  AND (q.enqueued_at > $after_enqueued_at',
-  '       OR (q.enqueued_at = $after_enqueued_at AND q.id > $after_id))',
-  'RETURN ' + COLUMNS,
-  'ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1',
-].join(' ')
-
-/** 条件写 lease：status 仍是 pending 才生效（拿不到行 = 竞态，本轮放弃）。 */
-const CLAIM_MARK = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.id = $id AND q.status = $pending',
-  'SET q.status = $processing, q.lease_owner = $lease_owner,',
-  '    q.lease_until = $lease_until, q.updated_at = $updated_at',
-  'RETURN q.id AS id',
-].join(' ')
-
-const READ_ONE = 'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id RETURN ' + COLUMNS
-
-const COMPLETE = [
-  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id AND q.status = $processing',
-  'SET q.status = $done, q.lease_owner = null, q.lease_until = null, q.updated_at = $updated_at',
-  'RETURN q.id AS id',
-].join(' ')
-
-/** 一轮失败：attempts+1，未超限回 pending（可重试）、超限进 failed（死信）。 */
-const FAIL_TEMPLATE = [
-  'MATCH (q:' + L1_INBOX_TABLE + ') WHERE q.id = $id AND q.status = $processing',
-  'SET q.status = $status, q.attempts = $attempts, q.lease_owner = null,',
-  '    q.lease_until = $lease_until, q.last_error = $last_error, q.updated_at = $updated_at',
-  'RETURN q.id AS id',
-].join(' ')
-
-/** 启动回收：lease_until < now 的 processing 条目回 pending（活着的持有者不被抢）。 */
-const RECLAIM_EXPIRED = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.status = $processing AND q.lease_until < $now',
-  'SET q.status = $pending, q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
-  'RETURN q.id AS id',
-].join(' ')
-
-/**
- * 写者启动回收（R3②）：崩溃是一次失败——attempts+1 并记 last_error，达上限直接进 failed 死信，
- * 否则回 pending（不退避：进程刚重启，重试立即进行是期望行为）。
- */
-const RECLAIM_PROCESSING = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.status = $processing',
-  'SET q.status = CASE WHEN q.attempts + 1 > $max_retries THEN $failed ELSE $pending END,',
-  '    q.attempts = q.attempts + 1, q.last_error = $reclaim_error,',
-  '    q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
-  'RETURN q.id AS id',
-].join(' ')
-
-const COUNT_BY_STATUS = 'MATCH (q:' + L1_INBOX_TABLE + ') RETURN q.status AS status, count(q) AS total'
-
-const LIST_FAILED = [
-  'MATCH (q:' + L1_INBOX_TABLE + ')',
-  'WHERE q.status = $failed',
-  'RETURN ' + COLUMNS,
-  // id 只做同一毫秒（updated_at 相同）的并列次序，让死信视图完全确定（可断言）。
-  'ORDER BY q.updated_at DESC, q.id ASC LIMIT $limit',
-].join(' ')
+export interface FailInboxOptions {
+  readonly error: unknown
+  readonly now?: Date
+  /**
+   * true = 语义错（4xx / 输出截断），首次即降级、不再退避重试：直接进 failed 死信（AC:581）。
+   * 缺省 false = 瞬时失败，走 §14 的 5–120s 指数退避。
+   */
+  readonly fatal?: boolean
+}
 
 /** 参数化读：一律 prepare + execute（与 memory.ts 同一套形态）。 */
 async function queryRows(
@@ -228,20 +161,382 @@ function toInboxItem(row: Record<string, unknown>): InboxItem {
   }
 }
 
+const COLUMNS = [
+  'q.id AS id',
+  'q.session_id AS session_id',
+  'q.kind AS kind',
+  'q.payload AS payload',
+  'q.status AS status',
+  'q.attempts AS attempts',
+  'q.lease_owner AS lease_owner',
+  'q.lease_until AS lease_until',
+  'q.enqueued_at AS enqueued_at',
+  'q.updated_at AS updated_at',
+  'q.last_error AS last_error',
+].join(', ')
+
 /**
- * 建 INBOX 队列表（唯一迁移点由 src/db/database.ts 调用；范式同 audit.ts 的 ensureAuditTables：
- * DDL 在事务内执行，失败即整体回滚）。
+ * 一张队列表的全部语句（Story 2.5 / U1 泛化点）：这里**只**做表名替换，
+ * 语义与 2.2 的 `l1_inbox` 单表版本逐字相同。
  */
-export async function ensureInboxTables(connection: InboxConnection): Promise<void> {
-  await runInTransaction(connection, async () => {
-    await connection.query(createL1InboxTableStatement())
-  })
+interface InboxStatements {
+  readonly table: string
+  readonly insertItem: string
+  readonly claimHead: string
+  readonly claimHeadAfter: string
+  readonly claimMark: string
+  readonly readOne: string
+  readonly complete: string
+  readonly failTemplate: string
+  readonly reclaimExpired: string
+  readonly reclaimProcessing: string
+  readonly countByStatus: string
+  readonly listFailed: string
 }
+
+function createInboxStatements(table: string): InboxStatements {
+  const INSERT_ITEM = [
+    'MERGE (q:' + table + ' {id: $id})',
+    '  ON CREATE SET q.session_id = $session_id, q.kind = $kind, q.payload = $payload,',
+    '    q.status = $status, q.attempts = $attempts, q.lease_owner = $lease_owner,',
+    '    q.lease_until = $lease_until, q.enqueued_at = $enqueued_at, q.updated_at = $updated_at,',
+    '    q.last_error = $last_error',
+  ].join('')
+
+  const CLAIM_HEAD = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $pending',
+    '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
+    'RETURN ' + COLUMNS,
+    'ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1',
+  ].join(' ')
+
+  /** 带游标的取队头：跳过本轮已尝试过的条目（失败回 pending 后不在同一轮被重复取出）。 */
+  const CLAIM_HEAD_AFTER = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $pending',
+    '  AND (q.lease_until IS NULL OR q.lease_until <= $now)',
+    '  AND (q.enqueued_at > $after_enqueued_at',
+    '       OR (q.enqueued_at = $after_enqueued_at AND q.id > $after_id))',
+    'RETURN ' + COLUMNS,
+    'ORDER BY q.enqueued_at ASC, q.id ASC LIMIT 1',
+  ].join(' ')
+
+  /** 条件写 lease：status 仍是 pending 才生效（拿不到行 = 竞态，本轮放弃）。 */
+  const CLAIM_MARK = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.id = $id AND q.status = $pending',
+    'SET q.status = $processing, q.lease_owner = $lease_owner,',
+    '    q.lease_until = $lease_until, q.updated_at = $updated_at',
+    'RETURN q.id AS id',
+  ].join(' ')
+
+  const READ_ONE = 'MATCH (q:' + table + ') WHERE q.id = $id RETURN ' + COLUMNS
+
+  const COMPLETE = [
+    'MATCH (q:' + table + ') WHERE q.id = $id AND q.status = $processing',
+    'SET q.status = $done, q.lease_owner = null, q.lease_until = null, q.updated_at = $updated_at',
+    'RETURN q.id AS id',
+  ].join(' ')
+
+  /** 一轮失败：attempts+1，未超限回 pending（可重试）、超限进 failed（死信）。 */
+  const FAIL_TEMPLATE = [
+    'MATCH (q:' + table + ') WHERE q.id = $id AND q.status = $processing',
+    'SET q.status = $status, q.attempts = $attempts, q.lease_owner = null,',
+    '    q.lease_until = $lease_until, q.last_error = $last_error, q.updated_at = $updated_at',
+    'RETURN q.id AS id',
+  ].join(' ')
+
+  /** 启动回收：lease_until < now 的 processing 条目回 pending（活着的持有者不被抢）。 */
+  const RECLAIM_EXPIRED = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $processing AND q.lease_until < $now',
+    'SET q.status = $pending, q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
+    'RETURN q.id AS id',
+  ].join(' ')
+
+  /**
+   * 写者启动回收（R3②）：崩溃是一次失败——attempts+1 并记 last_error，达上限直接进 failed 死信，
+   * 否则回 pending（不退避：进程刚重启，重试立即进行是期望行为）。
+   */
+  const RECLAIM_PROCESSING = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $processing',
+    'SET q.status = CASE WHEN q.attempts + 1 > $max_retries THEN $failed ELSE $pending END,',
+    '    q.attempts = q.attempts + 1, q.last_error = $reclaim_error,',
+    '    q.lease_owner = null, q.lease_until = null, q.updated_at = $now',
+    'RETURN q.id AS id',
+  ].join(' ')
+
+  const COUNT_BY_STATUS = 'MATCH (q:' + table + ') RETURN q.status AS status, count(q) AS total'
+
+  const LIST_FAILED = [
+    'MATCH (q:' + table + ')',
+    'WHERE q.status = $failed',
+    'RETURN ' + COLUMNS,
+    // id 只做同一毫秒（updated_at 相同）的并列次序，让死信视图完全确定（可断言）。
+    'ORDER BY q.updated_at DESC, q.id ASC LIMIT $limit',
+  ].join(' ')
+
+  return {
+    table,
+    insertItem: INSERT_ITEM,
+    claimHead: CLAIM_HEAD,
+    claimHeadAfter: CLAIM_HEAD_AFTER,
+    claimMark: CLAIM_MARK,
+    readOne: READ_ONE,
+    complete: COMPLETE,
+    failTemplate: FAIL_TEMPLATE,
+    reclaimExpired: RECLAIM_EXPIRED,
+    reclaimProcessing: RECLAIM_PROCESSING,
+    countByStatus: COUNT_BY_STATUS,
+    listFailed: LIST_FAILED,
+  }
+}
+
+/** 一个队列实例的能力面（表名在创建时绑定）。 */
+export interface InboxQueue {
+  readonly table: string
+  /** 建表（唯一迁移点由 src/db/database.ts 调用；DDL 在事务内执行，失败即整体回滚）。 */
+  ensureTables(connection: InboxConnection): Promise<void>
+  /** 在**调用方已开启的事务**内入队（采集侧「L0 行 + INBOX 行」同事务用）。 */
+  writeItem(connection: InboxConnection, input: InboxItemInput): Promise<string>
+  /** 入队的便利包装：**自带事务**，不得在已有事务内调用。 */
+  enqueue(connection: InboxConnection, input: InboxItemInput): Promise<string>
+  claimNext(connection: InboxConnection, options?: ClaimInboxOptions): Promise<InboxItem | null>
+  /** 标 done，**由调用方开事务**；带 processing 守卫（at-most-once 的支点）。 */
+  markDone(connection: InboxConnection, id: string, options?: { readonly now?: Date }): Promise<boolean>
+  /** 标 done 的便利包装：自带事务。 */
+  complete(connection: InboxConnection, id: string, options?: { readonly now?: Date }): Promise<boolean>
+  readStatus(connection: InboxConnection, id: string): Promise<InboxStatus | null>
+  fail(connection: InboxConnection, id: string, options: FailInboxOptions): Promise<FailInboxResult>
+  reclaimExpired(connection: InboxConnection, options?: { readonly now?: Date }): Promise<number>
+  reclaimProcessing(connection: InboxConnection, options?: { readonly now?: Date }): Promise<number>
+  countByStatus(connection: InboxConnection): Promise<Record<InboxStatus, number>>
+  listRecentFailed(
+    connection: InboxConnection,
+    options?: { readonly now?: Date; readonly limit?: number },
+  ): Promise<InboxFailedItem[]>
+}
+
+/**
+ * 建一个绑定到 `table` 的队列实例。
+ *
+ * 复用与查表：
+ * - L1 精炼队列 = {@link l1InboxQueue}（`l1_inbox`，2.2 起的主路径）；
+ * - L2 提升队列 = {@link l2InboxQueue}（`l2_inbox`，Story 2.5 / U1）。
+ *
+ * **表名不来自用户输入**：调用方只应传 src/db/schema.ts 导出的表名常量。
+ */
+export function createInboxQueue(table: string): InboxQueue {
+  const statements = createInboxStatements(table)
+
+  const writeItem = async (connection: InboxConnection, input: InboxItemInput): Promise<string> => {
+    const id = input.id ?? randomUUID()
+    const now = (input.now ?? new Date()).toISOString()
+    await queryRows(connection, statements.insertItem, {
+      id,
+      session_id: input.sessionId ?? '',
+      kind: input.kind ?? '',
+      payload: input.payload,
+      status: INBOX_STATUS_PENDING,
+      attempts: 0,
+      lease_owner: null,
+      lease_until: null,
+      enqueued_at: now,
+      updated_at: now,
+      last_error: null,
+    })
+    return id
+  }
+
+  const markDone = async (
+    connection: InboxConnection,
+    id: string,
+    options: { readonly now?: Date } = {},
+  ): Promise<boolean> => {
+    const updatedAt = (options.now ?? new Date()).toISOString()
+    const rows = await queryRows(connection, statements.complete, {
+      id,
+      processing: INBOX_STATUS_PROCESSING,
+      done: INBOX_STATUS_DONE,
+      updated_at: updatedAt,
+    })
+    return rows.length > 0
+  }
+
+  const reclaim = async (
+    connection: InboxConnection,
+    statement: string,
+    params: Record<string, lbug.LbugValue>,
+  ): Promise<number> => {
+    return runInTransaction(connection, async () => {
+      const rows = await queryRows(connection, statement, params)
+      return rows.length
+    })
+  }
+
+  return {
+    table,
+    async ensureTables(connection) {
+      await runInTransaction(connection, async () => {
+        await connection.query(createInboxTableStatement(table))
+      })
+    },
+    writeItem,
+    async enqueue(connection, input) {
+      return runInTransaction(connection, () => writeItem(connection, input))
+    },
+    async claimNext(connection, options = {}) {
+      const owner = options.owner ?? String(process.pid)
+      const now = options.now ?? new Date()
+      const leaseUntil = new Date(now.getTime() + (options.leaseMs ?? INBOX_LEASE_MS)).toISOString()
+      const updatedAt = now.toISOString()
+      return runInTransaction(connection, async () => {
+        const rows = options.after
+          ? await queryRows(connection, statements.claimHeadAfter, {
+            pending: INBOX_STATUS_PENDING,
+            now: updatedAt,
+            after_enqueued_at: options.after.enqueuedAt,
+            after_id: options.after.id,
+          })
+          : await queryRows(connection, statements.claimHead, { pending: INBOX_STATUS_PENDING, now: updatedAt })
+        const row = rows[0]
+        if (!row) return null
+        const item = toInboxItem(row)
+        const claimed = await queryRows(connection, statements.claimMark, {
+          id: item.id,
+          pending: INBOX_STATUS_PENDING,
+          processing: INBOX_STATUS_PROCESSING,
+          lease_owner: owner,
+          lease_until: leaseUntil,
+          updated_at: updatedAt,
+        })
+        if (claimed.length === 0) return null
+        return { ...item, status: INBOX_STATUS_PROCESSING, leaseOwner: owner, leaseUntil, updatedAt }
+      })
+    },
+    markDone,
+    async complete(connection, id, options = {}) {
+      return runInTransaction(connection, () => markDone(connection, id, options))
+    },
+    async readStatus(connection, id) {
+      const rows = await queryRows(connection, statements.readOne, { id })
+      const row = rows[0]
+      return row ? (String(row.status ?? '') as InboxStatus) : null
+    },
+    async fail(connection, id, options) {
+      const now = options.now ?? new Date()
+      const updatedAt = now.toISOString()
+      const lastError = inboxErrorText(options.error)
+      return runInTransaction(connection, async () => {
+        const rows = await queryRows(connection, statements.readOne, { id })
+        const row = rows[0]
+        if (!row) throw new Error('INBOX 条目不存在（id=' + id + '）：无法记录失败')
+        const current = toInboxItem(row)
+        if (current.status !== INBOX_STATUS_PROCESSING) return { status: current.status, attempts: current.attempts }
+        const attempts = current.attempts + 1
+        const status = options.fatal === true || attempts > INBOX_MAX_RETRIES
+          ? INBOX_STATUS_FAILED
+          : INBOX_STATUS_PENDING
+        const written = await queryRows(connection, statements.failTemplate, {
+          id,
+          processing: INBOX_STATUS_PROCESSING,
+          status,
+          attempts,
+          lease_until: status === INBOX_STATUS_PENDING
+            ? new Date(now.getTime() + inboxBackoffMs(attempts)).toISOString()
+            : null,
+          last_error: lastError,
+          updated_at: updatedAt,
+        })
+        // N8：语句带 status 守卫，同事务内刚读到 processing 故不应未命中；真未命中按 no-op 返回，
+        // 不抛错——避免异常冲出消费者的 for 循环。
+        if (written.length === 0) return { status: current.status, attempts: current.attempts }
+        return { status, attempts }
+      })
+    },
+    async reclaimExpired(connection, options = {}) {
+      const now = options.now ?? new Date()
+      return reclaim(connection, statements.reclaimExpired, {
+        processing: INBOX_STATUS_PROCESSING,
+        pending: INBOX_STATUS_PENDING,
+        now: now.toISOString(),
+      })
+    },
+    async reclaimProcessing(connection, options = {}) {
+      const now = options.now ?? new Date()
+      return reclaim(connection, statements.reclaimProcessing, {
+        processing: INBOX_STATUS_PROCESSING,
+        pending: INBOX_STATUS_PENDING,
+        failed: INBOX_STATUS_FAILED,
+        max_retries: INBOX_MAX_RETRIES,
+        reclaim_error: INBOX_RECLAIM_ERROR,
+        now: now.toISOString(),
+      })
+    },
+    async countByStatus(connection) {
+      const counts = {
+        [INBOX_STATUS_PENDING]: 0,
+        [INBOX_STATUS_PROCESSING]: 0,
+        [INBOX_STATUS_DONE]: 0,
+        [INBOX_STATUS_FAILED]: 0,
+      } as Record<InboxStatus, number>
+      const rows = await queryRows(connection, statements.countByStatus, {})
+      for (const row of rows) {
+        const status = String(row.status ?? '')
+        if ((INBOX_STATUSES as readonly string[]).includes(status)) {
+          counts[status as InboxStatus] += Number(row.total ?? 0)
+        }
+      }
+      return counts
+    },
+    async listRecentFailed(connection, options = {}) {
+      const now = (options.now ?? new Date()).getTime()
+      const limit = Math.max(0, Math.trunc(options.limit ?? INBOX_FAILED_VIEW_LIMIT))
+      if (limit === 0) return []
+      const rows = await queryRows(connection, statements.listFailed, {
+        failed: INBOX_STATUS_FAILED,
+        limit,
+      })
+      return rows.map((row) => {
+        const updatedAt = String(row.updated_at ?? '')
+        const at = Date.parse(updatedAt)
+        return {
+          id: String(row.id ?? ''),
+          kind: String(row.kind ?? ''),
+          attempts: Number(row.attempts ?? 0),
+          lastError: nullishToString(row.last_error),
+          updatedAt,
+          stale: Number.isFinite(at) ? now - at > INBOX_FAILED_STALE_MS : false,
+        }
+      })
+    },
+  }
+}
+
+/** L1 精炼队列（`l1_inbox`）：Story 2.2 起的主路径。 */
+export const l1InboxQueue: InboxQueue = createInboxQueue(L1_INBOX_TABLE)
+/** L2 提升队列（`l2_inbox`）：Story 2.5 / U1。 */
+export const l2InboxQueue: InboxQueue = createInboxQueue(L2_INBOX_TABLE)
 
 /** 错误摘要（落 last_error 列 + 日志；截断到 INBOX_LAST_ERROR_MAX_CHARS）。 */
 export function inboxErrorText(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
   return message.length > INBOX_LAST_ERROR_MAX_CHARS ? message.slice(0, INBOX_LAST_ERROR_MAX_CHARS) : message
+}
+
+/**
+ * 建 INBOX 队列表（唯一迁移点由 src/db/database.ts 调用；范式同 audit.ts 的 ensureAuditTables：
+ * DDL 在事务内执行，失败即整体回滚）。
+ */
+export async function ensureInboxTables(connection: InboxConnection): Promise<void> {
+  await l1InboxQueue.ensureTables(connection)
+}
+
+/** 建 L2 提升队列表（Story 2.5 / U1）：与 l1_inbox 同列同状态机。 */
+export async function ensureL2InboxTables(connection: InboxConnection): Promise<void> {
+  await l2InboxQueue.ensureTables(connection)
 }
 
 /**
@@ -255,22 +550,7 @@ export async function writeInboxItem(
   connection: InboxConnection,
   input: InboxItemInput,
 ): Promise<string> {
-  const id = input.id ?? randomUUID()
-  const now = (input.now ?? new Date()).toISOString()
-  await queryRows(connection, INSERT_ITEM, {
-    id,
-    session_id: input.sessionId ?? '',
-    kind: input.kind ?? '',
-    payload: input.payload,
-    status: INBOX_STATUS_PENDING,
-    attempts: 0,
-    lease_owner: null,
-    lease_until: null,
-    enqueued_at: now,
-    updated_at: now,
-    last_error: null,
-  })
-  return id
+  return l1InboxQueue.writeItem(connection, input)
 }
 
 /**
@@ -284,17 +564,7 @@ export async function enqueueInboxItem(
   connection: InboxConnection,
   input: InboxItemInput,
 ): Promise<string> {
-  return runInTransaction(connection, () => writeInboxItem(connection, input))
-}
-
-export interface ClaimInboxOptions {
-  /** lease 持有者标识，缺省进程 id（AC1）。 */
-  readonly owner?: string
-  readonly now?: Date
-  /** lease 时长，缺省 INBOX_LEASE_MS（60s）。 */
-  readonly leaseMs?: number
-  /** FIFO 游标：只取严格晚于该条目的队头（一轮内跳过已尝试条目）。 */
-  readonly after?: { readonly enqueuedAt: string; readonly id: string }
+  return l1InboxQueue.enqueue(connection, input)
 }
 
 /**
@@ -305,33 +575,7 @@ export async function claimNextInboxItem(
   connection: InboxConnection,
   options: ClaimInboxOptions = {},
 ): Promise<InboxItem | null> {
-  const owner = options.owner ?? String(process.pid)
-  const now = options.now ?? new Date()
-  const leaseUntil = new Date(now.getTime() + (options.leaseMs ?? INBOX_LEASE_MS)).toISOString()
-  const updatedAt = now.toISOString()
-  return runInTransaction(connection, async () => {
-    const rows = options.after
-      ? await queryRows(connection, CLAIM_HEAD_AFTER, {
-        pending: INBOX_STATUS_PENDING,
-        now: updatedAt,
-        after_enqueued_at: options.after.enqueuedAt,
-        after_id: options.after.id,
-      })
-      : await queryRows(connection, CLAIM_HEAD, { pending: INBOX_STATUS_PENDING, now: updatedAt })
-    const row = rows[0]
-    if (!row) return null
-    const item = toInboxItem(row)
-    const claimed = await queryRows(connection, CLAIM_MARK, {
-      id: item.id,
-      pending: INBOX_STATUS_PENDING,
-      processing: INBOX_STATUS_PROCESSING,
-      lease_owner: owner,
-      lease_until: leaseUntil,
-      updated_at: updatedAt,
-    })
-    if (claimed.length === 0) return null
-    return { ...item, status: INBOX_STATUS_PROCESSING, leaseOwner: owner, leaseUntil, updatedAt }
-  })
+  return l1InboxQueue.claimNext(connection, options)
 }
 
 /**
@@ -346,14 +590,7 @@ export async function markInboxItemDone(
   id: string,
   options: { readonly now?: Date } = {},
 ): Promise<boolean> {
-  const updatedAt = (options.now ?? new Date()).toISOString()
-  const rows = await queryRows(connection, COMPLETE, {
-    id,
-    processing: INBOX_STATUS_PROCESSING,
-    done: INBOX_STATUS_DONE,
-    updated_at: updatedAt,
-  })
-  return rows.length > 0
+  return l1InboxQueue.markDone(connection, id, options)
 }
 
 /**
@@ -365,7 +602,7 @@ export async function completeInboxItem(
   id: string,
   options: { readonly now?: Date } = {},
 ): Promise<boolean> {
-  return runInTransaction(connection, () => markInboxItemDone(connection, id, options))
+  return l1InboxQueue.complete(connection, id, options)
 }
 
 /**
@@ -379,31 +616,13 @@ export async function readInboxItemStatus(
   connection: InboxConnection,
   id: string,
 ): Promise<InboxStatus | null> {
-  const rows = await queryRows(connection, READ_ONE, { id })
-  const row = rows[0]
-  return row ? (String(row.status ?? '') as InboxStatus) : null
-}
-
-export interface FailInboxResult {
-  /** 落库后的状态；条目本就不在 processing 时原样返回其当前状态（N8 no-op）。 */
-  readonly status: InboxStatus
-  readonly attempts: number
+  return l1InboxQueue.readStatus(connection, id)
 }
 
 /** 第 attempts 次失败后的退避（毫秒）：min(5s × 2^(attempts-1), 120s)（R3①）。 */
 export function inboxBackoffMs(attempts: number): number {
   const exponent = Math.max(0, Math.trunc(attempts) - 1)
   return Math.min(INBOX_BACKOFF_BASE_MS * 2 ** exponent, INBOX_BACKOFF_MAX_MS)
-}
-
-export interface FailInboxOptions {
-  readonly error: unknown
-  readonly now?: Date
-  /**
-   * true = 语义错（4xx / 输出截断），首次即降级、不再退避重试：直接进 failed 死信（AC:581）。
-   * 缺省 false = 瞬时失败，走 §14 的 5–120s 指数退避。
-   */
-  readonly fatal?: boolean
 }
 
 /**
@@ -418,51 +637,7 @@ export async function failInboxItem(
   id: string,
   options: FailInboxOptions,
 ): Promise<FailInboxResult> {
-  const now = options.now ?? new Date()
-  const updatedAt = now.toISOString()
-  const lastError = inboxErrorText(options.error)
-  return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, READ_ONE, { id })
-    const row = rows[0]
-    if (!row) throw new Error('INBOX 条目不存在（id=' + id + '）：无法记录失败')
-    const current = toInboxItem(row)
-    if (current.status !== INBOX_STATUS_PROCESSING) return { status: current.status, attempts: current.attempts }
-    const attempts = current.attempts + 1
-    const status = options.fatal === true || attempts > INBOX_MAX_RETRIES
-      ? INBOX_STATUS_FAILED
-      : INBOX_STATUS_PENDING
-    const written = await queryRows(connection, FAIL_TEMPLATE, {
-      id,
-      processing: INBOX_STATUS_PROCESSING,
-      status,
-      attempts,
-      lease_until: status === INBOX_STATUS_PENDING
-        ? new Date(now.getTime() + inboxBackoffMs(attempts)).toISOString()
-        : null,
-      last_error: lastError,
-      updated_at: updatedAt,
-    })
-    // N8：语句带 status 守卫，同事务内刚读到 processing 故不应未命中；真未命中按 no-op 返回，
-    // 不抛错——避免异常冲出消费者的 for 循环。
-    if (written.length === 0) return { status: current.status, attempts: current.attempts }
-    return { status, attempts }
-  })
-}
-
-/**
- * 两个回收口径的**唯一实现**：statement 的 WHERE 决定回收范围，参数由调用方给
- * （两个口径的 SET 已不同：过期回收保留 attempts，崩溃回收把这次崩溃记成一次失败）。
- * 返回回收条数。
- */
-async function reclaimProcessing(
-  connection: InboxConnection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<number> {
-  return runInTransaction(connection, async () => {
-    const rows = await queryRows(connection, statement, params)
-    return rows.length
-  })
+  return l1InboxQueue.fail(connection, id, options)
 }
 
 /**
@@ -473,12 +648,7 @@ export async function reclaimExpiredLeases(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  const now = options.now ?? new Date()
-  return reclaimProcessing(connection, RECLAIM_EXPIRED, {
-    processing: INBOX_STATUS_PROCESSING,
-    pending: INBOX_STATUS_PENDING,
-    now: now.toISOString(),
-  })
+  return l1InboxQueue.reclaimExpired(connection, options)
 }
 
 /**
@@ -501,35 +671,14 @@ export async function reclaimProcessingInboxItems(
   connection: InboxConnection,
   options: { readonly now?: Date } = {},
 ): Promise<number> {
-  const now = options.now ?? new Date()
-  return reclaimProcessing(connection, RECLAIM_PROCESSING, {
-    processing: INBOX_STATUS_PROCESSING,
-    pending: INBOX_STATUS_PENDING,
-    failed: INBOX_STATUS_FAILED,
-    max_retries: INBOX_MAX_RETRIES,
-    reclaim_error: INBOX_RECLAIM_ERROR,
-    now: now.toISOString(),
-  })
+  return l1InboxQueue.reclaimProcessing(connection, options)
 }
 
 /** 按状态计数（缺失状态补 0）；只发一条聚合语句，未出现在结果里的状态留 0。 */
 export async function countInboxByStatus(
   connection: InboxConnection,
 ): Promise<Record<InboxStatus, number>> {
-  const counts = {
-    [INBOX_STATUS_PENDING]: 0,
-    [INBOX_STATUS_PROCESSING]: 0,
-    [INBOX_STATUS_DONE]: 0,
-    [INBOX_STATUS_FAILED]: 0,
-  } as Record<InboxStatus, number>
-  const rows = await queryRows(connection, COUNT_BY_STATUS, {})
-  for (const row of rows) {
-    const status = String(row.status ?? '')
-    if ((INBOX_STATUSES as readonly string[]).includes(status)) {
-      counts[status as InboxStatus] += Number(row.total ?? 0)
-    }
-  }
-  return counts
+  return l1InboxQueue.countByStatus(connection)
 }
 
 /** 最近失败条目（updated_at 倒序，最多 limit 条）+ stale 标注（AC4）。 */
@@ -537,20 +686,5 @@ export async function listRecentFailedInboxItems(
   connection: InboxConnection,
   options: { readonly now?: Date; readonly limit?: number } = {},
 ): Promise<InboxFailedItem[]> {
-  const now = (options.now ?? new Date()).getTime()
-  const limit = Math.max(0, Math.trunc(options.limit ?? INBOX_FAILED_VIEW_LIMIT))
-  if (limit === 0) return []
-  const rows = await queryRows(connection, LIST_FAILED, { failed: INBOX_STATUS_FAILED, limit })
-  return rows.map((row) => {
-    const updatedAt = String(row.updated_at ?? '')
-    const at = Date.parse(updatedAt)
-    return {
-      id: String(row.id ?? ''),
-      kind: String(row.kind ?? ''),
-      attempts: Number(row.attempts ?? 0),
-      lastError: nullishToString(row.last_error),
-      updatedAt,
-      stale: Number.isFinite(at) ? now - at > INBOX_FAILED_STALE_MS : false,
-    }
-  })
+  return l1InboxQueue.listRecentFailed(connection, options)
 }
