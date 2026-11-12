@@ -231,12 +231,12 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     // 与刚写的 L1 节点构成 l0_raw→memory 的 EVIDENCE 边（2.5 判据②的链头）。
     let marked = false
     // 事务外仍需这份清单（关系识别在事务提交后跑），故声明在闭包之外。
-    // writtenL1 = 本次**每个**产出节点（含指纹合并 / 语义合并 / 版本作废命中既有节点）：
-    //   它们都新增了 source_refs，需要物化成 EVIDENCE 边（X1 语义）。
+    // writtenL1Ids = 本次**每个**产出节点 id（含指纹合并 / 语义合并 / 版本作废命中既有节点）：
+    //   它们都新增了 source_refs，需要物化成 EVIDENCE 边（X1 语义）。建边只用到 id。
     // relationEntries = **只含新节点**（outcome === 'created' | 'version-invalidated'）：
     //   评审 P2（T2）——关系是一次性决定（AC4）。合并命中既有节点时它早已跑过关系识别，
     //   再跑一次会突破「每条新记忆 ≤5 条 RELATED」并产生噪声边。
-    const writtenL1: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
+    const writtenL1Ids: string[] = []
     const relationEntries: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
     // 评审补钉 P20：若本轮因语义扫描失败而退化成「只走指纹」，在**成功那次事务内**留一条痕迹。
     let scanDegraded: string | null = null
@@ -252,7 +252,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     const writeL1 = async (skipSemanticScan: boolean): Promise<void> => {
       // 重跑前把闭包状态复位（首轮失败时可能已推进到一半）。
       marked = false
-      writtenL1.length = 0
+      writtenL1Ids.length = 0
       relationEntries.length = 0
       await runInTransaction(connection, async () => {
         marked = await markInboxItemDone(connection, item.id, { now: now() })
@@ -281,20 +281,19 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
             },
             { now, logger: deps.logger, scanFailure: 'throw', skipSemanticScan },
           )
-          const entry = { id: result.id, text: fact.text, kind: existing ? existing.kind : fact.kind, vector }
-          writtenL1.push(entry)
+          writtenL1Ids.push(result.id)
           if (result.outcome === 'created' || result.outcome === 'version-invalidated') {
-            relationEntries.push(entry)
+            relationEntries.push({ id: result.id, text: fact.text, kind: existing ? existing.kind : fact.kind, vector })
           }
         }
         // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
         // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
         const edgeResult = await writeEvidenceEdges(
           connection,
-          writtenL1.map((node: { readonly id: string }) => ({
+          writtenL1Ids.map((id) => ({
             fromId: item.id,
             fromLayer: L0_LAYER,
-            toId: node.id,
+            toId: id,
             toLayer: MEMORY_REMEMBER_LAYER,
             reason: 'refine',
           })),

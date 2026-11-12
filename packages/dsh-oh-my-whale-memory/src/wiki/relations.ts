@@ -131,18 +131,14 @@ export async function recallNeighbors(
     // 空串时恒真（`<> ''` 对非空 id 恒成立），故不传 excludeId 时行为不变。
     self_id: input.excludeId ?? '',
   })
-  const neighbors: RecallNeighbor[] = []
-  for (const row of rows) {
-    const id = String(row.id)
-    neighbors.push({
-      id,
-      layer: String(row.layer),
-      kind: row.kind === null || row.kind === undefined ? '' : String(row.kind),
-      text: String(row.text ?? ''),
-      distance: Number(row.distance ?? Number.POSITIVE_INFINITY),
-    })
-  }
-  return neighbors.slice(0, k)
+  // 取前 k 条再映射：$k 已在索引扫描内，这里只裁掉「排除自身时多要的那一条」。
+  return rows.slice(0, k).map((row) => ({
+    id: String(row.id),
+    layer: String(row.layer),
+    kind: row.kind === null || row.kind === undefined ? '' : String(row.kind),
+    text: String(row.text ?? ''),
+    distance: Number(row.distance ?? Number.POSITIVE_INFINITY),
+  }))
 }
 
 export interface RelationProposal {
