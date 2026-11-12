@@ -47,6 +47,7 @@ import {
   buildJudgeKey,
   insertGenerationLog,
   insertKeyedDecision,
+  type GenerationLogOutcome,
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
@@ -358,36 +359,32 @@ export async function writeDeduplicatedMemory(
       ? input
       : { ...input, embedding: null, embeddingModelId: null }
 
+  // 五条路径的审计行共用同一组记账字段（U10）：只有 action / outcome / reason 不同。
+  // 与 processor.ts 同一契约——不自开事务，事务边界由调用方决定（本原语整体在同一事务内）。
+  const audit = (action: string, outcome: GenerationLogOutcome, reason: string): Promise<string> =>
+    insertGenerationLog(connection, {
+      recordedAt: nowIso,
+      actor: input.actor ?? 'system',
+      kind: CAPTURE_KIND,
+      action,
+      policy: DEFAULT_CAPTURE_POLICY,
+      l0Refs: sourceRefs,
+      outcome,
+      reason,
+    })
+
   // ---- 路径①：指纹幂等（FR-15 路径①）+ 墓碑语义（评审 P1）----
   const existing = await getMemoryById(connection, id)
   if (existing !== null) {
     if (existing.expiredAt !== null) {
       // 用户显式 forget（prd.md:293）优先于自动复活：保留失效态，只记一条 uncertain 供 7.2 过滤。
-      await insertGenerationLog(connection, {
-        recordedAt: nowIso,
-        actor: input.actor ?? 'system',
-        kind: CAPTURE_KIND,
-        action: RESURRECT_MEMORY_ACTION,
-        policy: DEFAULT_CAPTURE_POLICY,
-        l0Refs: sourceRefs,
-        outcome: 'uncertain',
-        reason: `skip-resurrect expired_at=${existing.expiredAt}`,
-      })
+      await audit(RESURRECT_MEMORY_ACTION, 'uncertain', `skip-resurrect expired_at=${existing.expiredAt}`)
       return { id: existing.id, recordedAt: existing.recordedAt, outcome: 'fingerprint-merge' }
     }
     if (existing.invalidAt !== null) {
       // 被路径③作废的旧版本被重申：**复活**。同文本生成不出第二个 id，不复活就等于把这条
       // 事实永久留在 recall 之外（评审 P1 / EC-1）。
-      await insertGenerationLog(connection, {
-        recordedAt: nowIso,
-        actor: input.actor ?? 'system',
-        kind: CAPTURE_KIND,
-        action: RESURRECT_MEMORY_ACTION,
-        policy: DEFAULT_CAPTURE_POLICY,
-        l0Refs: sourceRefs,
-        outcome: 'success',
-        reason: `revive previous_invalid_at=${existing.invalidAt}`,
-      })
+      await audit(RESURRECT_MEMORY_ACTION, 'success', `revive previous_invalid_at=${existing.invalidAt}`)
       const recordedAt = await resurrectMemoryNode(connection, {
         id,
         validAt: newValidAt,
@@ -434,16 +431,11 @@ export async function writeDeduplicatedMemory(
       ? undefined
       : duplicates.reduce((best, candidate) => (candidate.similarity > best.similarity ? candidate : best))
   if (duplicate !== undefined) {
-    await insertGenerationLog(connection, {
-      recordedAt: nowIso,
-      actor: input.actor ?? 'system',
-      kind: CAPTURE_KIND,
-      action: MERGE_SEMANTIC_ACTION,
-      policy: DEFAULT_CAPTURE_POLICY,
-      l0Refs: sourceRefs,
-      outcome: 'success',
-      reason: `semantic-merge similarity=${duplicate.similarity.toFixed(4)} threshold=${SEMANTIC_DUP_THRESHOLD}`,
-    })
+    await audit(
+      MERGE_SEMANTIC_ACTION,
+      'success',
+      `semantic-merge similarity=${duplicate.similarity.toFixed(4)} threshold=${SEMANTIC_DUP_THRESHOLD}`,
+    )
     const recordedAt = await mergeSourceRefs(connection, duplicate.id, sourceRefs)
     return { id: duplicate.id, recordedAt, outcome: 'semantic-merge' }
   }
@@ -457,16 +449,7 @@ export async function writeDeduplicatedMemory(
   )
   if (versionHits.length > 1) {
     // 命中多条：无从判断谁是旧版本 ⇒ 一律不作废（安全缺省），记 uncertain 供 7.2 过滤。
-    await insertGenerationLog(connection, {
-      recordedAt: nowIso,
-      actor: input.actor ?? 'system',
-      kind: CAPTURE_KIND,
-      action: INVALIDATE_VERSION_ACTION,
-      policy: DEFAULT_CAPTURE_POLICY,
-      l0Refs: sourceRefs,
-      outcome: 'uncertain',
-      reason: 'ambiguous-version-candidates',
-    })
+    await audit(INVALIDATE_VERSION_ACTION, 'uncertain', 'ambiguous-version-candidates')
     const written = await writeMemoryVersion(connection, input, options)
     return { id: written.id, recordedAt: written.recordedAt, outcome: 'created' }
   }
@@ -478,18 +461,12 @@ export async function writeDeduplicatedMemory(
     const oldValidAt = oldVersion.validAt ?? newValidAt
     const invalidAt = newValidAt > oldValidAt ? newValidAt : oldValidAt
     // AD-10 置序：先写 log，再写键式裁决，再动作废指针，最后写新节点。
-    await insertGenerationLog(connection, {
-      recordedAt: nowIso,
-      actor: input.actor ?? 'system',
-      kind: CAPTURE_KIND,
-      action: INVALIDATE_VERSION_ACTION,
-      policy: DEFAULT_CAPTURE_POLICY,
-      l0Refs: sourceRefs,
-      outcome: 'success',
-      reason:
-        `version-presentation similarity=${oldVersion.similarity.toFixed(4)} ` +
+    await audit(
+      INVALIDATE_VERSION_ACTION,
+      'success',
+      `version-presentation similarity=${oldVersion.similarity.toFixed(4)} ` +
         `window=[${VERSION_AFFINITY_MIN_SIMILARITY},${SEMANTIC_DUP_THRESHOLD}) invalid_at=${invalidAt}`,
-    })
+    )
     // 评审 P4：这次版本替换必须留下**可重建的键式裁决**，否则 AUDIT_GAP_STATEMENT
     //（已失效且无 k.old_id = m.id 的裁决行）会把每一次正常替换都永久计成缺口。
     await insertKeyedDecision(connection, {
