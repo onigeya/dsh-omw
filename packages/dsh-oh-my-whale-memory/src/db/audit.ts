@@ -112,7 +112,7 @@ export const WRITE_EVIDENCE_SKIPPED_ACTION = 'write_evidence_skipped'
 export const L2_PROMOTION_ACTION = 'l2_promotion'
 
 /**
- * 来源 L1 被标 `gate-fail` 的标注行 action（Story 2.5 / epics.md:667）。
+ * 来源 L1 被标 `gate-fail` 的标注行 action（Story 2.5 / epics.md:744「丢弃候选并将来源 L1 标 gate-fail」）。
  * **不是**对 L1 的作废：L1 仍可召回，这里只落一条标注行。
  */
 export const GATE_FAIL_ACTION = 'gate_fail'
