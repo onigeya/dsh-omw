@@ -3,7 +3,12 @@
  *
  * 列契约（AC2，与 ARCHITECTURE-SPINE ER 图一致）：
  * - memory：id/layer/kind/priority/text/embedding FLOAT[DIM]/
- *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim
+ *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim/parent_id
+ *
+ * Epic 2 加列（Story 2.4 / U1）：memory.parent_id（STRING，被作废的旧版本节点 id，挂在新节点上）。
+ * 新库由 createMemoryTableStatement 直接带上；旧库因 CREATE ... IF NOT EXISTS 是 no-op，
+ * 由 database.ts 的唯一迁移点用幂等 `ALTER TABLE memory ADD parent_id STRING` 补列。
+ * SCHEMA_VERSION 不变（它只被写、从不被读取，改它只会让新旧库版本串不一致）。
  * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）
  * - omw_meta：库级元数据（embedding_dim、embedding_model_id、schema_version、created_at）
  *
@@ -56,9 +61,22 @@ export function createMemoryTableStatement(dim: number): string {
     '  source_refs STRING[],',
     '  embedding_model_id STRING,',
     '  embedding_dim INT64,',
+    '  parent_id STRING,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
+}
+
+/** Epic 2 新增列（Story 2.4 / U1）：旧库补列的幂等迁移目标。 */
+export const PARENT_ID_COLUMN = 'parent_id'
+
+/**
+ * 旧库补 parent_id 列（Story 2.4 / U1）。LadybugDB 0.22.3 实测可用；
+ * 幂等性由调用方保证（先 readTableColumns 判列，缺列才执行）——重复执行会抛
+ * "Binder exception: Property parent_id already exists"，故不做 IF NOT EXISTS。
+ */
+export function alterMemoryAddParentIdStatement(): string {
+  return `ALTER TABLE ${MEMORY_TABLE} ADD ${PARENT_ID_COLUMN} STRING`
 }
 
 export function createL0RawTableStatement(): string {

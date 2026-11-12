@@ -35,6 +35,7 @@ const BASE_SNAPSHOT: MemoryStatusSnapshot = {
   inboxes: { L1: 3, L2: 4 },
   failed: 0,
   embeddingMode: 'enabled',
+  unembedded: 0,
   readonly: false,
   auditGap: 0,
 }

@@ -89,6 +89,11 @@ export interface InboxConsumerOptions {
    * 可返回 {@link InboxProcessResult} 声明「已在事务内标 done」与「精炼后的 kind」（R1 / R4①）。
    */
   readonly process?: (item: InboxItem) => Promise<InboxProcessResult | void>
+  /**
+   * 可选维护钩子（Story 2.4 / U5）：FIFO 循环**之后**、gate 仍空闲且未请求停止时调用一次。
+   * NULL 向量回填挂在这里——复用本轮的定时器，不新增 ctx.effect，天然被 stop()→drain 覆盖。
+   */
+  readonly maintenance?: () => Promise<unknown>
   readonly promotion?: PromotionTracker
   readonly logger?: { warn(message: string): void }
 }
@@ -113,13 +118,17 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
 
   const runOnce = async (): Promise<number> => {
     const process = options.process
-    if (!process) return 0
+    const maintenance = options.maintenance
+    // 既无处理器也无维护钩子 = 本实例不消费（2.2 的缺省「不消费」语义不变）。
+    if (!process && !maintenance) return 0
     if (!options.gate.isIdle()) return 0
     const connection = options.connection()
     if (!connection) return 0
     let processed = 0
     let after: { enqueuedAt: string; id: string } | undefined
     for (;;) {
+      // 无处理器：跳过 FIFO，直接进下面的维护段（Story 2.4 / U5）。
+      if (!process) break
       // stop() 后不再开新一轮取队；本条已取出/正在精炼的照常结算完（不丢条目）。
       if (stopRequested) break
       if (!options.gate.isIdle()) break
@@ -172,6 +181,15 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
         }
       } catch (error) {
         options.logger?.warn('INBOX 提升记账失败（id=' + item.id + '）：' + inboxErrorText(error))
+      }
+    }
+    // 空闲窗口里的可选维护（Story 2.4 / U5：NULL 向量回填）。gate 忙或已请求停止则跳过本 tick；
+    // 维护失败只告警不改变本轮消费结果（回填幂等，下一轮会重来）。
+    if (maintenance && !stopRequested && options.gate.isIdle()) {
+      try {
+        await maintenance()
+      } catch (error) {
+        options.logger?.warn('INBOX 维护轮次异常：' + inboxErrorText(error))
       }
     }
     return processed

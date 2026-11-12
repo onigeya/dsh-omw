@@ -50,7 +50,12 @@ import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
 import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
-import { countMemoriesByLayer, getMemoryById as readMemoryById, listMemories as readMemories } from './db/memory.js'
+import {
+  countMemoriesByLayer,
+  countUnembeddedMemories,
+  getMemoryById as readMemoryById,
+  listMemories as readMemories,
+} from './db/memory.js'
 import {
   createMemoryCommandDefinition,
   type MemoryCommandDependencies,
@@ -68,6 +73,7 @@ import { createIdleGate } from './inbox/idle-gate.js'
 import { createPromotionTracker } from './inbox/promotion-trigger.js'
 import { createSessionEventHandler } from './inbox/session-events.js'
 import { createCaptureRecorder } from './capture/recorder.js'
+import { createEmbeddingBackfill } from './embedding/backfill.js'
 import { createEmbeddingClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
 import { routeFromSession } from './distill/session-route.js'
@@ -241,6 +247,7 @@ export async function apply(
     const auditGap = await computeAuditGap(connection)
     // Story 2.2 / AC4：failed 换成 l1_inbox 的真实计数；有条目才读明细（最近 5 条 + stale），
     // 无失败时不追加任何行，status 既有输出逐字不变。队列表缺失照抛（可见错误，不静默报 0）。
+    const unembedded = await countUnembeddedMemories(connection)
     const inboxCounts = await countInboxByStatus(connection)
     const failedEntries = inboxCounts.failed > 0
       ? await listRecentFailedInboxItems(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
@@ -251,6 +258,7 @@ export async function apply(
       failed: inboxCounts.failed,
       failedEntries,
       embeddingMode: resolved.embeddingMode,
+      unembedded,
       readonly: instanceReadonly,
       readonlyReason: instanceReadonlyReason,
       auditGap,
@@ -427,11 +435,24 @@ export async function apply(
     embeddingModelId: embedding.modelId,
     logger: ctx.logger,
   })
+  // Story 2.4 / U5：NULL 向量有界回填——只在 embedding 客户端存在时接线，挂消费者的
+  // maintenance 钩子（空闲窗口、每轮 ≤50、不新增 ctx.effect/定时器；dispose 由既有 drain 覆盖）。
+  const embeddingBackfill = embeddingClient
+    ? createEmbeddingBackfill({
+      connection: () => db?.connection ?? null,
+      gate: idleGate,
+      client: embeddingClient,
+      model: resolved.embedding.model ?? '',
+      modelId: embedding.modelId,
+      logger: ctx.logger,
+    })
+    : null
   inboxConsumer = createInboxConsumer({
     connection: () => db?.connection ?? null,
     gate: idleGate,
     promotion: promotionTracker,
     process: inboxProcessor,
+    maintenance: embeddingBackfill ? () => embeddingBackfill.runOnce() : undefined,
     logger: ctx.logger,
   })
   inboxConsumer.start()
