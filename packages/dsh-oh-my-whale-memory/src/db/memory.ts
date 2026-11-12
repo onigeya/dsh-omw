@@ -89,6 +89,13 @@ export interface UpsertMemoryInput {
    * 写 memory.parent_id 列（旧库由初始化期幂等 ALTER 补出，见 database.ts）。
    */
   parentId?: string | null
+  /**
+   * 直接支撑该节点的**存活 L0 观测条数**（Story 2.5 / U16、AC③）：
+   * L1 = 其 source_refs 中命中存活 l0_raw（raw_text IS NOT NULL）的条数；
+   * L2 = 其直接前驱 L1 各自存活 L0 集的**并集去重**后计数。
+   * 只有质量门写 L2 时计算并传入；其余写入省略（列保持 NULL，只写不读）。
+   */
+  support?: number | null
 }
 
 export interface UpsertMemoryResult {
@@ -115,7 +122,7 @@ const UPSERT_STATEMENT = [
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
   '    m.embedding = $embedding, m.valid_at = $valid_at, m.recorded_at = $recorded_at,',
   '    m.source_refs = $source_refs, m.embedding_model_id = $embedding_model_id, m.embedding_dim = $embedding_dim,',
-  '    m.parent_id = $parent_id',
+  '    m.parent_id = $parent_id, m.support = $support',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -129,7 +136,7 @@ const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
   `MERGE (m:${MEMORY_TABLE} {id: $id})`,
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
   '    m.valid_at = $valid_at, m.recorded_at = $recorded_at, m.source_refs = $source_refs,',
-  '    m.parent_id = $parent_id',
+  '    m.parent_id = $parent_id, m.support = $support',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -185,6 +192,7 @@ export async function writeMemoryVersion(
     recorded_at: recordedAt,
     source_refs: sourceRefs,
     parent_id: input.parentId ?? null,
+    support: input.support == null ? null : Math.trunc(input.support),
   }
   if (embedding !== undefined) {
     params.embedding = embedding

@@ -3,9 +3,11 @@
  *
  * 列契约（AC2，与 ARCHITECTURE-SPINE ER 图一致）：
  * - memory：id/layer/kind/priority/text/embedding FLOAT[DIM]/
- *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim/parent_id
+ *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim/parent_id/support
  *
  * Epic 2 加列（Story 2.4 / U1）：memory.parent_id（STRING，被作废的旧版本节点 id，挂在新节点上）。
+ * Epic 2 加列（Story 2.5 / U16）：memory.support（INT64，直接支撑该节点的存活 L0 观测条数；
+ * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库因 CREATE ... IF NOT EXISTS 是 no-op，
  * 由 database.ts 的唯一迁移点用幂等 `ALTER TABLE memory ADD parent_id STRING` 补列。
  * SCHEMA_VERSION 不变（它只被写、从不被读取，改它只会让新旧库版本串不一致）。
@@ -64,6 +66,7 @@ export function createMemoryTableStatement(dim: number): string {
     '  embedding_model_id STRING,',
     '  embedding_dim INT64,',
     '  parent_id STRING,',
+    '  support INT64,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
@@ -79,6 +82,17 @@ export const PARENT_ID_COLUMN = 'parent_id'
  */
 export function alterMemoryAddParentIdStatement(): string {
   return `ALTER TABLE ${MEMORY_TABLE} ADD ${PARENT_ID_COLUMN} STRING`
+}
+
+/** Epic 2 新增列（Story 2.5 / U16）：support 的旧库补列目标（与 parent_id 同一模式）。 */
+export const SUPPORT_COLUMN = 'support'
+
+/**
+ * 旧库补 support 列（Story 2.5 / U16）。幂等性由调用方保证（先 readTableColumns 判列）——
+ * 重复执行会抛 "Binder exception: Property support already exists"，故不做 IF NOT EXISTS。
+ */
+export function alterMemoryAddSupportStatement(): string {
+  return `ALTER TABLE ${MEMORY_TABLE} ADD ${SUPPORT_COLUMN} INT64`
 }
 
 export function createL0RawTableStatement(): string {

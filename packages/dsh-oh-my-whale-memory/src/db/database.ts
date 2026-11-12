@@ -43,10 +43,12 @@ import {
   MEMORY_TABLE,
   META_TABLE,
   PARENT_ID_COLUMN,
+  SUPPORT_COLUMN,
   SCHEMA_VERSION,
   FTS_INDEX_NAME,
   VECTOR_INDEX_NAME,
   alterMemoryAddParentIdStatement,
+  alterMemoryAddSupportStatement,
   assertEmbeddingDim,
   createFtsIndexStatement,
   createL0RawTableStatement,
@@ -273,6 +275,11 @@ async function initializeDatabase(
   // 只读实例走 initializeReadOnlyDatabase，不经过本函数——绝不执行任何写语句（AC2）。
   if (columns !== null && !columns.has(PARENT_ID_COLUMN)) {
     await connection.query(alterMemoryAddParentIdStatement())
+  }
+  // Story 2.5（U16）：memory.support 的旧库补列，与 parent_id 同一模式（先判列再 ALTER，
+  // 不做 IF NOT EXISTS），同样由 write 路径独有：只读实例不经本函数。
+  if (columns !== null && !columns.has(SUPPORT_COLUMN)) {
+    await connection.query(alterMemoryAddSupportStatement())
   }
   await connection.query(createL0RawTableStatement())
   await ensureAuditTables(connection)
