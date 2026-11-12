@@ -38,6 +38,8 @@ const BASE_SNAPSHOT: MemoryStatusSnapshot = {
   unembedded: 0,
   readonly: false,
   auditGap: 0,
+  evidenceGap: { total: 0, eiiViolations: 0, drift: 0 },
+  relatedSkipped: 0,
 }
 
 const BASE_LINES = [

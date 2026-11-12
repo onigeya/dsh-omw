@@ -110,8 +110,10 @@ function statusText(
   overrides: Partial<Record<string, number>> = {},
   auditGap: number = 1,
   unembedded: number = 0,
+  evidenceGap: { total: number; eiiViolations: number; drift: number } | null = { total: 0, eiiViolations: 0, drift: 0 },
+  relatedSkipped: number | null = 0,
 ): string {
-  return [
+  const lines = [
     '记忆状态',
     `L1: ${overrides.L1 ?? 3}`,
     `L2: ${overrides.L2 ?? 1}`,
@@ -121,7 +123,16 @@ function statusText(
     `audit_gap: ${auditGap}`,
     unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
     'readonly: false',
-  ].join('\n')
+  ]
+  // Story 2.6 / F2：边侧差额与关系降级——与 command.ts 同一渲染口径。
+  if (evidenceGap === null) {
+    lines.push('evidence_gap: 未知（边表缺失）')
+  } else if (evidenceGap.total > 0) {
+    lines.push(`evidence_gap: ${evidenceGap.total}（EII ${evidenceGap.eiiViolations} / 漂移 ${evidenceGap.drift}）`)
+  }
+  if (relatedSkipped === null) lines.push('related_skipped: 未知（审计表缺失）')
+  else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
+  return lines.join('\n')
 }
 
 beforeAll(async () => {
@@ -170,7 +181,9 @@ describe('AC1：层计数来自 memory.layer 的真实分布', () => {
 
     expect(result.kind).toBe('success')
     // Story 2.4 / U5：6 条种子全无向量（那条 L1 墓碑已失效，不计入）。
-    expect(result.text).toBe(statusText({}, 1, 6))
+    // Story 2.6 / F2：6 条种子经 upsertMemory 直写、既无 source_refs 也无 L0 前驱 ⇒
+    // 全部构成 EII 违例，边侧差额追加一行；漂移为 0（无 source_refs 可漂）。
+    expect(result.text).toBe(statusText({}, 1, 6, { total: 6, eiiViolations: 6, drift: 0 }))
   })
 
   it('计数读取不改变库内容（只读语义：再查一次层分布不变）', async () => {
@@ -340,6 +353,10 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         // Story 2.4 / U5：只读夹具 4 条节点（L1×2 / L2×1 / L1_INBOX×1）全无向量。
         'embedding: enabled（未嵌入 4 条）',
         `readonly: true, reason: '${READONLY_REASON}'`,
+        // Story 2.6 / F2：只读夹具既不建边表也不建审计表 ⇒ 两个差额都算不出来，
+        // 与 audit_gap 同一约定显式渲染「未知」，绝不静默报 0。
+        'evidence_gap: 未知（边表缺失）',
+        'related_skipped: 未知（审计表缺失）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {

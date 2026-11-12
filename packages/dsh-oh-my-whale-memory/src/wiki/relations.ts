@@ -409,14 +409,25 @@ export async function recordRelatedSkip(
   )
 }
 
-/** `/memory status` 用的计数：被跳过/拒绝的关系写入条数（AD-21：必须可见）。 */
-export async function countRelatedSkips(connection: lbug.Connection): Promise<number> {
-  const rows = await queryRows(
-    connection,
-    'MATCH (g:' + 'generation_log' + " {action: '" + SKIP_RELATED_ACTION + "'}) RETURN count(*) AS c",
-    {},
-  )
-  return Number(rows[0]?.c ?? 0)
+/**
+ * `/memory status` 用的计数：被跳过/拒绝的关系写入条数（AD-21：必须可见）。
+ *
+ * 返回 null 表示**算不出来**（审计表不存在，例如只读降级实例）——与 `computeAuditGap` 同一
+ * 约定，调用方渲染「未知」，绝不静默报 0；其它错误照抛。
+ */
+export async function countRelatedSkips(connection: lbug.Connection): Promise<number | null> {
+  try {
+    const rows = await queryRows(
+      connection,
+      'MATCH (g:' + 'generation_log' + " {action: '" + SKIP_RELATED_ACTION + "'}) RETURN count(*) AS c",
+      {},
+    )
+    return Number(rows[0]?.c ?? 0)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/does not exist/i.test(message)) return null
+    throw error
+  }
 }
 
 /** 一个 L1 节点进入关系识别的输入（embedding 来自写时嵌入，不重算）。 */

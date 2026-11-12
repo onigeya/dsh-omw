@@ -39,6 +39,8 @@ const STATUS_BASE: MemoryStatusSnapshot = {
   unembedded: 0,
   readonly: false,
   auditGap: 0,
+  evidenceGap: { total: 0, eiiViolations: 0, drift: 0 },
+  relatedSkipped: 0,
 }
 
 describe('parseMemoryCommand（status 分支）', () => {
@@ -126,6 +128,22 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
     expect(disabled).toContain('embedding: disabled（降级检索）')
     expect(disabled).not.toContain('未嵌入')
   })
+  it('Story 2.6 / D7：evidence_gap 仅 total>0 时追加，null（边表缺失）渲染成未知', () => {
+    const zero = renderMemoryStatus({ ...STATUS_BASE, evidenceGap: { total: 0, eiiViolations: 0, drift: 0 } })
+    expect(zero).not.toContain('evidence_gap')
+    const some = renderMemoryStatus({ ...STATUS_BASE, evidenceGap: { total: 3, eiiViolations: 2, drift: 1 } })
+    expect(some).toContain('evidence_gap: 3（EII 2 / 漂移 1）')
+    const missing = renderMemoryStatus({ ...STATUS_BASE, evidenceGap: null })
+    expect(missing).toContain('evidence_gap: 未知（边表缺失）')
+    expect(missing).not.toContain('evidence_gap: 0')
+  })
+
+  it('Story 2.6 / AD-21：related_skipped 仅 > 0 时追加，null 渲染成未知', () => {
+    expect(renderMemoryStatus({ ...STATUS_BASE, relatedSkipped: 0 })).not.toContain('related_skipped')
+    expect(renderMemoryStatus({ ...STATUS_BASE, relatedSkipped: 4 })).toContain('related_skipped: 4')
+    expect(renderMemoryStatus({ ...STATUS_BASE, relatedSkipped: null })).toContain('related_skipped: 未知（审计表缺失）')
+  })
+
   it('disabled × 只读：两种降级同时可见', () => {
     const text = renderMemoryStatus({
       ...STATUS_BASE,
