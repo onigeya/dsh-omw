@@ -10,7 +10,7 @@
  * 故 prompt 要求保留跨事实的因果与教训，而不是罗列。
  */
 import { MAX_REFINE_FACT_TOKENS, estimateTokens, type LlmPort } from './llm-refine.js'
-import { foldStream } from './stream-fold.js'
+import { foldStream, type FoldedStream } from './stream-fold.js'
 
 /** sentinel preamble（§14）：字段说明永远不是合法值。 */
 export const L2_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
@@ -128,32 +128,26 @@ export function parseL2Output(raw: string): L2RefineResult {
   return { ok: true, statement: { text } }
 }
 
-export interface L2RefineInput {
-  readonly llm: LlmPort
-  readonly route: { readonly provider: string; readonly model: string }
-  readonly facts: readonly L2SourceFact[]
-  readonly signal: AbortSignal
-}
-
-/** 一次 L2 综合：**单次** ctx.llm.stream 调用（重试归任务层，与 2.3 同纪律）。 */
-export async function refineToL2(input: L2RefineInput): Promise<L2RefineResult> {
-  let folded: Awaited<ReturnType<typeof foldStream>>
+/**
+ * 折叠一次 ctx.llm.stream 调用的**公共终态处理**：综合与核实两个入口只差超长截断的文案，
+ * 其余分支（无 finish / error / aborted / max-tokens / 空文本）逐字相同。
+ *
+ * `open` 收成 thunk：`stream()` 可能**同步**抛错，必须在 try 内求值才能归入 llm-threw。
+ */
+async function foldLlmCall(
+  open: () => ReturnType<LlmPort['stream']>,
+  signal: AbortSignal,
+  truncatedMessage: string,
+): Promise<{ readonly ok: true; readonly text: string } | { readonly ok: false; readonly failure: L2RefineFailure }> {
+  let folded: FoldedStream
   try {
-    folded = await foldStream(
-      input.llm.stream({
-        provider: input.route.provider,
-        model: input.route.model,
-        messages: buildL2Messages(input.facts),
-        maxTokens: L2_MAX_OUTPUT_TOKENS,
-        signal: input.signal,
-      }),
-    )
+    folded = await foldStream(open())
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     return {
       ok: false,
       failure: {
-        reason: input.signal.aborted ? 'llm-timeout' : 'llm-threw',
+        reason: signal.aborted ? 'llm-timeout' : 'llm-threw',
         message,
         retryable: true,
       },
@@ -170,13 +164,37 @@ export async function refineToL2(input: L2RefineInput): Promise<L2RefineResult> 
     return { ok: false, failure: { reason: 'llm-aborted', message: finish.failure.message, retryable: true } }
   }
   if (finish.kind === 'max-tokens') {
-    return { ok: false, failure: { reason: 'max-tokens', message: 'L2 输出被长度截断', retryable: false } }
+    return { ok: false, failure: { reason: 'max-tokens', message: truncatedMessage, retryable: false } }
   }
   const text = folded.text.trim()
   if (text.length === 0) {
     return { ok: false, failure: { reason: 'empty-response', message: '模型返回空文本', retryable: true } }
   }
-  return parseL2Output(text)
+  return { ok: true, text }
+}
+
+export interface L2RefineInput {
+  readonly llm: LlmPort
+  readonly route: { readonly provider: string; readonly model: string }
+  readonly facts: readonly L2SourceFact[]
+  readonly signal: AbortSignal
+}
+
+/** 一次 L2 综合：**单次** ctx.llm.stream 调用（重试归任务层，与 2.3 同纪律）。 */
+export async function refineToL2(input: L2RefineInput): Promise<L2RefineResult> {
+  const folded = await foldLlmCall(
+    () => input.llm.stream({
+      provider: input.route.provider,
+      model: input.route.model,
+      messages: buildL2Messages(input.facts),
+      maxTokens: L2_MAX_OUTPUT_TOKENS,
+      signal: input.signal,
+    }),
+    input.signal,
+    'L2 输出被长度截断',
+  )
+  if (!folded.ok) return { ok: false, failure: folded.failure }
+  return parseL2Output(folded.text)
 }
 
 // ---------------------------------------------------------------------------
@@ -297,44 +315,17 @@ export interface L2VerifyInput {
  * 调用失败返回 ok:false，由调用方 **throw** 让 INBOX 重试——调用失败 ≠ 判定失败（AD-15）。
  */
 export async function verifyL2Statement(input: L2VerifyInput): Promise<L2VerifyResult> {
-  let folded: Awaited<ReturnType<typeof foldStream>>
-  try {
-    folded = await foldStream(
-      input.llm.stream({
-        provider: input.route.provider,
-        model: input.route.model,
-        messages: buildVerifyMessages(input.statement, input.facts),
-        maxTokens: L2_VERIFY_MAX_OUTPUT_TOKENS,
-        signal: input.signal,
-      }),
-    )
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    return {
-      ok: false,
-      failure: {
-        reason: input.signal.aborted ? 'llm-timeout' : 'llm-threw',
-        message,
-        retryable: true,
-      },
-    }
-  }
-  const finish = folded.finish
-  if (finish === undefined) {
-    return { ok: false, failure: { reason: 'llm-no-finish', message: '流未给出终态 finish', retryable: true } }
-  }
-  if (finish.kind === 'error') {
-    return { ok: false, failure: { reason: finish.failure.code ?? 'llm-error', message: finish.failure.message, retryable: true } }
-  }
-  if (finish.kind === 'aborted') {
-    return { ok: false, failure: { reason: 'llm-aborted', message: finish.failure.message, retryable: true } }
-  }
-  if (finish.kind === 'max-tokens') {
-    return { ok: false, failure: { reason: 'max-tokens', message: '核实输出被长度截断', retryable: false } }
-  }
-  const text = folded.text.trim()
-  if (text.length === 0) {
-    return { ok: false, failure: { reason: 'empty-response', message: '模型返回空文本', retryable: true } }
-  }
-  return parseVerifyOutput(text)
+  const folded = await foldLlmCall(
+    () => input.llm.stream({
+      provider: input.route.provider,
+      model: input.route.model,
+      messages: buildVerifyMessages(input.statement, input.facts),
+      maxTokens: L2_VERIFY_MAX_OUTPUT_TOKENS,
+      signal: input.signal,
+    }),
+    input.signal,
+    '核实输出被长度截断',
+  )
+  if (!folded.ok) return { ok: false, failure: folded.failure }
+  return parseVerifyOutput(folded.text)
 }

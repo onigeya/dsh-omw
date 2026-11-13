@@ -412,6 +412,26 @@ function renderMemoryDetail(detail: MemoryCommandDetail): string {
 }
 
 /**
+ * 追加一块死信明细（标题 + 每条一行）。L1 的 `failed` 与 L2 的 `l2_failed` 逐字段同形，
+ * 故共用同一段渲染——两处都必须让 id/kind 过 `renderSingleLine`（值内换行会伪造出额外行，
+ * 破坏「逐行钉死」的输出格式，P5）。entries 为空时不追加任何行。
+ */
+function appendFailedEntryLines(
+  lines: string[],
+  label: string,
+  entries: readonly MemoryFailedEntry[],
+): void {
+  if (entries.length === 0) return
+  lines.push(label)
+  for (const entry of entries) {
+    lines.push(
+      `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
+      `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
+    )
+  }
+}
+
+/**
  * 状态渲染（spec「输出格式钉死（可断言）」逐行照抄）：
  * 首行 `记忆状态`，其后固定顺序的 `键: 值` 行，计数为十进制。
  *
@@ -466,28 +486,9 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   } else if (snapshot.uncertain !== undefined && snapshot.uncertain > 0) {
     lines.push(`uncertain: ${snapshot.uncertain}`)
   }
-  const l2Entries = snapshot.l2FailedEntries ?? []
-  if (l2Entries.length > 0) {
-    lines.push('l2_failed 最近条目:')
-    for (const entry of l2Entries) {
-      lines.push(
-        `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
-        `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
-      )
-    }
-  }
+  appendFailedEntryLines(lines, 'l2_failed 最近条目:', snapshot.l2FailedEntries ?? [])
   // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
-  const entries = snapshot.failedEntries ?? []
-  if (entries.length > 0) {
-    lines.push('failed 最近条目:')
-    for (const entry of entries) {
-      // id/kind 也过 renderSingleLine：值内换行会伪造出额外行，破坏「逐行钉死」的输出格式（P5）。
-      lines.push(
-        `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
-        `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
-      )
-    }
-  }
+  appendFailedEntryLines(lines, 'failed 最近条目:', snapshot.failedEntries ?? [])
   return lines.join('\n')
 }
 
