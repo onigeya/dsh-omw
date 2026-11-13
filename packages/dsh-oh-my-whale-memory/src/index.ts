@@ -39,8 +39,9 @@
  *
  * Story 3.1：注册模型工具 `memory_recall`（混合检索，先于建库注册、闭包 getter）与
  * `/memory recall` 子命令（同一 definition 扩展，手动召回不计配额）；每轮召回配额
- * `createRecallQuota()` 由 `session/event` 的 `turn/start` 重置——两者都在只读早退之前
- * 注册，只读实例同样具备召回能力（仍不新增 `ctx.effect`，closer 计数不变）。
+ * `createRecallTurnQuota()` 按会话键计数，由 `session/event` 的 `turn/start` 与 `turn/end`
+ * 双点重置——两者都在只读早退之前注册，只读实例同样具备召回能力
+ * （仍不新增 `ctx.effect`，closer 计数不变）。
  *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
@@ -79,7 +80,7 @@ import {
   createMemoryRecallTool,
   type MemoryRecallStore,
 } from './tools/memory-recall.js'
-import { createQuotaResetListener, createRecallQuota } from './recall/quota.js'
+import { createQuotaResetListener, createRecallTurnQuota } from './tools/recall-quota.js'
 import { runRecallCore, type RecallCoreResult } from './recall/core.js'
 import type { EmbedClient } from './embedding/client.js'
 import {
@@ -433,10 +434,11 @@ export async function apply(
     'omw-memory-command',
   )
   ctx.tools.register(createMemoryRememberTool(() => db))
-  // Story 3.1：每轮召回配额（同轮召回族工具合计 3 次，第 4 次返回 recall_quota_exceeded）。
-  // turn/start 重置监听必须在只读早退**之前**注册——只读实例同样提供 memory_recall。
-  // `ctx.on` 自动挂 disposer，这里**不新增 ctx.effect**（entry-exports 钉死 closer 数）。
-  const recallQuota = createRecallQuota()
+  // Story 3.1：每轮召回配额（按会话键；同轮召回族工具合计 3 次，第 4 次返回 quota_exceeded）。
+  // `turn/start` 与 `turn/end` 双点重置（spec D7）。监听必须在只读早退**之前**注册——
+  // 只读实例同样提供 memory_recall。`ctx.on` 自动挂 disposer，这里**不新增 ctx.effect**
+  // （entry-exports 钉死 closer 数）。
+  const recallQuota = createRecallTurnQuota()
   const recallSessionEvents = ctx as unknown as SessionEventHost
   recallSessionEvents.on?.('session/event', createQuotaResetListener(recallQuota))
   ctx.tools.register(createMemoryRecallTool({

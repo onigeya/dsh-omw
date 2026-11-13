@@ -19,8 +19,9 @@
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
+import { inboxSessionKey } from '../inbox/idle-gate.js'
 import { clampRecallLimit, type RecallCoreResult, type RecallResultItem } from '../recall/core.js'
-import type { RecallQuota } from '../recall/quota.js'
+import type { RecallQuota } from './recall-quota.js'
 import { summarizeMemoryText } from '../summarize.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
@@ -60,7 +61,7 @@ export interface MemoryRecallStore {
 export interface MemoryRecallToolOptions {
   /** 取当前检索能力（闭包 getter：apply 先注册工具再建库，未就绪返回 undefined）。 */
   readonly getRecallStore: () => MemoryRecallStore | undefined
-  /** 每轮配额（turn/start 重置）；execute 最先 consume()。 */
+  /** 每轮配额（按会话键计数；`turn/start` 与 `turn/end` 双点重置）。 */
   readonly quota: RecallQuota
 }
 
@@ -168,6 +169,18 @@ const OUTPUT_SCHEMA = {
   ],
 } as const satisfies ValueSchemaSpec
 
+/**
+ * 配额 owner（spec D7）：`ToolRunContext` 自身无 session 字段，但 `exec.agent.session` 存在
+ * （宿主 filesystem.md:316 的同源用法）。经 `inboxSessionKey` 取会话键——与 turn 边界
+ * `session/event` 监听器（recall-quota.ts）落到**同一个键**，两边才能对上同一只桶。
+ * 缺 session 身份时归 `'unknown'` 桶（保守拒绝）。结构窄化而不引 dsh-agent/dsh-session 类型
+ * （本包未依赖它们，与 dsh-tool-fs 的 actor 处理同一形态）。
+ */
+function quotaOwnerOf(exec: unknown): string {
+  const session = (exec as { readonly agent?: { readonly session?: unknown } } | null | undefined)?.agent?.session
+  return inboxSessionKey(session)
+}
+
 /** 组装 canonical failed 值（错误码锁回封闭联合，编译期防任意文本外发）。 */
 function failed(code: MemoryRecallErrorCode, message: string, retryable = false): MemoryRecallFailed {
   return { action: 'failed', error: { code, message, retryable } }
@@ -212,18 +225,18 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },
-    async execute(args) {
+    async execute(args, exec) {
       // 1) 库未就绪先判：db_unavailable 不消耗配额（探测性调用不该吃掉整轮配额，
       //    也避免配额耗尽把根因盖成 recall_quota_exceeded）。
       const store = options.getRecallStore()
       if (!store) {
         return failed('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未检索')
       }
-      // 2) 配额消耗（同轮召回族工具共享；本工具 + 后续 memory_related/memory_expand）。
-      if (!options.quota.consume()) {
+      // 2) 配额消耗（按会话键计数；同轮召回族工具共享，本工具 + 后续 memory_related/expand）。
+      if (!options.quota.consume(quotaOwnerOf(exec))) {
         return failed(
           'recall_quota_exceeded',
-          '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；新回合（turn/start）后自动恢复，或改用 /memory recall 手动检索。',
+          '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；回合边界（turn/start、turn/end）后自动恢复，或改用 /memory recall 手动检索。',
         )
       }
       // 3) 查询向量：配置齐全才 embed；失败/异常一律降级为关键词单路（degraded: true），

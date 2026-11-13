@@ -20,7 +20,7 @@ import {
   createMemoryRecallTool,
   type MemoryRecallStore,
 } from '../src/tools/memory-recall'
-import { createRecallQuota } from '../src/recall/quota'
+import { createRecallTurnQuota } from '../src/tools/recall-quota'
 
 /** defineTool 编译产物的结构描述（照 tool-memory-remember 的 CapturedTool 形态收敛）。 */
 interface CapturedTool {
@@ -39,7 +39,7 @@ interface CapturedTool {
     query: string
     limit?: number
     layer?: (typeof MEMORY_RECALL_LAYERS)[number]
-  }) => Promise<{
+  }, exec?: unknown) => Promise<{
     query?: string
     total?: number
     results?: Array<{ id: string; layer: string; kind: string; priority: number; text: string; truncated?: boolean; evidence?: string[] }>
@@ -73,11 +73,16 @@ function makeStore(overrides: Partial<MemoryRecallStore> = {}): MemoryRecallStor
   }
 }
 
-function makeTool(store: MemoryRecallStore | undefined, quota = createRecallQuota()): CapturedTool {
+function makeTool(store: MemoryRecallStore | undefined, quota = createRecallTurnQuota()): CapturedTool {
   return createMemoryRecallTool({
     getRecallStore: () => store,
     quota,
   }) as unknown as CapturedTool
+}
+
+/** `ToolRunContext` 的最小结构视图：配额 owner 只取 `exec.agent.session`（spec D7）。 */
+function execOf(sessionId: string): unknown {
+  return { agent: { session: { id: sessionId } } }
 }
 
 describe('memory_recall 工具形态', () => {
@@ -195,7 +200,7 @@ describe('memory_recall execute（假 store）', () => {
     }) => ({ total: 0, results: [], degraded: false, hint: '无匹配记忆。' }))
     const store = makeStore({ recall })
     // 4 次调用会超出缺省配额 3——这里取大配额，只测 limit 夹紧。
-    const tool = makeTool(store, createRecallQuota(10))
+    const tool = makeTool(store, createRecallTurnQuota(10))
 
     await tool.execute({ query: 'a' })
     expect(recall.mock.calls[0]?.[0].limit).toBe(5)
@@ -210,23 +215,35 @@ describe('memory_recall execute（假 store）', () => {
     expect(recall.mock.calls[3]?.[0]).toMatchObject({ limit: 3, layer: 'L1' })
   })
 
-  it('配额超限：第 4 次调用拒绝（recall_quota_exceeded，不抛异常），turn/start 后恢复', async () => {
-    const quota = createRecallQuota()
+  it('配额超限：第 4 次调用拒绝（recall_quota_exceeded，不抛异常），turn 边界重置后恢复', async () => {
+    const quota = createRecallTurnQuota()
     const store = makeStore()
     const tool = makeTool(store, quota)
+    const exec = execOf('session-quota')
     for (let i = 0; i < 3; i += 1) {
-      const allowed = await tool.execute({ query: 'q' })
+      const allowed = await tool.execute({ query: 'q' }, exec)
       expect(allowed.total).toBe(1)
     }
-    const blocked = await tool.execute({ query: 'q' })
+    const blocked = await tool.execute({ query: 'q' }, exec)
     expect(blocked.action).toBe('failed')
     expect(blocked.error).toMatchObject({ code: 'recall_quota_exceeded', retryable: false })
     expect(store.recall).toHaveBeenCalledTimes(3)
 
-    // turn/start 重置（配额监听器在 index 接线；此处直接驱动同一配额对象）。
-    quota.reset()
-    const after = await tool.execute({ query: 'q' })
+    // turn 边界重置（配额监听器在 index 接线；此处直接驱动同一配额对象的同一会话键）。
+    quota.reset('session-quota')
+    const after = await tool.execute({ query: 'q' }, exec)
     expect(after.total).toBe(1)
+  })
+
+  it('配额按会话键隔离：exec.agent.session 不同的调用各算各的（spec D7）', async () => {
+    const quota = createRecallTurnQuota(1)
+    const tool = makeTool(makeStore(), quota)
+    const s1 = execOf('session-a')
+    const s2 = execOf('session-b')
+    expect((await tool.execute({ query: 'q' }, s1)).total).toBe(1)
+    // s1 已用完；s2 完全不受影响。
+    expect((await tool.execute({ query: 'q' }, s1)).action).toBe('failed')
+    expect((await tool.execute({ query: 'q' }, s2)).total).toBe(1)
   })
 
   it('库未就绪：getRecallStore → undefined ⇒ db_unavailable（不抛异常）', async () => {
