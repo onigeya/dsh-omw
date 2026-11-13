@@ -91,13 +91,13 @@ export const L2_GATE_REASONS = {
 } as const
 
 /** System One 两个 question key（同一 questions 对象里的两项 = 不增加调用轮次，AC:738）。 */
-export /**
+export const SYSTEMONE_FAITHFUL_KEY = 'faithful'
+
+/**
  * 评审 P21（T47）：指纹命中既有节点且该节点已 forget（expired_at 非空）时的候选软丢弃 reason。
  * 不产出 L2、不建边、**不连坐**来源 L1 的 gate-fail。
  */
 const EXPIRED_TARGET_REASON = 'expired-target'
-
-const SYSTEMONE_FAITHFUL_KEY = 'faithful'
 export const SYSTEMONE_CONFLICT_KEY = 'no-conflict'
 
 /**
