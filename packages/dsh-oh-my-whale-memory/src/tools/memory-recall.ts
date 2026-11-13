@@ -35,11 +35,8 @@ export const MEMORY_RECALL_TOOL_DESCRIPTION = [
   'query 写你要找的内容：用户偏好与习惯、既往决策及其理由、硬约束与禁令、路径/端点/版本号/ID、可复用结论。',
   '只返回当前快照节点（已生效、未失效、未过期），每条含 id/layer/kind/priority/text；单条超 256 token 时截断为首段并标 truncated=true（节点不丢，可按 id 另查全文）。',
   'limit 可选（缺省 5，上限 20）；layer 可选（L1/L2，省略时 L2 优先于 L1）。',
-  '同一回合内召回族工具合计最多 3 次，超出返回 recall_quota_exceeded；embedding 不可用时自动降级为关键词单路并标 degraded。',
+  '同一回合内召回族工具合计最多 3 次，超出返回 quota_exceeded；embedding 不可用时自动降级为关键词单路并标 degraded。',
 ].join('\n')
-
-/** 检索工具的错误码：db 层信封 + 本工具新增的两类。 */
-export type MemoryRecallErrorCode = MemoryDbErrorCode | 'recall_quota_exceeded' | 'recall_failed'
 
 /**
  * 检索能力端口（结构声明，单测注入假实现；生产实现见 src/index.ts 的闭包 store）：
@@ -88,7 +85,7 @@ export interface MemoryRecallSucceeded {
 export interface MemoryRecallFailed {
   action: 'failed'
   error: {
-    code: MemoryRecallErrorCode
+    code: MemoryDbErrorCode
     message: string
     retryable: boolean
   }
@@ -158,7 +155,7 @@ const OUTPUT_SCHEMA = {
           required: true,
           additionalProperties: false,
           properties: {
-            code: { type: 'string', required: true, description: '错误码：recall_quota_exceeded、db_unavailable、recall_failed 或 db 层错误码' },
+            code: { type: 'string', required: true, description: '封闭错误码：quota_exceeded、db_read_failed、db_unavailable 或其它 db 层码' },
             message: { type: 'string', required: true, description: '诊断信息，不含凭据' },
             retryable: { type: 'boolean', required: true, description: '是否值得重试' },
           },
@@ -182,7 +179,7 @@ function quotaOwnerOf(exec: unknown): string {
 }
 
 /** 组装 canonical failed 值（错误码锁回封闭联合，编译期防任意文本外发）。 */
-function failed(code: MemoryRecallErrorCode, message: string, retryable = false): MemoryRecallFailed {
+function failed(code: MemoryDbErrorCode, message: string, retryable = false): MemoryRecallFailed {
   return { action: 'failed', error: { code, message, retryable } }
 }
 
@@ -227,7 +224,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
     },
     async execute(args, exec) {
       // 1) 库未就绪先判：db_unavailable 不消耗配额（探测性调用不该吃掉整轮配额，
-      //    也避免配额耗尽把根因盖成 recall_quota_exceeded）。
+      //    也避免配额耗尽把根因盖成 quota_exceeded）。
       const store = options.getRecallStore()
       if (!store) {
         return failed('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未检索')
@@ -235,7 +232,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
       // 2) 配额消耗（按会话键计数；同轮召回族工具共享，本工具 + 后续 memory_related/expand）。
       if (!options.quota.consume(quotaOwnerOf(exec))) {
         return failed(
-          'recall_quota_exceeded',
+          'quota_exceeded',
           '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；回合边界（turn/start、turn/end）后自动恢复，或改用 /memory recall 手动检索。',
         )
       }
@@ -266,7 +263,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
         if (error instanceof MemoryDbError) {
           return failed(error.code, error.message, error.retryable)
         }
-        return failed('recall_failed', error instanceof Error ? error.message : String(error))
+        return failed('db_read_failed', error instanceof Error ? error.message : String(error))
       }
     },
   })

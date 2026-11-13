@@ -5,10 +5,10 @@
  * - 成功：{ query, total, results, hint }（degraded 只在降级时出现）；
  * - 无命中：total 0 的正常成功值（不是错误）；
  * - 降级：embeddingEnabled=false / embedQuery 失败或抛错 ⇒ queryVector=null 传给内核；
- * - 配额超限：{ action:'failed', error:{code:'recall_quota_exceeded', retryable:false} }；
+ * - 配额超限：{ action:'failed', error:{code:'quota_exceeded', retryable:false} }；
  * - 库未就绪：db_unavailable；
  * - limit 夹紧 [1,20]（缺省 5）；
- * - 内核抛错：failed 信封（MemoryDbError 透传 code，其它兜底 recall_failed）；
+ * - 内核抛错：failed 信封（MemoryDbError 透传 code，其它兜底 db_read_failed）；
  * - execute 绝不 throw。
  */
 import { describe, expect, it, vi } from 'vitest'
@@ -92,7 +92,7 @@ describe('memory_recall 工具形态', () => {
     expect(tool.name).toBe(MEMORY_RECALL_TOOL_NAME)
     expect(tool.name).toBe('memory_recall')
     expect(MEMORY_RECALL_TOOL_DESCRIPTION).toMatch(/混合检索/)
-    expect(MEMORY_RECALL_TOOL_DESCRIPTION).toMatch(/recall_quota_exceeded/)
+    expect(MEMORY_RECALL_TOOL_DESCRIPTION).toMatch(/quota_exceeded/)
 
     expect(tool.parameters.properties.query.type).toBe('string')
     expect(tool.parameters.required).toContain('query')
@@ -134,10 +134,10 @@ describe('memory_recall 工具形态', () => {
 
     const failedText = tool.output.render(
       {},
-      { action: 'failed', error: { code: 'recall_quota_exceeded', message: 'm', retryable: false } },
+      { action: 'failed', error: { code: 'quota_exceeded', message: 'm', retryable: false } },
     )
     expect(failedText[0]?.type).toBe('text')
-    expect(failedText[0]?.text).toContain('recall_quota_exceeded')
+    expect(failedText[0]?.text).toContain('quota_exceeded')
     expect(failedText[0]?.text).toContain('retryable=false')
   })
 })
@@ -215,7 +215,7 @@ describe('memory_recall execute（假 store）', () => {
     expect(recall.mock.calls[3]?.[0]).toMatchObject({ limit: 3, layer: 'L1' })
   })
 
-  it('配额超限：第 4 次调用拒绝（recall_quota_exceeded，不抛异常），turn 边界重置后恢复', async () => {
+  it('配额超限：第 4 次调用拒绝（quota_exceeded，不抛异常），turn 边界重置后恢复', async () => {
     const quota = createRecallTurnQuota()
     const store = makeStore()
     const tool = makeTool(store, quota)
@@ -226,7 +226,7 @@ describe('memory_recall execute（假 store）', () => {
     }
     const blocked = await tool.execute({ query: 'q' }, exec)
     expect(blocked.action).toBe('failed')
-    expect(blocked.error).toMatchObject({ code: 'recall_quota_exceeded', retryable: false })
+    expect(blocked.error).toMatchObject({ code: 'quota_exceeded', retryable: false })
     expect(store.recall).toHaveBeenCalledTimes(3)
 
     // turn 边界重置（配额监听器在 index 接线；此处直接驱动同一配额对象的同一会话键）。
@@ -254,7 +254,7 @@ describe('memory_recall execute（假 store）', () => {
     expect(value.error?.message).not.toMatch(/token/)
   })
 
-  it('内核抛 MemoryDbError 透传 code；其它错误兜底 recall_failed（均不 throw）', async () => {
+  it('内核抛 MemoryDbError 透传 code；其它错误兜底 db_read_failed（均不 throw）', async () => {
     const dbErrorStore = makeStore({
       recall: async () => {
         throw new MemoryDbError('db_backend_unavailable', '扩展未装载')
@@ -271,6 +271,6 @@ describe('memory_recall execute（假 store）', () => {
     })
     const generic = await makeTool(genericStore).execute({ query: 'q' })
     expect(generic.action).toBe('failed')
-    expect(generic.error).toMatchObject({ code: 'recall_failed', message: 'driver exploded', retryable: false })
+    expect(generic.error).toMatchObject({ code: 'db_read_failed', message: 'driver exploded', retryable: false })
   })
 })
