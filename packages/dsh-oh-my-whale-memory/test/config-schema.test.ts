@@ -37,7 +37,7 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     // 顶层字段数量锁定 FR-18 全字段，防止后续误删
     expect(Object.keys(dict).sort()).toEqual([
       'captureSteps', 'embedding', 'inboxRefineConcurrency', 'injectOnNewSession',
-      'layerWeights', 'llmModel', 'llmProvider', 'rerank', 'retrievalTopK', 'rrfK', 'systemOne',
+      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'rerank', 'retrievalTopK', 'rrfK', 'systemOne',
     ])
   })
 
@@ -78,6 +78,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.rrfK.get()).toBe(60)
     expect(resolved.retrievalTopK.get()).toBe(50)
     expect(resolved.layerWeights.get()).toEqual({ l2: 0.7, l1: 0.4 })
+    // Story 3.1 / FR-16：priority 二次加权系数缺省 0.5。
+    expect(resolved.priorityWeight.get()).toBe(0.5)
     expect(resolved.systemOne.get()).toEqual({ enabled: true })
     expect(resolved.embedding.get()).toEqual({})
     expect(resolved.rerank.get()).toEqual({})
@@ -98,6 +100,7 @@ describe('GC 正常配置（I/O 矩阵第 1 行）', () => {
     expect(resolved.captureSteps).toBe(50)
     expect(resolved.rrfK).toBe(60)
     expect(resolved.layerWeights).toEqual({ l2: 0.7, l1: 0.4 })
+    expect(resolved.priorityWeight).toBe(0.5)
   })
 })
 
@@ -139,6 +142,17 @@ describe('硬校验（任一失败即抛错，仅阻塞本插件）', () => {
     const cfg = { ...validConfig(), inboxRefineConcurrency: 0 }
     expect(() => resolveRuntimeConfig(cfg)).toThrowError(/inboxRefineConcurrency/)
     expect(() => resolveRuntimeConfig(cfg)).toThrowError(/≥ 1/)
+  })
+
+  it('priorityWeight 硬校验（Story 3.1 / FR-16）：负数/非有限抛错，0 合法（显式关闭）', () => {
+    for (const bad of [-0.1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const cfg = { ...validConfig(), priorityWeight: bad }
+      expect(() => resolveRuntimeConfig(cfg)).toThrowError(/priorityWeight/)
+      expect(() => resolveRuntimeConfig(cfg)).toThrowError(/≥ 0/)
+    }
+    // 0 是显式关闭 priority 影响，不抛错。
+    expect(resolveRuntimeConfig({ ...validConfig(), priorityWeight: 0 }).priorityWeight).toBe(0)
+    expect(resolveRuntimeConfig({ ...validConfig(), priorityWeight: 1.5 }).priorityWeight).toBe(1.5)
   })
 
   it('embedding.dim 硬校验：0 / -1 / 1.5 抛错，4 通过', () => {
