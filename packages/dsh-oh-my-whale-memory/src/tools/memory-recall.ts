@@ -32,7 +32,7 @@ export const MEMORY_RECALL_LAYERS = ['L1', 'L2'] as const
 export const MEMORY_RECALL_TOOL_DESCRIPTION = [
   '从记忆库召回与查询相关的长期记忆（混合检索：语义向量路 + 关键词路，应用层 RRF 融合排序）。',
   'query 写你要找的内容：用户偏好与习惯、既往决策及其理由、硬约束与禁令、路径/端点/版本号/ID、可复用结论。',
-  '只返回当前快照节点（已生效、未失效、未过期），每条含 id/layer/kind/priority/text；单条过长时标 truncated=true。',
+  '只返回当前快照节点（已生效、未失效、未过期），每条含 id/layer/kind/priority/text；单条超 256 token 时截断为首段并标 truncated=true（节点不丢，可按 id 另查全文）。',
   'limit 可选（缺省 5，上限 20）；layer 可选（L1/L2，省略时 L2 优先于 L1）。',
   '同一回合内召回族工具合计最多 3 次，超出返回 recall_quota_exceeded；embedding 不可用时自动降级为关键词单路并标 degraded。',
 ].join('\n')
@@ -124,7 +124,7 @@ const OUTPUT_SCHEMA = {
       type: 'object',
       properties: {
         query: { type: 'string', required: true, description: '原始检索文本（回显）' },
-        total: { type: 'integer', required: true, description: '返回条数（= results.length）' },
+        total: { type: 'integer', required: true, description: '融合命中总数（limit 截断前）；results.length = min(limit, total)' },
         results: {
           type: 'array',
           required: true,

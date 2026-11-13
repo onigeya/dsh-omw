@@ -307,6 +307,7 @@ export async function apply(
       rrfK: resolved.rrfK,
       retrievalTopK: resolved.retrievalTopK,
       layerWeights: resolved.layerWeights,
+      priorityWeight: resolved.priorityWeight,
       limit: input.limit,
       layer: input.layer ?? null,
     })

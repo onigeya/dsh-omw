@@ -10,7 +10,7 @@
  * - RRF `1/(rrfK + rank)`，rank 从 1 计，**只按 rank 参与**——语义距离与 BM25 分
  *   不可比，绝不把两路分数放在同一数轴上；
  * - 层权重是排序分数的乘法系数（L2 / L1，未知层 1），再乘 priority 系数
- *   `1 + priority/100`（保守默认，Lead 可推翻）；
+ *   `1 + priorityWeight × priority/100`（priorityWeight 由 Config 提供，缺省 0.5，spec D4）；
  * - 排序键：`priority === -1` 恒置顶 → score 降序 → recorded_at 降序 → id 升序
  *   （同一输入在任何会话/进程下返回同一序）；
  * - 层过滤 → `limit` 截断（夹紧 [1,20]，缺省 5）。
@@ -25,6 +25,7 @@ import type * as lbug from '@ladybugdb/core'
 import { collectRows } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { FTS_INDEX_NAME, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
+import { estimateTokens, splitToBudget } from '../distill/llm-refine.js'
 
 /** BM25 查询期参数（FR-11：K=1.2 / B=0.75；建索引时用官方默认，见 schema.ts）。 */
 export const BM25_K = 1.2
@@ -35,8 +36,37 @@ export const RECALL_DEFAULT_LIMIT = 5
 export const RECALL_MAX_LIMIT = 20
 export const RECALL_MIN_LIMIT = 1
 
-/** `truncated` 判据：单条 text 的 code point 数 > 512（≈256 tokens，2 chars/token 的保守近似）。 */
-export const RECALL_TRUNCATE_CODE_POINTS = 512
+/**
+ * 单条召回文本的 token 预算（spec Always 第 6 条）：超过即截断到首段 + `…`。
+ * 与精炼侧「每条 ≤150 token」是不同口径——召回给的是**摘要预览**，256 让 Agent 一眼读懂
+ * 一条记忆的主干，又不至于把一次召回塞满上下文。
+ */
+export const RECALL_TEXT_TOKEN_BUDGET = 256
+
+/**
+ * 召回侧真截断（spec Always 第 6 条）：复用精炼侧同一 token 估算与切分器
+ * （`estimateTokens` / `splitToBudget`，distill/llm-refine.ts:133/150），取**首段**并追加
+ * `…`。只改返回的 text，**不改节点集合**：命中不丢，需要全文时按 id 另查（`/memory show`）。
+ */
+function truncateRecallText(text: string): { readonly text: string; readonly truncated: boolean } {
+  if (estimateTokens(text) <= RECALL_TEXT_TOKEN_BUDGET) return { text, truncated: false }
+  const first = splitToBudget(text, RECALL_TEXT_TOKEN_BUDGET)[0]
+  // splitToBudget 对非空超预算文本至少返回一段；兜底仅为不让 undefined 漏进结果。
+  return { text: first === undefined ? text : `${first}…`, truncated: true }
+}
+
+/**
+ * priority 二次加权乘法系数（spec D4 / FR-16）：
+ * `1 + weight × priority/100` —— 线性、单调、可解释；`weight` 由 Config `priorityWeight`
+ * 提供（缺省 0.5 ⇒ priority=100 得 ×1.5），层权重之后再乘一次，排序仍以 RRF 融合分为主。
+ *
+ * `priority === -1`（全局强规则）**不进本公式**：它的恒置顶由排序阶段的独立分组承载
+ * （见 {@link runRecallCore} 的排序键），函数本身不做特判——把 -1 代入只会得到 1 - weight/100，
+ * 与「恒置顶」无关。
+ */
+function priorityFactor(priority: number, weight: number): number {
+  return 1 + weight * priority / 100
+}
 
 /** `limit` 夹紧的唯一实现（工具面与命令面共用，绝不各写一份）。 */
 export function clampRecallLimit(limit: number | undefined): number {
@@ -73,6 +103,11 @@ export interface RecallCoreInput {
   /** 每路取回条数（Config `retrievalTopK`，缺省 50）。 */
   readonly retrievalTopK: number
   readonly layerWeights: RecallLayerWeights
+  /**
+   * priority 二次加权系数（Config `priorityWeight`，缺省 0.5）：排序分再乘
+   * `1 + priorityWeight × priority/100`。0 = 关闭 priority 影响（spec D4）。
+   */
+  readonly priorityWeight: number
   /** 结果条数（夹紧 [1,20]，缺省 5）。 */
   readonly limit: number
   /** 层过滤（`'L1' | 'L2'`）；缺省不过滤（未指定时 L2 优先于 L1 由层权重承载）。 */
@@ -87,7 +122,7 @@ export interface RecallResultItem {
   readonly kind: string
   readonly priority: number
   readonly text: string
-  /** text 超过 RECALL_TRUNCATE_CODE_POINTS 个 code point 时为 true（标记不丢节点）。 */
+  /** text 超过 {@link RECALL_TEXT_TOKEN_BUDGET} token 时已截断为「首段 + …」，此处为 true。 */
   readonly truncated?: boolean
   /** 非空 `source_refs`（证据引用）；空时缺省，不出现空数组。 */
   readonly evidence?: readonly string[]
@@ -230,7 +265,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   }
   const scored = [...candidates.values()].map((candidate) => ({
     candidate,
-    score: candidate.rrf * layerWeightOf(candidate.layer) * (1 + candidate.priority / 100),
+    score: candidate.rrf * layerWeightOf(candidate.layer) * priorityFactor(candidate.priority, input.priorityWeight),
   }))
 
   // ---- 排序：-1 恒置顶 → score 降序 → recorded_at 降序 → id 升序（稳定次级键）。 ----
@@ -246,19 +281,22 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
     return a.candidate.id < b.candidate.id ? -1 : 1
   })
 
-  // ---- 层过滤 → limit 截断 → truncated / evidence 标注。 ----
+  // ---- 层过滤 → 标注 truncated / evidence，再 limit 截断。 ----
   const layerFilter = input.layer?.trim()
   const filtered = layerFilter ? scored.filter((entry) => entry.candidate.layer === layerFilter) : scored
   const limit = clampRecallLimit(input.limit)
+  // total 语义（spec D6）：limit 截断**前**的融合命中总数；results.length = min(limit, total)。
+  // 没有命中时即 0——limit 并存时 total 才有信息量（「还有多少没显示」）。
+  const total = filtered.length
   const results: RecallResultItem[] = filtered.slice(0, limit).map(({ candidate }) => {
-    const truncated = [...candidate.text].length > RECALL_TRUNCATE_CODE_POINTS
+    const truncated = truncateRecallText(candidate.text)
     return {
       id: candidate.id,
       layer: candidate.layer,
       kind: candidate.kind,
       priority: candidate.priority,
-      text: candidate.text,
-      ...(truncated ? { truncated: true } : {}),
+      text: truncated.text,
+      ...(truncated.truncated ? { truncated: true } : {}),
       ...(candidate.sourceRefs.length > 0 ? { evidence: candidate.sourceRefs } : {}),
     }
   })
@@ -271,5 +309,5 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
       ? '无匹配记忆。'
       : '混合检索（语义向量路 + 关键词路，RRF 融合排序）。'
 
-  return { total: results.length, results, degraded, hint }
+  return { total, results, degraded, hint }
 }

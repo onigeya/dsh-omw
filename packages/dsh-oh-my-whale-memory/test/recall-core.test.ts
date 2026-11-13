@@ -13,13 +13,14 @@ import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { upsertMemory } from '../src/db/memory'
 import { memoryNodeId } from '../src/db/id'
 import { resolveMemoryDbPath } from '../src/db/paths'
+import { estimateTokens } from '../src/distill/llm-refine'
 import {
   BM25_B,
   BM25_K,
   RECALL_DEFAULT_LIMIT,
   RECALL_MAX_LIMIT,
   RECALL_MIN_LIMIT,
-  RECALL_TRUNCATE_CODE_POINTS,
+  RECALL_TEXT_TOKEN_BUDGET,
   clampRecallLimit,
   escapeFtsQuery,
   runRecallCore,
@@ -35,6 +36,8 @@ const FUTURE = '2999-01-01T00:00:00.000Z'
 const MODEL = 'test-embed'
 const OTHER_MODEL = 'other-model'
 const LAYER_WEIGHTS = { l2: 0.7, l1: 0.4 }
+/** priority 二次加权系数（Config `priorityWeight` 缺省值，spec D4）。 */
+const PRIORITY_WEIGHT = 0.5
 const A = [1, 0, 0, 0]
 const B = [0, 1, 0, 0]
 const C = [0, 0, 1, 0]
@@ -85,6 +88,7 @@ function recall(overrides: Partial<RecallCoreInput> & Pick<RecallCoreInput, 'que
     rrfK: 60,
     retrievalTopK: 50,
     layerWeights: LAYER_WEIGHTS,
+    priorityWeight: PRIORITY_WEIGHT,
     limit: RECALL_DEFAULT_LIMIT,
     now: NOW,
     ...overrides,
@@ -109,7 +113,14 @@ beforeAll(async () => {
   // ---- 其它关键词/向量节点（参与但不在 alpha 断言内） ----
   await seed('beta only keyword path', { embedding: B })
   await seed('gamma model mismatch', { embedding: C, embeddingModelId: OTHER_MODEL })
-  await seed(`omega ${'x'.repeat(600)}`, { embedding: D })
+  // 超长文本：1200 个拉丁字符 ≈ 300 token（`estimateTokens` 按 4 字符/token 折算）
+  // ⇒ 超过 RECALL_TEXT_TOKEN_BUDGET(256)，触发真截断。
+  await seed(`omega ${'x'.repeat(1200)}`, { embedding: D })
+
+  // ---- priority 二次加权隔离组（查询串 'boostprio' 只在下面两条出现） ----
+  // 词频 3 的噪声条在 weight=0 时靠 BM25 排第一；priority=90 的规则条在 weight=50 时反超。
+  await seed('boostprio rule', { priority: 90 })
+  await seed('boostprio boostprio boostprio noise')
 
   // ---- 层权重隔离组（唯一 token + 唯一向量） ----
   await seed('layerweight principle statement', { layer: 'L2', embedding: [0.5, 0.5, 0, 0] })
@@ -151,8 +162,9 @@ describe('纯函数：常量 / 夹紧 / 转义', () => {
 describe('runRecallCore：双路融合与层权重', () => {
   it('query=alpha 双路命中：返回 {total>0, results, degraded:false, hint}，字段齐全', async () => {
     const result = await recall({ query: 'alpha', queryVector: A })
-    expect(result.total).toBe(result.results.length)
+    // total = limit 截断前的融合命中总数；results.length = min(limit, total)（spec D6）。
     expect(result.total).toBeGreaterThan(0)
+    expect(result.results.length).toBe(Math.min(RECALL_DEFAULT_LIMIT, result.total))
     expect(result.degraded).toBe(false)
     expect(result.hint).toContain('混合检索')
 
@@ -182,6 +194,20 @@ describe('runRecallCore：双路融合与层权重', () => {
     expect(ids.indexOf(l2)).toBeLessThan(ids.indexOf(l1))
   })
 
+  it('priorityWeight 参与二次加权：weight=0 时纯 RRF 序，weight=50 时 priority=90 反超', async () => {
+    const neutral = await recall({ query: 'boostprio', queryVector: null, priorityWeight: 0 })
+    // weight=0 ⇒ 系数恒 1，排序回到纯 RRF（词频更高的噪声条 rank1）。
+    expect(neutral.results[0]?.id).toBe(nid('boostprio boostprio boostprio noise'))
+    expect(neutral.results[0]?.priority).toBe(0)
+
+    const boosted = await recall({ query: 'boostprio', queryVector: null, priorityWeight: 50 })
+    // weight=50 × priority=90 ⇒ 系数 46，足以让 rank2 的规则条反超（spec D4 的二次加权语义）。
+    expect(boosted.results[0]?.id).toBe(nid('boostprio rule'))
+    expect(boosted.results[0]?.priority).toBe(90)
+    // 结果集不变：priority 只改排序，不筛选节点。
+    expect(new Set(boosted.results.map((item) => item.id))).toEqual(new Set(neutral.results.map((item) => item.id)))
+  })
+
   it('priority=-1 恒置顶（即使 RRF 更低）', async () => {
     const result = await recall({ query: 'alpha', queryVector: A })
     expect(result.results[0]?.id).toBe(nid('alpha pinned rule'))
@@ -203,11 +229,16 @@ describe('runRecallCore：双路融合与层权重', () => {
     expect(result.results.some((item) => item.id === nid('alpha recall l2 primary', 'L2'))).toBe(false)
   })
 
-  it('limit 截断：多个命中时只留 limit 条（且不改变排序首项）', async () => {
+  it('limit 截断：results 只留 limit 条，但 total 是截断前的命中总数（spec D6）', async () => {
     const full = await recall({ query: 'alpha', queryVector: A })
     expect(full.total).toBeGreaterThan(1)
+    // 命中数超过缺省 limit ⇒ total 大于 results.length（这正是 total 的信息量所在）。
+    expect(full.results.length).toBe(Math.min(RECALL_DEFAULT_LIMIT, full.total))
     const limited = await recall({ query: 'alpha', queryVector: A, limit: 1 })
     expect(limited.results).toHaveLength(1)
+    // total 不因 limit 变小：它描述命中规模，results.length 描述本次返回量。
+    expect(limited.total).toBe(full.total)
+    expect(limited.results.length).toBe(Math.min(1, limited.total))
     expect(limited.results[0]?.id).toBe(full.results[0]?.id)
   })
 })
@@ -269,14 +300,21 @@ describe('runRecallCore：稳定次级键与标注', () => {
     expect(positions.get(later)).toBeLessThan(positions.get(earlier)!)
   })
 
-  it('超长 text 标 truncated:true 且节点不丢（原文不截断）', async () => {
-    const longText = `omega ${'x'.repeat(600)}`
+  it('超长 text：截断到首段 + … 并标 truncated:true，节点不丢（spec Always 第 6 条）', async () => {
+    const longText = `omega ${'x'.repeat(1200)}`
     const result = await recall({ query: 'omega', queryVector: null })
     const hit = result.results.find((item) => item.id === nid(longText))
+    // 节点不丢：截断只改 text，命中仍在结果里。
     expect(hit).toBeDefined()
     expect(hit!.truncated).toBe(true)
-    expect([...hit!.text].length).toBeGreaterThan(RECALL_TRUNCATE_CODE_POINTS)
-    expect(hit!.text).toBe(longText)
+    expect(estimateTokens(longText)).toBeGreaterThan(RECALL_TEXT_TOKEN_BUDGET)
+    // 真截断：不是原文，是「首段 + …」，且首段仍在 256 token 预算内。
+    expect(hit!.text).not.toBe(longText)
+    expect(hit!.text.endsWith('…')).toBe(true)
+    expect(hit!.text.length).toBeLessThan(longText.length)
+    const body = hit!.text.slice(0, -1)
+    expect(body.startsWith('omega ')).toBe(true)
+    expect(estimateTokens(body)).toBeLessThanOrEqual(RECALL_TEXT_TOKEN_BUDGET)
   })
 
   it('FTS 查询串内联转义：带引号/反斜杠的注入尝试不抛错、不放大命中', async () => {
@@ -295,3 +333,4 @@ describe('runRecallCore：稳定次级键与标注', () => {
     expect(result.total).toBe(spaced.total)
   })
 })
+
