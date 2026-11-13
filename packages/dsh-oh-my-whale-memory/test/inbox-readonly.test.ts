@@ -3,7 +3,7 @@
  *
  * 跨进程是 AD-12 的真实场景（两个 DSH 窗口 = 两个进程），用 fixtures/hold-db-open.mjs
  * 扮演「持写者锁的第一实例」（同 command-status-db.test.ts）。第二实例 apply 后：
- * - 不启动消费者（不注册 session/event 监听 → onEvents 为空）、不回收过期 lease；
+ * - 不启动消费者（只注册召回配额重置监听，不接闸门/采集的 session/event 监听）、不回收过期 lease；
  * - 库内 `processing` + lease_owner=dead-writer 的过期 lease 条目原样保留（未被回收）；
  * - 运行态标注 readonly: true，且没有「记忆库就绪」的 info。
  */
@@ -149,8 +149,9 @@ describe('AC7：只读实例不启动消费者、不回收 lease', () => {
 
       expect(registeredDefs).toHaveLength(1)
       expect(plugin.memoryRuntimeState().readonly).toBe(true)
-      // 只读：不监听 session/event（消费者根本没启动）。
-      expect(onEvents).toEqual([])
+      // 只读：不启动消费者（不接闸门/采集的 session/event 监听）；Story 3.1 起只读实例
+      // 仍注册**召回配额重置**监听（memory_recall 在只读模式也可用，turn/start 恢复配额）。
+      expect(onEvents).toEqual(['session/event'])
       expect(warnLog.join('\n')).toContain(READONLY_REASON)
       expect(infoLog.join('\n')).not.toContain('记忆库就绪')
 

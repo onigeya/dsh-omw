@@ -23,7 +23,7 @@ import {
   type MemoryCommandDependencies,
 } from '../src/command'
 
-/** 四个 dep 都能被单测替换；未覆盖的读 dep 给默认空实现。 */
+/** 五个 dep 都能被单测替换；未覆盖的读 dep 给默认空实现。 */
 function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCommandDependencies {
   return {
     writeInbox: async () => {},
@@ -41,6 +41,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       evidenceGap: { total: 0, eiiViolations: 0, drift: 0 },
       relatedSkipped: 0,
     }),
+    recallMemories: async () => ({ results: [], degraded: false, hint: '' }),
     ...overrides,
   }
 }

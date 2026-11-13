@@ -20,13 +20,14 @@ import {
   type MemoryStatusSnapshot,
 } from '../src/command'
 
-/** 四个 dep 都能被单测替换；未覆盖的 dep 给默认实现。 */
+/** 五个 dep 都能被单测替换；未覆盖的 dep 给默认实现。 */
 function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCommandDependencies {
   return {
     writeInbox: async () => {},
     listMemories: async () => [],
     getMemoryById: async () => null,
     getStatus: async () => STATUS_BASE,
+    recallMemories: async () => ({ results: [], degraded: false, hint: '' }),
     ...overrides,
   }
 }

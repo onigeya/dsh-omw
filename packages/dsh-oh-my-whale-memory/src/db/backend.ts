@@ -53,8 +53,15 @@ export interface StorageBackend {
    * 不额外调用 init——库文件落盘时机是只读竞态等待逻辑的前提）。
    */
   createConnection(database: lbug.Database): Promise<lbug.Connection>
-  /** 每进程装载扩展；wasm 为 no-op（扩展已静态编译）。失败必须冒泡，不做降级。 */
-  loadExtensions(connection: lbug.Connection): Promise<void>
+  /**
+   * 每进程装载扩展；wasm 为 no-op（扩展已静态编译）。失败必须冒泡，不做降级。
+   *
+   * `install: false`（Story 3.1 / P4 探针）：native 只读连接不 `INSTALL` 只 `LOAD`——
+   * 扩展已被某个写者实例安装在本机用户目录，只读实例无需下载即可装载。装载失败
+   * 照常冒泡，由调用方决定是否吞掉（database.ts 的只读开库吞掉，recall 查询期
+   * 以失败信封暴露）。
+   */
+  loadExtensions(connection: lbug.Connection, options?: { install?: boolean }): Promise<void>
   /** 关闭句柄；两后端的部分失败都吞掉（调用方只做尽力回收）。 */
   close(database: lbug.Database, connection: lbug.Connection): Promise<void>
   /** 引擎 storage version（两后端必须一致，否则库文件不可互换）。 */
@@ -93,8 +100,26 @@ function nativeBackend(module: LoadedModule): StorageBackend {
     async createConnection(database) {
       return new module.Connection(database)
     },
-    async loadExtensions(connection) {
+    async loadExtensions(connection, options) {
       // 扩展是每进程装载（失败含 Windows 缺 OpenSSL 3），必须冒泡。
+      // 只读实例（install: false）只 LOAD 不 INSTALL：扩展已由写者实例安装，无需联网下载。
+      if (options?.install === false) {
+        // 两条各自 try/catch：vector 失败不得挡住 fts（否则只读实例连关键词单路也丢），
+        // 但失败仍要冒泡（调用方决定吞不吞）——保留**最后**一个错误再抛。
+        let failure: unknown
+        try {
+          await connection.query('LOAD vector;')
+        } catch (error) {
+          failure = error
+        }
+        try {
+          await connection.query('LOAD fts;')
+        } catch (error) {
+          failure = error
+        }
+        if (failure !== undefined) throw failure
+        return
+      }
       await connection.query('INSTALL vector; LOAD vector;')
       await connection.query('INSTALL fts; LOAD fts;')
     },

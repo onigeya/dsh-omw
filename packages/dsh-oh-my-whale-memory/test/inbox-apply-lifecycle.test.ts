@@ -105,6 +105,15 @@ function makeCtx(profileDir: string, options: { readonly flush?: () => Promise<u
   return { ctx, listeners, registeredDefs, disposers, info, warn }
 }
 
+/**
+ * 回放一个 `session/event`：Story 3.1 起 apply 在写者模式注册**两个**监听器
+ * （召回配额重置 + 闸门/L1 提升/三钩子采集）。事件应派发给全部监听器——按数组下标
+ * 取单个会把断言绑死在注册顺序上。
+ */
+function replay(harn: Pick<Harness, 'listeners'>, session: unknown, event: unknown): void {
+  for (const listener of harn.listeners) listener(session, event)
+}
+
 async function readInboxRow(
   connection: MemoryDatabase['connection'],
   id: string,
@@ -162,19 +171,20 @@ describe('③：消费者与 session/event 监听器共享同一 gate 实例（V
     await plugin.apply(ctx, EMBEDDING_CONFIG)
 
     expect(registeredDefs).toHaveLength(1)
-    expect(listeners).toHaveLength(1)
+    // Story 3.1：召回配额重置 + 闸门/采集 两个监听器（事件派发见 replay helper）。
+    expect(listeners).toHaveLength(2)
     expect(info.mock.calls.flat().join('\n')).toContain('记忆库就绪')
 
     const gate = captured.options?.gate
     expect(gate).toBeDefined()
     expect(gate!.isIdle()).toBe(true)
 
-    listeners[0]({ id: 'sess-gate' }, { type: 'turn/start' })
+    replay({ listeners }, { id: 'sess-gate' }, { type: 'turn/start' })
     // 若 index.ts 把监听器接到**另一个** gate 实例，这里仍是 true——消费者永远不会被挡住。
     expect(gate!.isIdle()).toBe(false)
     expect(gate!.depthFor('sess-gate')).toBe(1)
 
-    listeners[0]({ id: 'sess-gate' }, { type: 'turn/end' })
+    replay({ listeners }, { id: 'sess-gate' }, { type: 'turn/end' })
     expect(gate!.isIdle()).toBe(true)
   }, 60_000)
 })
@@ -213,10 +223,11 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     await plugin.apply(ctx, EMBEDDING_CONFIG)
 
     expect(plugin.inject).toContain('sessions')
-    expect(listeners).toHaveLength(1)
+    // Story 3.1：召回配额重置 + 三钩子采集 两个监听器。
+    expect(listeners).toHaveLength(2)
 
     const session = { id: 'apply-capture', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
-    listeners[0](session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    replay({ listeners }, session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
     await drainInboxBackgroundTasks()
 
     const stableKey = captureStableKey('turn', 'apply-capture', '1')
@@ -231,7 +242,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     expect(inbox.status).toBe('pending')
 
     // 确定性 id + 每轮至多一次：同一 (session, turn) 再回放不新增第二行队列条目。
-    listeners[0](session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    replay({ listeners }, session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
     await drainInboxBackgroundTasks()
     const rows = await queryAll(
       store.connection,
@@ -256,7 +267,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     await plugin.apply(ctx, EMBEDDING_CONFIG)
 
     const session = { id: 'apply-flush', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
-    listeners[0](session, { type: 'turn/end', seq: 70, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    replay({ listeners }, session, { type: 'turn/end', seq: 70, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
 
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(flush).toHaveBeenCalledTimes(1)

@@ -33,6 +33,7 @@ import {
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { collectRows, queryAll } from './rows.js'
+import { currentSnapshotPredicate } from './snapshot.js'
 import { MEMORY_TABLE, META_KEYS, META_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
 
@@ -233,8 +234,10 @@ export async function writeMemoryVersion(
  * Story 1.8 读路径：列表 / 详情。
  *
  * 与写路径共用连接与表，但**只读**：
- * - 列表过滤 `invalid_at IS NULL AND expired_at IS NULL`（当前快照语义，FR-14）；`layer`
- *   不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与其它非枚举值也照常列出；
+ * - 列表过滤走 `src/db/snapshot.ts` 的共享四条件谓词（FR-15 当前快照语义）；
+ *   Story 3.1 起从「只看失效两列」升级为四条件——真实数据 `valid_at` / `recorded_at`
+ *   恒 ≤ now，行为不变；`layer` 不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与
+ *   其它非枚举值也照常列出；
  * - 排序 `recorded_at DESC` + `$limit` 截断全在库侧完成（LadybugDB 0.22.3 已实测
  *   `ORDER BY`、参数化 `LIMIT`、`lower(...) CONTAINS lower(...)` 均可用）；
  * - 关键词是**字面包含**匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
@@ -251,13 +254,13 @@ const LIST_MEMORIES_PROJECTION = [
 
 const LIST_MEMORIES_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE ${currentSnapshotPredicate('m')}`,
   LIST_MEMORIES_PROJECTION,
 ].join(' ')
 
 const LIST_MEMORIES_WITH_KEYWORD_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL AND lower(m.text) CONTAINS lower($query)',
+  `WHERE ${currentSnapshotPredicate('m')} AND lower(m.text) CONTAINS lower($query)`,
   LIST_MEMORIES_PROJECTION,
 ].join(' ')
 
@@ -322,6 +325,7 @@ export interface MemoryDetail {
 /**
  * 最近未失效的记忆（`recorded_at` 倒序、最多 `limit` 条，含 Story 1.7 存量 `'L1_INBOX'` 行）。
  * 只读：不写库、不改任何行。关键词做两侧小写化的字面包含匹配。
+ * 快照谓词的 `now` 在此计算并绑参（共享谓词的唯一时间来源）。
  */
 export async function listMemories(
   connection: MemoryConnection,
@@ -329,9 +333,10 @@ export async function listMemories(
 ): Promise<MemoryListEntry[]> {
   const limit = Math.max(0, Math.trunc(options.limit))
   const keyword = options.query?.trim()
+  const now = new Date().toISOString()
   const rows = keyword
-    ? await queryRows(connection, LIST_MEMORIES_WITH_KEYWORD_STATEMENT, { query: keyword, limit })
-    : await queryRows(connection, LIST_MEMORIES_STATEMENT, { limit })
+    ? await queryRows(connection, LIST_MEMORIES_WITH_KEYWORD_STATEMENT, { query: keyword, limit, now })
+    : await queryRows(connection, LIST_MEMORIES_STATEMENT, { limit, now })
   return rows.map((row) => ({
     id: String(row.id),
     layer: String(row.layer ?? ''),
@@ -366,16 +371,17 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
  * L1→L2 提升候选的分页语句（Story 2.5 / 评审 P1+T43）。
  *
  * 用 `(recorded_at, id)` 复合游标**升序**扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
- * - `invalid_at` / `expired_at` 非空 = 已作废，不产出综合陈述；
- * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，与 `eii.ts` 的 `isEffective` 口径对齐。
+ * - 「当前快照」走 `src/db/snapshot.ts` 的共享四条件谓词（Story 3.1 收敛）：失效 / 过期 /
+ *   尚未生效（`valid_at` 在将来）的节点都不产出综合陈述；
+ * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，原先与 `eii.ts` 的 `isEffective`
+ *   口径对齐；Story 3.1 起共享谓词同时补上 `recorded_at <= $now`（对真实数据零行为变化）。
  *   缺这条会把「生效时间在将来」的 L1 选进队列，随后判据① 判 `not-effective` ⇒ 条目终局 done
  *   且来源 L1 永久 gate-fail，而条目 id 确定性、入队前 `readStatus` 跳过 ⇒ 生效后再也不会被提升。
  *   `valid_at` 为 NULL 的行不满足该比较，同样被排除（NULL 比较不为真）。
  */
 const LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  '  WHERE m.layer = $layer AND m.invalid_at IS NULL AND m.expired_at IS NULL',
-  '    AND m.valid_at <= $now',
+  '  WHERE m.layer = $layer AND ' + currentSnapshotPredicate('m'),
   '    AND (m.recorded_at > $after_at OR (m.recorded_at = $after_at AND m.id > $after_id))',
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
   '  ORDER BY m.recorded_at ASC, m.id ASC',

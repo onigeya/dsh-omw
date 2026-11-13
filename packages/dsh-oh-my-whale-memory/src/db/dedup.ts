@@ -61,6 +61,7 @@ import {
 } from './memory.js'
 import { collectRows } from './rows.js'
 import { META_KEYS, META_TABLE, MEMORY_TABLE, VECTOR_INDEX_NAME } from './schema.js'
+import { currentSnapshotPredicate } from './snapshot.js'
 
 /** 语义重复阈值（cosine）：≥ 该值判为同一条事实的另一种表述（epic-2-context.md:25）。 */
 export const SEMANTIC_DUP_THRESHOLD = 0.97
@@ -144,8 +145,7 @@ const ANN_CANDIDATE_STATEMENT = [
   'MATCH (node)',
   'WHERE node.layer = $layer',
   '  AND node.id <> $self_id',
-  '  AND node.valid_at <= $now AND node.recorded_at <= $now',
-  '  AND node.invalid_at IS NULL AND node.expired_at IS NULL',
+  '  AND ' + currentSnapshotPredicate('node'),
   '  AND distance <= $max_distance',
   'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at',
   'ORDER BY distance',
