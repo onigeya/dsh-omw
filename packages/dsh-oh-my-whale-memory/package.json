@@ -29,6 +29,9 @@
     "@deepseek-ai/schemastery": "~3.19.0",
     "@ladybugdb/core": "~0.22.3"
   },
+  "optionalDependencies": {
+    "@ladybugdb/wasm-core": "~0.22.3"
+  },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1"

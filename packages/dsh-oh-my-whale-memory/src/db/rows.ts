@@ -10,13 +10,14 @@
  * （AGENTS.md「不假设 hoisting」）。
  */
 import type * as lbug from '@ladybugdb/core'
+import { collectResultRows } from './backend.js'
 
 /** 取第一条结果集的全部行（多语句时 query() 返回结果集数组）。 */
 export async function collectRows(
   result: lbug.QueryResult | lbug.QueryResult[],
 ): Promise<Record<string, unknown>[]> {
-  const first = Array.isArray(result) ? result[0]! : result
-  return (await first.getAll()) as Record<string, unknown>[]
+  // 取行方式按结果对象自身能力分派（native getAll / wasm getAllObjects），见 backend.ts。
+  return collectResultRows(result)
 }
 
 /** 无参查询取全部行。 */

@@ -24,6 +24,8 @@ export type MemoryDbErrorCode =
   | 'db_unavailable'
   | 'db_write_failed'
   | 'audit_record_missing'
+  /** 存储后端模块装载失败（native 在 Electron 下不可用、wasm 包缺失等，AD-32）。 */
+  | 'db_backend_unavailable'
   /** 时间参数不是合法 UTC ISO-8601 时刻（Story 2.6：闭包谓词需内联时刻字面量）。 */
   | 'invalid_instant'
 

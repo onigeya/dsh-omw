@@ -33,8 +33,9 @@
  * **必须先定角色（先拿锁）再打开库**——该顺序由 index.ts 的 apply 保证。
  */
 import { stat } from 'node:fs/promises'
-import * as lbug from '@ladybugdb/core'
+import type * as lbug from '@ladybugdb/core'
 import { ensureAuditTables } from './audit.js'
+import { loadStorageBackend, type StorageBackend } from './backend.js'
 import { ensureInboxTables, ensureL2InboxTables } from '../inbox/queue.js'
 import { ensureEdgeTables } from './edges.js'
 import { MemoryDbError } from './errors.js'
@@ -104,6 +105,8 @@ interface RawHandle {
   database: lbug.Database
   connection: MemoryConnection
   readonly: boolean
+  /** 产生该句柄的后端：关闭方式两后端不同，故随句柄携带，不重复探测。 */
+  backend: StorageBackend
 }
 
 const handles = new Map<string, RawHandle>()
@@ -141,19 +144,20 @@ async function acquireHandle(dbPath: string, readOnly: boolean): Promise<RawHand
 
 async function createHandle(dbPath: string): Promise<RawHandle> {
   await ensureMemoryDbDirectory(dbPath)
-  const database = new lbug.Database(dbPath)
-  const connection = new lbug.Connection(database)
+  const backend = loadStorageBackend()
+  const database = backend.createDatabase(dbPath, false)
+  const connection = await backend.createConnection(database)
   try {
     // 扩展装载失败（含 Windows OpenSSL 3 缺失）必须冒泡，不做降级。
-    await connection.query('INSTALL vector; LOAD vector;')
-    await connection.query('INSTALL fts; LOAD fts;')
+    // wasm 后端下扩展已静态编译，loadExtensions 是 no-op。
+    await backend.loadExtensions(connection)
   } catch (error) {
     // 首次装载就失败：句柄无用，尽力关闭；锁可能仍被占，故记墓碑让重试抛原始错误。
     openFailures.set(dbPath, error)
-    closeHandle({ database, connection, readonly: false })
+    await closeHandle({ database, connection, readonly: false, backend })
     throw error
   }
-  const handle: RawHandle = { database, connection, readonly: false }
+  const handle: RawHandle = { database, connection, readonly: false, backend }
   handles.set(dbPath, handle)
   return handle
 }
@@ -200,9 +204,10 @@ async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
       `只读模式打开失败：等待 ${READONLY_DB_WAIT_MS}ms 后记忆库仍不存在（${dbPath}）。只读实例不创建空库——请先在有写者锁的实例里完成建库。`,
     )
   }
-  const database = new lbug.Database(dbPath, undefined, undefined, true)
-  const connection = new lbug.Connection(database)
-  const handle: RawHandle = { database, connection, readonly: true }
+  const backend = loadStorageBackend()
+  const database = backend.createDatabase(dbPath, true)
+  const connection = await backend.createConnection(database)
+  const handle: RawHandle = { database, connection, readonly: true, backend }
   handles.set(dbPath, handle)
   return handle
 }
@@ -381,7 +386,7 @@ async function initializeReadOnlyDatabase(
     return store
   } catch (error) {
     handles.delete(dbPath)
-    closeHandle(handle)
+    await closeHandle(handle)
     throw error
   }
 }
@@ -464,17 +469,9 @@ function createReadonlyModeError(dbPath: string): MemoryDbError {
   )
 }
 
-function closeHandle(handle: RawHandle): void {
-  try {
-    handle.connection.closeSync()
-  } catch {
-    /* ignore */
-  }
-  try {
-    handle.database.closeSync()
-  } catch {
-    /* ignore */
-  }
+async function closeHandle(handle: RawHandle): Promise<void> {
+  // 关闭方式由后端决定（native closeSync / wasm async close）；部分失败在 backend 内吞掉。
+  await handle.backend.close(handle.database, handle.connection)
 }
 
 async function pathExists(path: string): Promise<boolean> {
