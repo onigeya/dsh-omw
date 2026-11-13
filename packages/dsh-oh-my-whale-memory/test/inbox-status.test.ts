@@ -35,6 +35,7 @@ const BASE_SNAPSHOT: MemoryStatusSnapshot = {
   inboxes: { L1: 3, L2: 4 },
   failed: 0,
   embeddingMode: 'enabled',
+  systemOne: 'enabled',
   unembedded: 0,
   readonly: false,
   auditGap: 0,
@@ -51,6 +52,7 @@ const BASE_LINES = [
   'failed: 0',
   'audit_gap: 0',
   'embedding: enabled',
+  'systemOne: enabled',
   'readonly: false',
 ]
 
@@ -84,7 +86,7 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
       ],
     })
     const lines = text.split('\n')
-    expect(lines.slice(0, 9)).toEqual([
+    expect(lines.slice(0, 10)).toEqual([
       '记忆状态',
       'L1: 1',
       'L2: 2',
@@ -93,16 +95,17 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
       'failed: 2',
       'audit_gap: 0',
       'embedding: enabled',
+      'systemOne: enabled',
       'readonly: false',
     ])
-    expect(lines[9]).toBe('failed 最近条目:')
-    expect(lines[10]).toBe(
+    expect(lines[10]).toBe('failed 最近条目:')
+    expect(lines[11]).toBe(
       '- i-stale kind=work_fact attempts=4 stale updated_at=2026-11-10T00:00:00.000Z error=boom\\nline2',
     )
-    expect(lines[11]).toBe(
+    expect(lines[12]).toBe(
       '- i-fresh kind=persona attempts=4 updated_at=2026-11-11T00:00:00.000Z error=(空)',
     )
-    expect(lines).toHaveLength(12)
+    expect(lines).toHaveLength(13)
   })
 
   it('P5：id/kind 内的换行也被单行化，不伪造额外行', () => {
@@ -121,11 +124,11 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
       ],
     })
     const lines = text.split('\n')
-    // 9 行基准 + 「failed 最近条目:」+ 1 行条目：id/kind 里的换行不得裂成更多行。
-    expect(lines).toHaveLength(11)
-    expect(lines[10]).toContain('i-1')
-    expect(lines[10]).toContain('kind=work_fact')
-    expect(lines[10]).toContain('attempts=4')
+    // 10 行基准 + 「failed 最近条目:」+ 1 行条目：id/kind 里的换行不得裂成更多行。
+    expect(lines).toHaveLength(12)
+    expect(lines[11]).toContain('i-1')
+    expect(lines[11]).toContain('kind=work_fact')
+    expect(lines[11]).toContain('attempts=4')
   })
 })
 

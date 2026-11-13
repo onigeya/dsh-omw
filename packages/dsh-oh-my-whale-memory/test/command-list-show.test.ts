@@ -30,6 +30,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       inboxes: { L1: 0, L2: 0 },
       failed: 0,
       embeddingMode: 'enabled',
+      systemOne: 'enabled',
       unembedded: 0,
       readonly: false,
     }),

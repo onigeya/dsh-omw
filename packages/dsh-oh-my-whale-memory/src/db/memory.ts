@@ -33,7 +33,7 @@ import {
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { collectRows, queryAll } from './rows.js'
-import { MEMORY_TABLE } from './schema.js'
+import { MEMORY_TABLE, META_KEYS, META_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
 
 /** 行归一 helper 已移到 ./rows.ts（审计层同样要用，避免模块环）；这里保留同名 re-export 不动既有导入面。 */
@@ -89,6 +89,13 @@ export interface UpsertMemoryInput {
    * 写 memory.parent_id 列（旧库由初始化期幂等 ALTER 补出，见 database.ts）。
    */
   parentId?: string | null
+  /**
+   * 直接支撑该节点的**存活 L0 观测条数**（Story 2.5 / U16、AC③）：
+   * L1 = 其 source_refs 中命中存活 l0_raw（raw_text IS NOT NULL）的条数；
+   * L2 = 其直接前驱 L1 各自存活 L0 集的**并集去重**后计数。
+   * 只有质量门写 L2 时计算并传入；其余写入省略（列保持 NULL，只写不读）。
+   */
+  support?: number | null
 }
 
 export interface UpsertMemoryResult {
@@ -103,10 +110,20 @@ export interface UpsertMemoryResult {
  *
  * Story 1.11（AC4）：kind / priority 以**最新写入**为准（`m.kind = $kind` / `m.priority = $priority`），
  * 与 text / layer / embedding（首次写入者为准）有意不同——同文本换分类仍命中同一 id。
+ *
+ * Story 2.5 / 评审 T9：support 是**并集计数**（存活 L0 引用数），故合并语义取「大」且单调不减
+ * ——$support 为 NULL（未传）时保留原值、原值为 NULL 时接受新值，否则取两者较大者。
+ * 取「最新写入」会让二次综合把已累计的 support 抹成单批的值。
  */
 const UPSERT_ON_MATCH_CLAUSE = [
   '  ON MATCH SET m.source_refs = list_distinct(list_concat(m.source_refs, $source_refs)),',
   '    m.kind = $kind, m.priority = $priority,',
+  // 注意：**不要**写 `WHEN $support IS NULL THEN m.support` —— 0.22.3 的 binder 会因此把同一参数
+  // 先推成 BOOL 再推成 INT64，抛 `Binder exception: Cannot change parameter expression data type from
+  // BOOL to INT64.`（实测，评审 P9 首版即踩）。$support 为 NULL 时 `$support > m.support` 求值为
+  // NULL（非真）⇒ 落到 ELSE，语义与显式判空完全一致。
+  '    m.support = CASE WHEN m.support IS NULL THEN $support',
+  '      WHEN $support > m.support THEN $support ELSE m.support END,',
   '    m.recorded_at = CASE WHEN $recorded_at < m.recorded_at THEN $recorded_at ELSE m.recorded_at END',
 ].join('')
 
@@ -115,7 +132,7 @@ const UPSERT_STATEMENT = [
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
   '    m.embedding = $embedding, m.valid_at = $valid_at, m.recorded_at = $recorded_at,',
   '    m.source_refs = $source_refs, m.embedding_model_id = $embedding_model_id, m.embedding_dim = $embedding_dim,',
-  '    m.parent_id = $parent_id',
+  '    m.parent_id = $parent_id, m.support = $support',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -129,7 +146,7 @@ const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
   `MERGE (m:${MEMORY_TABLE} {id: $id})`,
   '  ON CREATE SET m.layer = $layer, m.kind = $kind, m.priority = $priority, m.text = $text,',
   '    m.valid_at = $valid_at, m.recorded_at = $recorded_at, m.source_refs = $source_refs,',
-  '    m.parent_id = $parent_id',
+  '    m.parent_id = $parent_id, m.support = $support',
   UPSERT_ON_MATCH_CLAUSE,
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
 ].join('')
@@ -185,6 +202,7 @@ export async function writeMemoryVersion(
     recorded_at: recordedAt,
     source_refs: sourceRefs,
     parent_id: input.parentId ?? null,
+    support: input.support == null ? null : Math.trunc(input.support),
   }
   if (embedding !== undefined) {
     params.embedding = embedding
@@ -345,6 +363,106 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
 }
 
 /**
+ * L1→L2 提升候选的分页语句（Story 2.5 / 评审 P1+T43）。
+ *
+ * 用 `(recorded_at, id)` 复合游标**升序**扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
+ * - `invalid_at` / `expired_at` 非空 = 已作废，不产出综合陈述；
+ * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，与 `eii.ts` 的 `isEffective` 口径对齐。
+ *   缺这条会把「生效时间在将来」的 L1 选进队列，随后判据① 判 `not-effective` ⇒ 条目终局 done
+ *   且来源 L1 永久 gate-fail，而条目 id 确定性、入队前 `readStatus` 跳过 ⇒ 生效后再也不会被提升。
+ *   `valid_at` 为 NULL 的行不满足该比较，同样被排除（NULL 比较不为真）。
+ */
+const LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT = [
+  'MATCH (m:' + MEMORY_TABLE + ')',
+  '  WHERE m.layer = $layer AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  '    AND m.valid_at <= $now',
+  '    AND (m.recorded_at > $after_at OR (m.recorded_at = $after_at AND m.id > $after_id))',
+  '  RETURN m.id AS id, m.recorded_at AS recorded_at',
+  '  ORDER BY m.recorded_at ASC, m.id ASC',
+  '  LIMIT $limit',
+].join('\n')
+
+/** 提升候选一页的默认大小（评审 P1：窗口与触发阈值解耦后由页大小决定每轮取多少）。 */
+export const L2_PROMOTION_PAGE_SIZE = 200
+
+/** 把一页结果的最后一行编成游标（与 2.6 的 `"<recorded_at>|<id>"` 同形）。 */
+function formatCursor(recordedAt: string, id: string): string {
+  return recordedAt + '|' + id
+}
+
+/** 分页游标：`"<recorded_at>|<id>"`；空串 = 从起点开始。 */
+export interface ListEffectiveMemoryPage {
+  readonly ids: readonly string[]
+  /** 下一页的起点；`null` = 已到页尾（本轮候选取完，调用方回绕到起点）。 */
+  readonly nextCursor: string | null
+}
+
+/**
+ * 按层取一页有效记忆 id（`(recorded_at, id)` 升序游标分页）。
+ *
+ * Story 2.5 的 L1→L2 提升调度用：提升触发时只知道「L1 累计跨过阈值」，需要把候选 L1 的 id
+ * 取出来入 l2_inbox（每条 L1 一个条目，U3）。**评审 P1 前**这里用 `LIMIT = L1_PROMOTION_THRESHOLD`
+ * （=20）且倒序，导致每轮只覆盖最新 20 条、更早的永久不可达；现在改为升序游标 + 页大小，
+ * 配合确定性的条目 id（`buildL2PromotionItemId`）与入队前 `readStatus` 跳过实现幂等推进。
+ *
+ * 只读；过期 / 失效 / 尚未生效（`valid_at` 在将来）的节点不参与提升——它们不该再产出
+ * 综合陈述。返回的 `nextCursor` 为 `null` 表示本页即尾页（调用方把游标回绕到起点）。
+ */
+export async function listEffectiveMemoryIdsByLayer(
+  connection: MemoryConnection,
+  layer: string,
+  options: {
+    readonly after?: string | null
+    readonly limit?: number
+    readonly now?: () => Date
+  } = {},
+): Promise<ListEffectiveMemoryPage> {
+  const after = options.after ?? ''
+  const separator = after.indexOf('|')
+  const afterAt = separator < 0 ? '' : after.slice(0, separator)
+  const afterId = separator < 0 ? '' : after.slice(separator + 1)
+  const limit = Math.max(1, Math.trunc(options.limit ?? L2_PROMOTION_PAGE_SIZE))
+  const now = (options.now ?? (() => new Date()))().toISOString()
+  const rows = await queryRows(connection, LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT, {
+    layer,
+    now,
+    after_at: afterAt,
+    after_id: afterId,
+    limit,
+  })
+  const ids = rows.map((row) => String(row.id))
+  if (ids.length < limit) return { ids, nextCursor: null }
+  const last = rows[rows.length - 1]!
+  return { ids, nextCursor: formatCursor(String(last.recorded_at ?? ''), String(last.id)) }
+}
+
+const READ_META_STATEMENT = 'MATCH (m:' + META_TABLE + ' {key: $key}) RETURN m.value AS value'
+const MERGE_META_STATEMENT =
+  'MERGE (m:' + META_TABLE + ' {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value'
+
+/**
+ * 读 L1→L2 提升候选的断点游标（评审 P1）：`omw_meta.l2_promotion_cursor`，空串 = 从起点开始。
+ * 纯逻辑水位，不新增存储（与 2.6 的 `evidence_backfill_cursor` 同一惯用法）。
+ */
+export async function readL2PromotionCursor(connection: MemoryConnection): Promise<string> {
+  const rows = await queryRows(connection, READ_META_STATEMENT, { key: META_KEYS.l2PromotionCursor })
+  const value = rows[0]?.value
+  return value === undefined || value === null ? '' : String(value)
+}
+
+/**
+ * 写回游标。**不自开事务**：调用方通常已在自己的事务里（入队与游标推进必须原子，
+ * 否则崩溃会让游标前进而条目未入队 ⇒ 这批候选永久不可达）。
+ */
+export async function writeL2PromotionCursor(
+  connection: MemoryConnection,
+  value: string,
+): Promise<void> {
+  const prepared = await connection.prepare(MERGE_META_STATEMENT)
+  await connection.execute(prepared, { key: META_KEYS.l2PromotionCursor, value })
+}
+
+/**
  * Story 1.9 读路径：`/memory status` 的层计数。
  *
  * 计数事实源只有 `memory` 表的 `layer` 列——Epic 1 无 INBOX 表、无 failed 存储
@@ -353,8 +471,13 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
  * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
  *
  * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
- * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`；`'L1_INBOX'` / `'L2_INBOX'`
- * 现在只作 INBOX 队列标识/表名的历史计数位保留（Story 1.7 存量行仍会命中 `L1_INBOX` 计数）。
+ * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`。
+ *
+ * 评审 P16②/T41 的**口径漂移**（2.5 之后这里只对 L1_INBOX 成立）：
+ * - `'L1_INBOX'` 仍是「memory 表 layer 列的历史计数位」（Story 1.7 的存量行会命中）；
+ * - `'L2_INBOX'` 已**不再**由此计数——`/memory status` 读的是 `l2_inbox` 队列深度
+ *   （pending + processing，见 `index.ts` 的 getStatus）。保留它在本枚举里只为不破坏
+ *   既有调用方与 Epic 1 的形状；本原语返回的 L2_INBOX 计数已无人消费。
  */
 export const COUNTED_MEMORY_LAYERS = ['L1', 'L2', 'L1_INBOX', 'L2_INBOX'] as const
 export type CountedMemoryLayer = (typeof COUNTED_MEMORY_LAYERS)[number]

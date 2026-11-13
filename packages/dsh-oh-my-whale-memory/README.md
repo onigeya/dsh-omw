@@ -179,17 +179,30 @@ apply 阶段经 `ctx.tools.register` 注册模型可见工具（`inject` 因此�
   **有意非对称**：已失效（墓碑）记忆不在 `list` 里出现，但 `show <id>` 仍返回并展示
   `invalid_at` / `expired_at`。id 不存在时返回 `{ kind: 'error', text: '未找到 id 为 … 的记忆。' }`。
 - `/memory status`：只读打印记忆库基础状态，全部本地（不调 LLM、不发网络请求）。
-  正文逐行钉死：首行 `记忆状态`，随后 `L1: <n>` / `L2: <n>` / `L1_INBOX: <n>` / `L2_INBOX: <n>`、
-  `failed: <n>`（Story 2.2 起是 `l1_inbox` 表 `status = 'failed'` 的**真实计数**，不再恒 0；
-  `L1_INBOX` / `L2_INBOX` 仍是 `memory` 表 `layer` 列的历史计数位——Story 1.11 收敛后
-  写路径只写 `L1`，仅存量行会命中这两个计数）、
-  `embedding: enabled | disabled（降级检索）`（非降级也显式打印）、
+  正文逐行钉死（顺序即代码顺序，与 `src/command.ts` 的 `renderMemoryStatus` 一一对应）：
+  首行 `记忆状态`，随后 `L1: <n>` / `L2: <n>` / `L1_INBOX: <n>` / `L2_INBOX: <n>`、
+  `failed: <n>`（Story 2.2 起是 `l1_inbox` 表 `status = 'failed'` 的**真实计数**，不再恒 0）、
+  `audit_gap: <n> | 未知（审计表缺失）`、
+  `embedding: enabled | enabled（未嵌入 <n> 条）| disabled（降级检索）`（非降级也显式打印；
+  有未嵌入节点时带条数——Story 2.4 起）、
+  `systemOne: enabled | disabled-by-config | degraded`（Story 2.5 起**恒打印**；后两者带
+  `（已降级回 ctx.llm）`，非降级也显式打印，避免把字段缺失误读成健康）、
   `readonly: false | true, reason: '<原因>'`（只读实例标注 `another instance owns the writer lock`）。
-  **当且仅当 `failed > 0`** 时追加明细块：一行 `failed 最近条目:` 加最近 **5** 条
-  `- <id> kind=<kind> attempts=<n>[ stale] updated_at=<ISO> error=<单行摘要>`（`updated_at` 倒序；
-  进入死信起超过 **24h** 的标 `stale`）；没有失败时既有 9 行逐字不变。
+  **口径差异（有意）**：`L1_INBOX` 与 `L2_INBOX` 含义不同。`L1_INBOX` 仍是 `memory` 表
+  `layer` 列的历史计数位（Story 1.11 收敛后写路径只写 `L1`，仅存量行会命中）；
+  `L2_INBOX` 自 Story 2.5 起是 `l2_inbox` **队列表的深度**（`pending + processing`），
+  不再是 `memory` 层的计数——两条消费链因此各报各的真实积压。
+  以下四行**仅按需追加**（条件不满足时输出逐字不变，且都排在 `readonly` 行之后）：
+  `evidence_gap: <n>（EII <n> / 漂移 <n>）`（Story 2.6，`total > 0` 时；边表缺失渲染
+  `evidence_gap: 未知（边表缺失）`）、`related_skipped: <n>`（`> 0` 时；审计表缺失渲染
+  `related_skipped: 未知（审计表缺失）`）、`l2_failed: <n>` 与 `uncertain: <n>`（Story 2.5，
+  各自 `> 0` 时；`uncertain` 算不出来时渲染 `uncertain: 未知（审计表缺失）`）。
+  `l2_failed > 0` 时先追加 `l2_failed 最近条目:`（Story 2.5），随后才是 `failed 最近条目:`（两条明细块
+  上限都是 **5** 条，均 `updated_at` 倒序、进入死信起超过 **24h** 的标 `stale`）；
+  每条形如 `- <id> kind=<kind> attempts=<n>[ stale] updated_at=<ISO> error=<单行摘要>`。
   `status` 带多余参数 → usage 错误且不查库；库未就绪 → 明确报错，绝不静默返回 0；
-  **队列表缺失照抛**（可见错误，不静默报 `failed: 0`）。
+  **队列表缺失照抛**（可见错误，不静默报 `failed: 0`）；只读实例开旧库时 `l2_inbox` 可能
+  不存在，此时整条 `status` 会明确报错（有意不静默，见 Known Limitations）。
 - 无子命令 / 未知子命令（如 `/memory foo`）→ usage 错误，正文见 `MEMORY_COMMAND_USAGE`
   （同时给出 remember / list / show / status 四条用法）。
 - **NULL 三列**：Epic 1 尚无 embedding 客户端，节点 `embedding` / `embedding_model_id` /

@@ -157,6 +157,13 @@ export interface MemoryStatusSnapshot {
   /** embedding 可用性：endpoint / token / model 任一缺失即 'disabled'（降级检索）。 */
   readonly embeddingMode: 'enabled' | 'disabled'
   /**
+   * System One 忠实性通道的状态（Story 2.5 / AC:674、U6）：
+   * - `enabled`：配置开启且未运行态降级（核实走 System One）；
+   * - `disabled-by-config`：`systemOne.enabled=false`，整体回落 ctx.llm 单次检查；
+   * - `degraded`：端点持续不可达（连续失败达阈值），整体回落 ctx.llm 单次检查。
+   */
+  readonly systemOne: SystemOneStatusMode
+  /**
    * 仍有效但**没有向量**的节点数（Story 2.4 / U5）：这些节点进不了 HNSW，对语义去重与
    * 语义检索隐形。仅在 embedding enabled 且该值 > 0 时追加渲染，0 时输出逐字不变。
    */
@@ -177,7 +184,25 @@ export interface MemoryStatusSnapshot {
    * 算不出来（渲染成未知，不静默报 0，与 auditGap 同一约定）。0 时不追加渲染。
    */
   readonly relatedSkipped: number | null
+  /**
+   * L2 提升的死信条数（Story 2.5 / 评审 P8-T8）：l2_inbox 里 status='failed' 的数量。
+   * 缺省/0 ⇒ 不追加渲染（既有逐行输出逐字不变）。
+   */
+  readonly l2Failed?: number
+  /** L2 死信最近条目明细（与 L1 的 failedEntries 同形，仅 > 0 时追加）。 */
+  readonly l2FailedEntries?: readonly MemoryFailedEntry[]
+  /**
+   * 疑似失效账目计数（Story 2.5 / 评审 P8-T27）：generation_log 里 outcome='uncertain' 的行数。
+   * null = 审计表缺失、算不出来（渲染成未知）；0/缺省 ⇒ 不追加渲染。
+   */
+  readonly uncertain?: number | null
 }
+
+/**
+ * System One 通道的状态枚举（Story 2.5 / U6）。命令层不 import db/distill 模块，
+ * 故在此重复声明形状——与 `distill/system-one.ts` 的运行态槽语义必须一致。
+ */
+export type SystemOneStatusMode = 'enabled' | 'disabled-by-config' | 'degraded'
 
 /**
  * 边侧差额计数（命令层镜像 `db/eii.ts` 的 `EvidenceGapSummary`）。命令层不 import db 模块，
@@ -387,6 +412,26 @@ function renderMemoryDetail(detail: MemoryCommandDetail): string {
 }
 
 /**
+ * 追加一块死信明细（标题 + 每条一行）。L1 的 `failed` 与 L2 的 `l2_failed` 逐字段同形，
+ * 故共用同一段渲染——两处都必须让 id/kind 过 `renderSingleLine`（值内换行会伪造出额外行，
+ * 破坏「逐行钉死」的输出格式，P5）。entries 为空时不追加任何行。
+ */
+function appendFailedEntryLines(
+  lines: string[],
+  label: string,
+  entries: readonly MemoryFailedEntry[],
+): void {
+  if (entries.length === 0) return
+  lines.push(label)
+  for (const entry of entries) {
+    lines.push(
+      `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
+      `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
+    )
+  }
+}
+
+/**
  * 状态渲染（spec「输出格式钉死（可断言）」逐行照抄）：
  * 首行 `记忆状态`，其后固定顺序的 `键: 值` 行，计数为十进制。
  *
@@ -407,6 +452,13 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
       : snapshot.unembedded > 0
         ? `embedding: enabled（未嵌入 ${snapshot.unembedded} 条）`
         : 'embedding: enabled',
+    // Story 2.5 / U6：恒打印一行（与 embedding 行同一取向）——非降级也显式打印，
+    // 让「配置关闭」与「运行态降级」两种降级都可断言，且不与 enabled 混淆。
+    snapshot.systemOne === 'disabled-by-config'
+      ? 'systemOne: disabled-by-config（已降级回 ctx.llm）'
+      : snapshot.systemOne === 'degraded'
+        ? 'systemOne: degraded（已降级回 ctx.llm）'
+        : 'systemOne: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ]
   // Story 2.6 / D7：边侧差额（EII + 漂移）与关系降级——都只在需要时追加，gap=0 时既有
@@ -424,18 +476,19 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   } else if (snapshot.relatedSkipped > 0) {
     lines.push(`related_skipped: ${snapshot.relatedSkipped}`)
   }
-  // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
-  const entries = snapshot.failedEntries ?? []
-  if (entries.length > 0) {
-    lines.push('failed 最近条目:')
-    for (const entry of entries) {
-      // id/kind 也过 renderSingleLine：值内换行会伪造出额外行，破坏「逐行钉死」的输出格式（P5）。
-      lines.push(
-        `- ${renderSingleLine(entry.id)} kind=${renderSingleLine(entry.kind)} attempts=${entry.attempts}` +
-        `${entry.stale ? ' stale' : ''} updated_at=${entry.updatedAt} error=${renderSingleLine(entry.lastError ?? '')}`,
-      )
-    }
+  // Story 2.5 / 评审 P8：L2 死信与疑似失效账目——都只在**需要时**追加，0/缺省时既有
+  // 逐行输出逐字不变；算不出来（null）照 2.6 的范式渲染「未知」，不静默报 0。
+  if (snapshot.l2Failed !== undefined && snapshot.l2Failed > 0) {
+    lines.push(`l2_failed: ${snapshot.l2Failed}`)
   }
+  if (snapshot.uncertain === null) {
+    lines.push('uncertain: 未知（审计表缺失）')
+  } else if (snapshot.uncertain !== undefined && snapshot.uncertain > 0) {
+    lines.push(`uncertain: ${snapshot.uncertain}`)
+  }
+  appendFailedEntryLines(lines, 'l2_failed 最近条目:', snapshot.l2FailedEntries ?? [])
+  // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
+  appendFailedEntryLines(lines, 'failed 最近条目:', snapshot.failedEntries ?? [])
   return lines.join('\n')
 }
 

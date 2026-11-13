@@ -33,8 +33,19 @@ const LayerWeightsSchema = Schema.object({
   l1: Schema.number().default(0.4),
 }).default({}).volatile()
 
+/**
+ * System One 配置（Story 2.5 / 评审 P3-T4）：`enabled` 之外再给三个**可选**覆盖项。
+ *
+ * 动机：端点与模型此前只有模块常量，不可覆盖；`token` 更是完全无处可配（上游若要求凭据就无解）。
+ * - 三者全部可选 ⇒ 缺省行为与 2.5 之前**逐字一致**（不翻转 `enabled` 的默认值）；
+ * - `token` 必须标 `.role('secret')`（AD-9：字段名不参与脱敏判定，不标则明文广播）；
+ * - 凭据值绝不进日志 / 审计 / status（NFR9）。
+ */
 const SystemOneSchema = Schema.object({
   enabled: Schema.boolean().default(true),
+  endpoint: Schema.string(),
+  model: Schema.string(),
+  token: Schema.string().role('secret'),
 }).default({}).volatile()
 
 /** FR-18 全字段 Config schema。每项 `.volatile()`；凭据标 `.role('secret')`。 */
@@ -68,7 +79,7 @@ export interface RuntimeConfig {
   layerWeights: { l2: number; l1: number }
   llmProvider?: string
   llmModel?: string
-  systemOne: { enabled: boolean }
+  systemOne: { enabled: boolean; endpoint?: string; model?: string; token?: string }
   warnings: string[]
 }
 
@@ -126,7 +137,7 @@ export function resolveRuntimeConfig(config: {
   layerWeights?: Getter<{ l2?: number; l1?: number }>
   llmProvider?: Getter<string | undefined>
   llmModel?: Getter<string | undefined>
-  systemOne?: Getter<{ enabled?: boolean }>
+  systemOne?: Getter<{ enabled?: boolean; endpoint?: string; model?: string; token?: string }>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -164,8 +175,17 @@ export function resolveRuntimeConfig(config: {
   const l2 = requireUnitWeight('layerWeights.l2', weightsRaw.l2 ?? 0.7)
   const l1 = requireUnitWeight('layerWeights.l1', weightsRaw.l1 ?? 0.4)
 
-  const systemOneRaw = read(config.systemOne ?? {}) as { enabled?: boolean }
+  const systemOneRaw = read(config.systemOne ?? {}) as {
+    enabled?: boolean
+    endpoint?: string
+    model?: string
+    token?: string
+  }
   const systemOneEnabled = systemOneRaw.enabled ?? true
+  // 端点填了就硬校验（与 embedding.endpoint 同一口径）；token 只做 trim，值本身不落任何输出。
+  const systemOneEndpoint = requireHttpUrl('systemOne.endpoint', systemOneRaw.endpoint)
+  const systemOneModel = systemOneRaw.model?.trim() || undefined
+  const systemOneToken = systemOneRaw.token?.trim() || undefined
   const injectOnNewSession = read(config.injectOnNewSession ?? true)
   const llmProvider = read(config.llmProvider ?? undefined)
   const llmModel = read(config.llmModel ?? undefined)
@@ -186,7 +206,12 @@ export function resolveRuntimeConfig(config: {
     layerWeights: { l2, l1 },
     llmProvider: llmProvider || undefined,
     llmModel: llmModel || undefined,
-    systemOne: { enabled: systemOneEnabled },
+    systemOne: {
+      enabled: systemOneEnabled,
+      endpoint: systemOneEndpoint,
+      model: systemOneModel,
+      token: systemOneToken,
+    },
     warnings,
   }
 }

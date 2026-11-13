@@ -49,8 +49,10 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(columns.get('source_refs')).toBe('STRING[]')
     // Story 2.4 / U1：去重版本链要挂 parent_id（新节点指向被作废的旧版本 id）。
     expect(columns.get('parent_id')).toBe('STRING')
-    // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死（Epic 2 加一列后为 14）。
-    expect(columns.size).toBe(14)
+    // Story 2.5 / U16：AD-4 一直要求 support（support 计数），Epic 2 补齐。
+    expect(columns.get('support')).toBe('INT64')
+    // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死（2.4 加 parent_id、2.5 加 support 后为 15）。
+    expect(columns.size).toBe(15)
   })
 
   it('l0_raw 表含 AC2 列出的四列', async () => {

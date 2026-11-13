@@ -3,9 +3,11 @@
  *
  * 列契约（AC2，与 ARCHITECTURE-SPINE ER 图一致）：
  * - memory：id/layer/kind/priority/text/embedding FLOAT[DIM]/
- *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim/parent_id
+ *   valid_at/recorded_at/invalid_at/expired_at/source_refs[]/embedding_model_id/embedding_dim/parent_id/support
  *
  * Epic 2 加列（Story 2.4 / U1）：memory.parent_id（STRING，被作废的旧版本节点 id，挂在新节点上）。
+ * Epic 2 加列（Story 2.5 / U16）：memory.support（INT64，直接支撑该节点的存活 L0 观测条数；
+ * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库因 CREATE ... IF NOT EXISTS 是 no-op，
  * 由 database.ts 的唯一迁移点用幂等 `ALTER TABLE memory ADD parent_id STRING` 补列。
  * SCHEMA_VERSION 不变（它只被写、从不被读取，改它只会让新旧库版本串不一致）。
@@ -36,6 +38,8 @@ export const META_KEYS = {
   createdAt: 'created_at',
   /** Story 2.6 / X1：EVIDENCE 历史回填的断点游标（纯逻辑水位，不新增存储）。 */
   evidenceBackfillCursor: 'evidence_backfill_cursor',
+  /** Story 2.5 / 评审 P1（T1）：L1→L2 提升候选的断点游标，形态 `"<recorded_at>|<id>"`。 */
+  l2PromotionCursor: 'l2_promotion_cursor',
 } as const
 
 /** 维度必须是 ≥1 的整数——直接拼进 DDL，越界即拒绝（不信任外部配置）。 */
@@ -64,6 +68,7 @@ export function createMemoryTableStatement(dim: number): string {
     '  embedding_model_id STRING,',
     '  embedding_dim INT64,',
     '  parent_id STRING,',
+    '  support INT64,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
@@ -81,6 +86,17 @@ export function alterMemoryAddParentIdStatement(): string {
   return `ALTER TABLE ${MEMORY_TABLE} ADD ${PARENT_ID_COLUMN} STRING`
 }
 
+/** Epic 2 新增列（Story 2.5 / U16）：support 的旧库补列目标（与 parent_id 同一模式）。 */
+export const SUPPORT_COLUMN = 'support'
+
+/**
+ * 旧库补 support 列（Story 2.5 / U16）。幂等性由调用方保证（先 readTableColumns 判列）——
+ * 重复执行会抛 "Binder exception: Property support already exists"，故不做 IF NOT EXISTS。
+ */
+export function alterMemoryAddSupportStatement(): string {
+  return `ALTER TABLE ${MEMORY_TABLE} ADD ${SUPPORT_COLUMN} INT64`
+}
+
 export function createL0RawTableStatement(): string {
   return 'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, PRIMARY KEY(id))'
 }
@@ -94,9 +110,17 @@ export function createL0RawTableStatement(): string {
  */
 export const L1_INBOX_TABLE = 'l1_inbox'
 
-export function createL1InboxTableStatement(): string {
+/**
+ * Story 2.5 / U1：L2 提升队列（与 l1_inbox **同列、同状态机**，只有表名不同）。
+ * 泛化的语句生成在 src/inbox/queue.ts 的 createInboxQueue(table)；
+ * 表名只能是本文件导出的常量，绝不接受外部输入（不把用户数据拼进 DDL）。
+ */
+export const L2_INBOX_TABLE = 'l2_inbox'
+
+/** 队列 DDL（按表名生成，列契约的唯一来源）。 */
+export function createInboxTableStatement(table: string): string {
   return [
-    'CREATE NODE TABLE IF NOT EXISTS ' + L1_INBOX_TABLE + ' (',
+    'CREATE NODE TABLE IF NOT EXISTS ' + table + ' (',
     '  id STRING,',
     '  session_id STRING,',
     '  kind STRING,',
@@ -111,6 +135,14 @@ export function createL1InboxTableStatement(): string {
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
+}
+
+export function createL1InboxTableStatement(): string {
+  return createInboxTableStatement(L1_INBOX_TABLE)
+}
+
+export function createL2InboxTableStatement(): string {
+  return createInboxTableStatement(L2_INBOX_TABLE)
 }
 
 export function createMetaTableStatement(): string {

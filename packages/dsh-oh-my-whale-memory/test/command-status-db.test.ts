@@ -25,10 +25,12 @@ import {
   SCHEMA_VERSION,
   createL0RawTableStatement,
   createL1InboxTableStatement,
+  createL2InboxTableStatement,
   createMemoryTableStatement,
   createMetaTableStatement,
 } from '../src/db/schema'
 import { READONLY_REASON } from '../src/db/writer-lock'
+import { l2InboxQueue } from '../src/inbox/queue'
 import type { MemoryCommandDefinition } from '../src/command'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -122,6 +124,7 @@ function statusText(
     'failed: 0',
     `audit_gap: ${auditGap}`,
     unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
+    'systemOne: enabled',
     'readonly: false',
   ]
   // Story 2.6 / F2：边侧差额与关系降级——与 command.ts 同一渲染口径。
@@ -251,6 +254,27 @@ describe('AC5：status 全程本地', () => {
   })
 })
 
+describe('Story 2.5 / 评审 P13（T12）：L2_INBOX 是队列深度，不是 memory 层计数', () => {
+  it('l2_inbox 有 1 条 pending、memory 层 L2_INBOX 有 2 行 ⇒ 渲染 L2_INBOX: 1', async () => {
+    const p13Dir = await makeTempDir('omw-status-l2inbox-')
+    const registeredDefs: MemoryCommandDefinition[] = []
+    await plugin.apply(makeCtx(p13Dir, registeredDefs), EMBEDDING_CONFIG)
+
+    const store = await openMemoryDatabase({ dbPath: resolveMemoryDbPath(p13Dir), dim: DIM, modelId: MODEL_ID })
+    // memory 层的历史口径行：Story 1.7 存量形状，**不该**被算进 L2_INBOX。
+    await store.upsertMemory({ layer: 'L2_INBOX', text: 'P13 历史 L2_INBOX 一', recordedAt: TS(1) })
+    await store.upsertMemory({ layer: 'L2_INBOX', text: 'P13 历史 L2_INBOX 二', recordedAt: TS(2) })
+    // 真实队列深度：1 条 pending。
+    await l2InboxQueue.enqueue(store.connection, { id: 'p13-q1', payload: '{"l1Ids":["x"]}', now: new Date('2026-11-01T00:00:05.000Z') })
+
+    const result = await registeredDefs[0]!.handler({ rawInput: ' status' })
+    expect(result.kind).toBe('success')
+    expect(result.text).toContain('L2_INBOX: 1')
+    expect(result.text).not.toContain('L2_INBOX: 2')
+    await store.close()
+  }, 30_000)
+})
+
 describe('库未就绪：无 profileContext 时 status 明确报错（读 dep 惰性）', () => {
   it('真实 getStatus 抛出的文案含「记忆库未就绪」，不静默返回 0', async () => {
     const registeredDefs: MemoryCommandDefinition[] = []
@@ -285,6 +309,9 @@ function buildReadonlyStatements(dim: number): string[] {
     createL0RawTableStatement(),
     // Story 2.2：/memory status 读 l1_inbox 的 failed 计数（缺表照抛），只读夹具必须带这张表。
     createL1InboxTableStatement(),
+    // Story 2.5 / U1：L2_INBOX 行改读 l2_inbox 的真实队列深度，同样缺表照抛（与 l1_inbox
+    // 同一约定，不静默报 0），故只读夹具也必须带这张表。
+    createL2InboxTableStatement(),
     mergeMeta(META_KEYS.schemaVersion, SCHEMA_VERSION),
     mergeMeta(META_KEYS.embeddingDim, String(dim)),
     mergeMeta(META_KEYS.embeddingModelId, MODEL_ID),
@@ -352,11 +379,14 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'audit_gap: 未知（审计表缺失）',
         // Story 2.4 / U5：只读夹具 4 条节点（L1×2 / L2×1 / L1_INBOX×1）全无向量。
         'embedding: enabled（未嵌入 4 条）',
+        'systemOne: enabled',
         `readonly: true, reason: '${READONLY_REASON}'`,
         // Story 2.6 / F2：只读夹具既不建边表也不建审计表 ⇒ 两个差额都算不出来，
         // 与 audit_gap 同一约定显式渲染「未知」，绝不静默报 0。
         'evidence_gap: 未知（边表缺失）',
         'related_skipped: 未知（审计表缺失）',
+        // Story 2.5 / 评审 P8：疑似失效账目同样缺审计表 ⇒ 渲染「未知」（同一约定）。
+        'uncertain: 未知（审计表缺失）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {

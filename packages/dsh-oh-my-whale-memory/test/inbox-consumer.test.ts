@@ -24,7 +24,13 @@ import {
   drainInboxBackgroundTasks,
   type InboxConsumer,
 } from '../src/inbox/consumer'
-import { claimNextInboxItem, completeInboxItem, enqueueInboxItem } from '../src/inbox/queue'
+import {
+  claimNextInboxItem,
+  completeInboxItem,
+  enqueueInboxItem,
+  l2InboxQueue,
+  type InboxQueue,
+} from '../src/inbox/queue'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
@@ -88,6 +94,10 @@ function makeConsumer(options: {
   now?: () => Date
   /** 连接替身（默认真库连接）：只用于模拟「记账（complete）失败」这一条路径。 */
   connection?: () => MemoryDatabase['connection']
+  /** Story 2.5：消费的队列（缺省 l1_inbox）。 */
+  queue?: InboxQueue
+  /** Story 2.5 / brief §5.4：取件让路闸门。 */
+  claimGuard?: () => Promise<boolean>
 } = {}): InboxConsumer {
   return createInboxConsumer({
     connection: options.connection ?? (() => store.connection),
@@ -97,6 +107,8 @@ function makeConsumer(options: {
     intervalMs: options.intervalMs ?? 5,
     process: options.process,
     promotion: options.promotion,
+    queue: options.queue,
+    claimGuard: options.claimGuard,
     logger: options.logger,
   })
 }
@@ -538,5 +550,68 @@ describe('P4：arm() 先清既有定时器（同时只有一个待触发轮询�
       timeoutSpy.mockRestore()
       clearSpy.mockRestore()
     }
+  })
+})
+
+describe('Story 2.5：队列泛化与取件让路闸门（U1 / brief §5.4）', () => {
+  it('绑定 l2InboxQueue 的消费者只消费 l2 条目，看不见 l1 的 pending', async () => {
+    const l1Id = nextId('guard-l1')
+    const l2Id = nextId('guard-l2')
+    await enqueueInboxItem(store.connection, { payload: 'L1 条目', kind: 'work_fact', now: at(1), id: l1Id })
+    await l2InboxQueue.enqueue(store.connection, { payload: '{"l1Ids":[]}', kind: 'l2-promotion', now: at(1), id: l2Id })
+
+    const seen: string[] = []
+    const consumer = makeConsumer({
+      queue: l2InboxQueue,
+      process: async (item) => { seen.push(item.id) },
+    })
+    expect(await consumer.runOnce()).toBe(1)
+    expect(seen).toEqual([l2Id])
+
+    // l1 的那条仍是 pending（没被 L2 消费者顺手取走）。
+    const l1 = await queryAll(store.connection, `MATCH (q:l1_inbox) WHERE q.id = '${l1Id}' RETURN q.status AS status`)
+    expect(String(l1[0]!.status)).toBe('pending')
+  })
+
+  it('claimGuard 返回 false ⇒ 本轮不取件（连续同结果时只调一次）', async () => {
+    const id = nextId('guard-busy')
+    await enqueueInboxItem(store.connection, { payload: '留给 L1 主路径', kind: 'work_fact', now: at(1), id })
+
+    const guard = vi.fn(async () => false)
+    const seen: string[] = []
+    const consumer = makeConsumer({ claimGuard: guard, process: async (item) => { seen.push(item.id) } })
+
+    expect(await consumer.runOnce()).toBe(0)
+    expect(seen).toEqual([])
+    expect(guard).toHaveBeenCalledTimes(1)
+    const row = await queryAll(store.connection, `MATCH (q:l1_inbox) WHERE q.id = '${id}' RETURN q.status AS status`)
+    expect(String(row[0]!.status)).toBe('pending')
+  })
+
+  it('claimGuard 抛错 ⇒ 按忙处理并 warn，本轮不取件、不抛给调用方', async () => {
+    const id = nextId('guard-throw')
+    await enqueueInboxItem(store.connection, { payload: '闸门坏了', kind: 'work_fact', now: at(1), id })
+
+    const warnings: string[] = []
+    const consumer = makeConsumer({
+      claimGuard: async () => { throw new Error('count 查询炸了') },
+      logger: { warn: (message) => warnings.push(message) },
+      process: async () => undefined,
+    })
+
+    expect(await consumer.runOnce()).toBe(0)
+    expect(warnings.some((line) => line.includes('取件闸门异常'))).toBe(true)
+    const row = await queryAll(store.connection, `MATCH (q:l1_inbox) WHERE q.id = '${id}' RETURN q.status AS status`)
+    expect(String(row[0]!.status)).toBe('pending')
+  })
+
+  it('claimGuard 放行 ⇒ 照常消费（闸门只在取件前生效）', async () => {
+    const id = nextId('guard-open')
+    await enqueueInboxItem(store.connection, { payload: '可以取', kind: 'work_fact', now: at(1), id })
+
+    const seen: string[] = []
+    const consumer = makeConsumer({ claimGuard: async () => true, process: async (item) => { seen.push(item.id) } })
+    expect(await consumer.runOnce()).toBe(1)
+    expect(seen).toEqual([id])
   })
 })

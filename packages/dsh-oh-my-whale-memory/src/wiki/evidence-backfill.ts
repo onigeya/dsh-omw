@@ -91,6 +91,19 @@ async function writeCursor(connection: lbug.Connection, value: string): Promise<
   await connection.execute(statement, { key: META_KEYS.evidenceBackfillCursor, value })
 }
 
+/**
+ * 读证据回填游标（Story 2.5 / 评审 P18）：`null` = 从未跑过（库里还没有这个键）。
+ *
+ * 存在的理由：判据① 对 `no-evidence-edge` 要区分「**暂时**不可判定」与「回填已跑完仍无入边」。
+ * 只有后者才是终局丢弃 —— 升级库里 2.6 之前写入的 legacy L1 没有边，回填（每轮 ≤50、按
+ * recorded_at ASC）可能还没跑到它，此时把候选 done + 来源 gate-fail 是不可恢复的损失。
+ */
+export async function readEvidenceBackfillCursor(connection: lbug.Connection): Promise<string | null> {
+  const rows = await queryRows(connection, READ_META, { key: META_KEYS.evidenceBackfillCursor })
+  const value = rows[0]?.value
+  return value === undefined || value === null ? null : String(value)
+}
+
 export function createEvidenceBackfill(options: EvidenceBackfillOptions): EvidenceBackfill {
   const batchSize = Math.max(1, Math.trunc(options.batchSize ?? EVIDENCE_BACKFILL_BATCH_SIZE))
   const runOnce = async (): Promise<number> => {

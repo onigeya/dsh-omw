@@ -225,12 +225,14 @@ describe('凭据脱敏（第 11 行 / AD-9）', () => {
     }
   }
 
-  it('redact 判定能命中 embedding.token 与 rerank.token，字段值不进入投影内容', () => {
+  it('redact 判定能命中 embedding/rerank/systemOne 的 token，字段值不进入投影内容', () => {
     // schemastery toJSON 根节点只暴露 refs，dict 须从 Config.dict 直接读。
     const root: any = { type: 'object', dict: Config.dict, meta: Config.meta }
     const secrets: string[] = []
     collectSecrets(root, [], secrets)
-    expect(secrets.sort()).toEqual(['embedding.token', 'rerank.token'])
+    // Story 2.5 / 评审 P3（T4）：systemOne 也可经 Config 注入 token（.role('secret')）——
+    // 它必须同样被脱敏判定命中，否则凭据会明文进投影（AD-9）。
+    expect(secrets.sort()).toEqual(['embedding.token', 'rerank.token', 'systemOne.token'])
 
     // token 值只存在于 resolve 后的运行时对象，且不出现在 warnings/错误消息里
     const cfg = validConfig()
@@ -238,6 +240,20 @@ describe('凭据脱敏（第 11 行 / AD-9）', () => {
     const serialized = JSON.stringify(resolved)
     expect(serialized).toContain('sk-test') // 运行时内存中保留（供调用）
     expect(resolved.warnings.join(' ')).not.toContain('sk-test')
+  })
+
+  it('systemOne.token 值不进 warnings / 投影，endpoint 非法时报错点名字段（NFR9）', () => {
+    const cfg = validConfig()
+    cfg.embedding.model = 'bge-m3'
+    const withToken = resolveRuntimeConfig({ ...cfg, systemOne: { token: 'sk-systemone' } })
+    // token 只在运行时内存对象里（供调用），绝不进 warnings。
+    expect(JSON.stringify(withToken)).toContain('sk-systemone')
+    expect(JSON.stringify(withToken.warnings)).not.toContain('sk-systemone')
+
+    // endpoint 不是凭据：与 embedding.endpoint 同约定，错误点名字段并回显当前值
+    // （见本文件既有的「消息含字段名+期望格式+当前值」用例）。
+    expect(() => resolveRuntimeConfig({ ...cfg, systemOne: { endpoint: 'not-a-url' } }))
+      .toThrowError(/systemOne\.endpoint/)
   })
 
   it('token 缺失时的错误/告警只含字段名，不含任何值', () => {

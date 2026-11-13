@@ -105,6 +105,21 @@ export const REJECT_EVIDENCE_ACTION = 'reject_evidence'
  */
 export const WRITE_EVIDENCE_SKIPPED_ACTION = 'write_evidence_skipped'
 
+/**
+ * L1→L2 提升写路径的 action 取值（Story 2.5 / FR-5）。
+ * kind 沿用既有 `'refine'`（audit.ts 的 kind 词表 capture | refine | verify | cascade | redact）。
+ */
+export const L2_PROMOTION_ACTION = 'l2_promotion'
+
+/**
+ * 来源 L1 被标 `gate-fail` 的标注行 action（Story 2.5 / epics.md:744「丢弃候选并将来源 L1 标 gate-fail」）。
+ * **不是**对 L1 的作废：L1 仍可召回，这里只落一条标注行。
+ */
+export const GATE_FAIL_ACTION = 'gate_fail'
+
+/** 质量门策略标识（generation_log.policy）——capture 路径的 last-writer-wins 不适用。 */
+export const L2_PROMOTION_POLICY = 'eii-l1-l2-v1'
+
 /** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
 export const DIRECT_CASCADE_DEPTH = 0
 
@@ -221,6 +236,10 @@ const AUDIT_GAP_STATEMENT = [
 
 /** 审计表存在性探针：任一张缺失即按「算不出来」处理（矩阵行「审计表缺失」）。 */
 const GENERATION_LOG_PROBE = `CALL table_info('${GENERATION_LOG_TABLE}') RETURN name`
+
+/** 疑似失效账目计数（P8）：不需要索引，v1 规模下全扫可接受。 */
+const COUNT_UNCERTAIN_STATEMENT =
+  'MATCH (g:' + GENERATION_LOG_TABLE + ") WHERE g.outcome = 'uncertain' RETURN count(g) AS total"
 const KEYED_DECISION_PROBE = `CALL table_info('${KEYED_DECISION_TABLE}') RETURN name`
 
 /**
@@ -229,6 +248,22 @@ const KEYED_DECISION_PROBE = `CALL table_info('${KEYED_DECISION_TABLE}') RETURN 
  */
 export function buildJudgeKey(policy: string, oldId: string, newId: string): string {
   return uuid5('judge:' + policy + ':' + [oldId, newId].sort().join(':'))
+}
+
+/**
+ * 来源 L1 的 `gate-fail` 标注行 id（Story 2.5 / U7 选项 E）。
+ *
+ * 硬约束背景：generation_log 15 列**没有任何列指向 memory 节点**（无 memory_id/subject_id；
+ * `trigger_id` 是触发源 log 行 id，不是记忆 id），memory 表也没有 log 行 id 列，且
+ * `writeMemoryVersion` 丢弃 `insertGenerationLog` 的返回值 ⇒ 「L1 X 是否被标 gate-fail」
+ * 今天既不能 JOIN 也不能按 L1 id 查回。
+ *
+ * 解法：用 uuid5 内容键造**确定性行 id**（`GenerationLogEntry.id` 已为此留口子），
+ * 于是判定退化为 O(1) 的点查 `MATCH (g:generation_log {id: $expected})`，
+ * 且崩溃重放不产重行（与 {@link buildJudgeKey} 同一惯用法）。
+ */
+export function buildGateFailLogId(l1Id: string): string {
+  return uuid5('omw:gate-fail:' + l1Id)
 }
 
 /**
@@ -363,6 +398,27 @@ export async function appendInvalidationCause(
     throw new MemoryDbError('audit_record_missing', '裁决记录不存在（judge_key=' + input.judgeKey + '）：失效因果回填未生效')
   }
   return next
+}
+
+/**
+ * 疑似失效账目计数（Story 2.5 / 评审 P8-T27）：`generation_log` 里 outcome='uncertain' 的行数。
+ *
+ * 存在的理由：U14 要求「LLM 标疑的候选进疑似失效队列且 status 可见」（epics.md:740、NFR12），
+ * 但在此之前只有**写侧**（promotion 记 uncertain）没有任何读取出口。
+ *
+ * 返回 null 表示算不出来（审计表不存在）——调用方渲染成「未知」，绝不静默报 0（同 computeAuditGap）。
+ */
+export async function countUncertainAudits(connection: lbug.Connection): Promise<number | null> {
+  try {
+    await queryAll(connection, GENERATION_LOG_PROBE)
+    const rows = await queryAll(connection, COUNT_UNCERTAIN_STATEMENT)
+    const value = rows[0]?.total
+    return Number(value ?? 0)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    if (/does not exist/i.test(message)) return null
+    throw error
+  }
 }
 
 /**
