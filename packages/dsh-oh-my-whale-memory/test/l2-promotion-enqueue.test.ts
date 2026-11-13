@@ -132,4 +132,65 @@ describe('Story 2.5 / 评审 P2：apply 级触发信号真的把 L1 入 l2_inbox
     expect(String(meta[0]?.value ?? '')).toBe('')
     await store.close()
   })
+  /**
+   * 评审 P24（变异审计 M1）：提升候选必须**按游标分页取全部有效 L1**，不是取最新一窗。
+   *
+   * 变异敏感度：把 LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT 换成旧的「无游标 + ORDER BY
+   * recorded_at DESC + LIMIT 20」，本条变红（25 条里最旧 5 条永远进不了 l2_inbox）。
+   * 断言必须落在**具体 id 集合**上——只断言行数会在两条 L1 的旧用例上就已经漏掉这个缺口。
+   */
+  it('候选超过旧窗口（25 条 > LIMIT 20）⇒ 25 条全部入队，最旧的也在（变异审计 M1）', async () => {
+    tracker.options.length = 0
+    const { store, dir } = await openStore('omw-l2-window-')
+    const expected = new Set<string>()
+    for (let index = 0; index < 25; index += 1) {
+      const text = '窗口候选' + String(index).padStart(2, '0')
+      await upsertMemory(store.connection, {
+        layer: 'L1',
+        text,
+        kind: 'work_fact',
+        priority: 1,
+        recordedAt: at(index + 1),
+      })
+      expected.add(buildL2PromotionItemId(memoryNodeId('L1', text)))
+    }
+    const harness = makeCtx(dir)
+    await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
+    const onTrigger = tracker.options[0]!.onTrigger as (t: unknown) => void
+    onTrigger({ reason: 'l1-total', totalL1: 20, sessionId: 'sess-window', kind: 'work_fact', sessionKindCount: 0 })
+    await drainInboxBackgroundTasks()
+
+    const rows = await queryAll(store.connection, 'MATCH (q:l2_inbox) RETURN q.id AS id')
+    const ids = new Set(rows.map((row) => String(row.id)))
+    expect(rows).toHaveLength(25)
+    for (const id of expected) expect(ids.has(id)).toBe(true)
+    await store.close()
+  })
+
+  /**
+   * 评审 P24（变异审计 M17）：`valid_at` 在将来的 L1 还没生效，不得进提升候选。
+   * 变异敏感度：删掉 LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT 的 `AND m.valid_at <= $now` ⇒ 本条变红。
+   */
+  it('valid_at 在将来的 L1 不进候选（变异审计 M17）', async () => {
+    tracker.options.length = 0
+    const { store, dir } = await openStore('omw-l2-future-')
+    await upsertMemory(store.connection, {
+      layer: 'L1', text: '已生效的候选', kind: 'work_fact', priority: 1, recordedAt: at(1),
+    })
+    await upsertMemory(store.connection, {
+      layer: 'L1', text: '将来才生效的候选', kind: 'work_fact', priority: 1, recordedAt: at(2),
+      validAt: new Date(Date.UTC(2099, 0, 1)).toISOString(),
+    })
+    const harness = makeCtx(dir)
+    await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
+    const onTrigger = tracker.options[0]!.onTrigger as (t: unknown) => void
+    onTrigger({ reason: 'l1-total', totalL1: 20, sessionId: 'sess-future', kind: 'work_fact', sessionKindCount: 0 })
+    await drainInboxBackgroundTasks()
+
+    const rows = await queryAll(store.connection, 'MATCH (q:l2_inbox) RETURN q.id AS id')
+    const ids = rows.map((row) => String(row.id))
+    expect(ids).toContain(buildL2PromotionItemId(memoryNodeId('L1', '已生效的候选')))
+    expect(ids).not.toContain(buildL2PromotionItemId(memoryNodeId('L1', '将来才生效的候选')))
+    await store.close()
+  })
 })

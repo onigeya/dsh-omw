@@ -140,4 +140,31 @@ describe('memory.support 加列与旧库迁移（U16）', () => {
     expect(await readColumnNames(store.connection)).not.toContain(SUPPORT_COLUMN)
     await store.close()
   })
+  /**
+   * 评审 P24（变异审计 M9）：ON MATCH 的 support 必须**并集取大、单调不减**。
+   *
+   * 变异敏感度：把 UPSERT_ON_MATCH_CLAUSE 的 support CASE 换成 `m.support = m.support`
+   * （即 ON MATCH 完全不合并）⇒ 本条变红（第二次写入的 7 被丢掉，仍读到 3）。
+   * 现有用例只在**新节点**上写一次 support（走 ON CREATE），从不执行 ON MATCH 分支。
+   */
+  it('同指纹二次写入：support 取较大者，且不被更小的新值拉低（变异审计 M9）', async () => {
+    const store = await openMemoryDatabase({
+      dbPath: resolveMemoryDbPath(await makeTempDir('omw-sup-merge-')),
+      dim: DIM,
+      modelId: 'test-embed',
+    })
+    const write = (support: number) =>
+      runInTransaction(store.connection, () =>
+        writeMemoryVersion(store.connection, { layer: 'L2', text: '并集陈述', support }),
+      )
+    const first = await write(3)
+    expect(await readSupport(store.connection, first.id)).toBe(3)
+    // 同指纹再写：并集变大 ⇒ 取 7。
+    await write(7)
+    expect(await readSupport(store.connection, first.id)).toBe(7)
+    // 再写一个更小的值 ⇒ 单调不减，仍为 7。
+    await write(1)
+    expect(await readSupport(store.connection, first.id)).toBe(7)
+    await store.close()
+  })
 })

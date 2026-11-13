@@ -639,3 +639,125 @@ describe('as-most-once 守卫', () => {
     expect(Number(after[0]!.total)).toBe(Number(before[0]!.total))
   })
 })
+
+describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
+  /**
+   * 变异审计 M5：运行态**已降级**时不得再打一次 System One（否则每条候选白等完整超时）。
+   * 变异敏感度：把 judgeStatement 的分支缩回 `if (client !== null)` ⇒ 本条变红（judgeCalls 从 0 变 1）。
+   */
+  it('已降级 ⇒ 不再调用 System One，直接回落 ctx.llm 单次检查（M5）', async () => {
+    let judgeCalls = 0
+    const degraded: SystemOneClient = {
+      runtimeState: () => ({ enabled: true, degraded: true, since: NOW_ISO, consecutiveFailures: 3, lastReason: 'http-503' }),
+      async judge() { judgeCalls += 1; return { ok: true, answers: { faithful: 1, 'no-conflict': 1 } } },
+    }
+    const { l1 } = await seedL1('m5-degraded')
+    const item = await claimL2(l1)
+    const { llm, calls } = makeLlm({ refine: JSON.stringify({ text: 'M5 综合 ' + String(seq++) }) })
+
+    await processor({ llm, systemOne: degraded })(item)
+    expect(judgeCalls).toBe(0)
+    // 回落路径：综合 + ctx.llm 核实两次调用。
+    expect(calls).toHaveLength(2)
+    const rows = await audits('l2_promotion', l1)
+    expect(rows[0]).toMatchObject({ qk: 'ctx-llm' })
+  })
+
+  /**
+   * 变异审计 M11：gate-fail 只标**真正失败**的来源，不连坐同批其它来源。
+   * 变异敏感度：把 sourceNotFound 分支的 `[l1Id]` 退回整批 `l1Ids` ⇒ 本条变红（合法来源也挨一刀）。
+   */
+  it('来源部分缺失 ⇒ 只标缺失的那个，合法来源不挨 gate-fail（M11）', async () => {
+    const { l1 } = await seedL1('m11-good')
+    const missing = 'l1-m11-missing-' + String(seq++)
+    const item = await claimL2(l1, JSON.stringify({ l1Ids: [l1, missing] }))
+
+    await processor({})(item)
+    expect(await audits('gate_fail', missing)).toHaveLength(1)
+    expect(await audits('gate_fail', l1)).toHaveLength(0)
+  })
+
+  /**
+   * 变异审计 M20：核实用**任务级** signal，不与 LLM 的 20s 子预算共用（否则综合吃掉 19s 时核实只剩 1s）。
+   * 变异敏感度：把 judgeStatement 的 `input.systemOneSignal` 换回 `input.signal` ⇒ 本条变红（两个 signal 变成同一个对象）。
+   */
+  it('核实与 LLM 综合用不同预算的 signal（M20）', async () => {
+    const seen: AbortSignal[] = []
+    const capture: SystemOneClient = {
+      runtimeState: () => IDLE_RUNTIME,
+      async judge(_state, _questions, signal) {
+        seen.push(signal)
+        return { ok: true, answers: { faithful: 1, 'no-conflict': 1 } }
+      },
+    }
+    const llmSignals: AbortSignal[] = []
+    const llm = {
+      stream(input: { readonly messages: readonly { readonly content: unknown }[]; readonly signal?: AbortSignal }) {
+        if (input.signal) llmSignals.push(input.signal)
+        const text = input.messages
+          .flatMap((message) => (Array.isArray(message.content) ? message.content : []))
+          .map((block: { readonly type?: string; readonly text?: string }) => (block.type === 'text' ? String(block.text) : ''))
+          .join('')
+        const body = text.includes('忠实')
+          ? JSON.stringify({ faithful: true, conflict: false, reason: null })
+          : JSON.stringify({ text: 'M20 综合 ' + String(seq++) })
+        return (async function* generate() {
+          yield delta(body)
+          yield finish({ kind: 'stop' })
+        })()
+      },
+    }
+    const { l1 } = await seedL1('m20-signals')
+    const item = await claimL2(l1)
+
+    await processor({ llm: llm as never, systemOne: capture })(item)
+    expect(seen).toHaveLength(1)
+    expect(llmSignals.length).toBeGreaterThan(0)
+    expect(seen[0]).not.toBe(llmSignals[0])
+  })
+
+  /**
+   * 变异审计 M21：去重原语命中**已 forget（expired）**的既有节点时软丢弃 —— 不产出 L2、不连坐来源。
+   * 变异敏感度：把 expired-target 守卫改成 `if (false)` ⇒ 本条变红（走回滚路径，来源被永久 gate-fail）。
+   */
+  it('候选指纹命中已 expired 节点 ⇒ 软丢弃：不标 gate-fail、账目记 expired-target（M21）', async () => {
+    const statement = 'M21 综合 ' + String(seq++)
+    const expiredId = memoryNodeId(L2_LAYER, statement)
+    // 先落一个**已 forget** 的同指纹 L2（用户主动遗忘的语义，2.4 的 writeDeduplicatedMemory 会返回它）。
+    await store.connection.query(
+      "CREATE (m:memory {id: '" + expiredId + "', layer: '" + L2_LAYER + "', kind: 'work_fact', priority: 3, " +
+      "text: '" + statement + "', valid_at: '" + NOW_ISO + "', recorded_at: '" + NOW_ISO + "', " +
+      "expired_at: '" + NOW_ISO + "', source_refs: []})",
+    )
+    const { l1 } = await seedL1('m21-expired')
+    const item = await claimL2(l1)
+
+    await processor({ llm: makeLlm({ refine: JSON.stringify({ text: statement }) }).llm, systemOne: systemOnePassing(1, 1) })(item)
+    expect(await statusOf(item.id)).toBe('done')
+    const rows = await audits('l2_promotion', l1)
+    expect(String(rows[0]!.reason)).toContain('expired-target')
+    expect(rows[0]!.outcome).toBe('uncertain')
+    // 软丢弃绝不连坐来源。
+    expect(await audits('gate_fail', l1)).toHaveLength(0)
+  })
+
+  /**
+   * 变异审计 M22：gate-fail 标注行写**完整原因串**（多因时用 '+' 拼），不只取第一条。
+   * 变异敏感度：把 markGateFail 的 reason 退回 `reasons[0] ?? reason` ⇒ 本条变红（只剩 no-evidence-edge）。
+   */
+  it('多因失败 ⇒ 标注行与账目用同一个完整原因串（M22）', async () => {
+    await setEvidenceCursor('done')
+    // 来源甲：有 source_refs 但无边 ⇒ no-evidence-edge；来源乙：valid_at 在未来 ⇒ not-effective。
+    const a = await seedL1('m22-edge', { withEdge: false })
+    const b = await seedL1('m22-future', { futureValidAt: true })
+    const item = await claimL2(a.l1, JSON.stringify({ l1Ids: [a.l1, b.l1] }))
+
+    await processor({})(item)
+    expect(await statusOf(item.id)).toBe('done')
+    const row = (await audits('gate_fail', a.l1))[0]
+    expect(row).toBeDefined()
+    expect(String(row!.reason)).toContain('+')
+    expect(String(row!.reason)).toContain('no-evidence-edge')
+    expect(String(row!.reason)).toContain('not-effective')
+  })
+})

@@ -14,7 +14,7 @@ import * as plugin from '../src/index'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/memory'
-import { l2InboxQueue, enqueueInboxItem } from '../src/inbox/queue'
+import { l1InboxQueue, l2InboxQueue, enqueueInboxItem } from '../src/inbox/queue'
 import { drainInboxBackgroundTasks, type InboxConsumerOptions } from '../src/inbox/consumer'
 import { L2_PROMOTION_INTERVAL_MS } from '../src/distill/promotion'
 import type { MemoryCommandDefinition } from '../src/command'
@@ -216,6 +216,34 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
     const result = await harness.registeredDefs[0]!.handler({ rawInput: ' status' })
     expect(result.kind).toBe('success')
     expect(result.text).toContain('systemOne: disabled-by-config（已降级回 ctx.llm）')
+
+    await drainInboxBackgroundTasks()
+    await store.close()
+  })
+  /**
+   * 评审 P24（变异审计 M6）：让路闸门必须按**「现在就能干的活」**作答，不是按 pending 计数。
+   *
+   * 变异敏感度：把 index.ts 的 `(await l1InboxQueue.countBusy(connection)) === 0` 换回
+   * `.countByStatus(connection)).pending === 0` ⇒ 本条变红。
+   * 关键状态：退避中的 pending（lease_until 在未来，最长 120s）**不算忙** —— 它现在取不出来，
+   * 让 L2 慢循环停摆纯属浪费；现有断言只覆盖「无 pending」与「有 pending 且可立即取」。
+   */
+  it('L1 只有退避中的 pending（lease_until 在未来）⇒ 不算忙，闸门放行（变异审计 M6）', async () => {
+    resetCaptured()
+    const { store, dir } = await openStore('omw-l2-busy-')
+    const harness = makeCtx(dir)
+    await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
+    const l2Options = captured.all[1] as InboxConsumerOptions
+    // apply 之后再入队：L1 消费者此刻已就位，故必须让「有活儿」这件事在库状态上静止。
+    await enqueueInboxItem(store.connection, { id: 'l1-backoff', payload: '退避中的 L1', kind: 'work_fact', now: at(1) })
+    await store.connection.query(
+      "MATCH (q:l1_inbox {id: 'l1-backoff'}) SET q.lease_until = '2099-01-01T00:00:00.000Z'",
+    )
+
+    // 反面前提：按 pending **计数**确实是 1（故变异实现会误判为「忙」），而按 countBusy 是 0。
+    expect(await l1InboxQueue.countByStatus(store.connection)).toMatchObject({ pending: 1 })
+    expect(await l1InboxQueue.countBusy(store.connection)).toBe(0)
+    expect(await l2Options.claimGuard?.()).toBe(true)
 
     await drainInboxBackgroundTasks()
     await store.close()
