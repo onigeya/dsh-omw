@@ -175,7 +175,7 @@ export interface MemoryCommandRecallResult {
   readonly hint: string
 }
 
-/** 关联遍历命中项（命令层镜像 memory_related 工具成功值；不 import db 模块）。 */
+/** 关联遍历命中项（命令层镜像 `tools/related-shared.ts` 的共享视图；不 import db 模块）。 */
 export interface MemoryCommandRelatedEntry {
   readonly id: string
   readonly layer: string
@@ -186,6 +186,7 @@ export interface MemoryCommandRelatedEntry {
   readonly truncated?: boolean
   readonly invalid?: boolean
   readonly invalidAt?: string
+  readonly expiredAt?: string
 }
 
 /** 关联遍历结果（与 memory_related 工具成功值同形：results + hint + partial）。 */

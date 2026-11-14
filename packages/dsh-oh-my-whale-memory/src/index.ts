@@ -83,12 +83,10 @@ import {
   type MemoryRecallStore,
 } from './tools/memory-recall.js'
 import {
-  RELATED_HINT_EVIDENCE_EXPIRED,
-  RELATED_HINT_START_INVALID,
-  RELATED_HINT_START_MISSING,
   RELATED_TRAVERSAL_TIMEOUT_MS,
   type MemoryRelatedStore,
 } from './tools/memory-related.js'
+import { toRelatedSuccessView } from './tools/related-shared.js'
 import { traverseRelated } from './db/edges.js'
 import { createQuotaResetListener, createRecallTurnQuota } from './tools/recall-quota.js'
 import { runRecallCore, type RecallCoreResult } from './recall/core.js'
@@ -417,8 +415,8 @@ export async function apply(
   }
   /**
    * `/memory related` 的 dep（Story 3.2）：手动遍历**不计入** turn 配额（与 recall 同口径）。
-   * hint 语义与工具面同源（常量复用，避免两处文案分叉）；partial 重试只属工具面（spec D8），
-   * 命令面超时由 handler 收敛为 error 结果，用户可重试。
+   * D4/D5 判定、hint 与 256-token 截断统一走 `tools/related-shared.ts`（F-05：与工具面同口径，
+   * 命令面**不**引入 depth=1 重试——spec D8 有意为之，超时由 handler 收敛为 error 结果）。
    */
   const relatedMemories = async (input: {
     readonly id: string
@@ -429,29 +427,7 @@ export async function apply(
       ...(input.depth === undefined ? {} : { depth: input.depth }),
       timeoutMs: RELATED_TRAVERSAL_TIMEOUT_MS,
     })
-    if (!result.startFound) {
-      return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_START_MISSING }
-    }
-    // 与工具面同口径（B4 裁定）：起点失效时不判 evidence expired（锚点不属于证据链判定对象）。
-    if (!result.start.invalid && result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
-      return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_EVIDENCE_EXPIRED }
-    }
-    return {
-      id: result.id,
-      depth: result.depth,
-      total: result.total,
-      results: result.results.map((item) => ({
-        id: item.id,
-        layer: item.layer,
-        hops: item.hops,
-        edgeType: item.edgeType,
-        ...(item.reason === null ? {} : { reason: item.reason }),
-        text: item.text,
-        ...(item.invalid ? { invalid: true } : {}),
-        ...(item.invalidAt === null ? {} : { invalidAt: item.invalidAt }),
-      })),
-      ...(result.start.invalid ? { hint: RELATED_HINT_START_INVALID } : {}),
-    }
+    return toRelatedSuccessView(result)
   }
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，

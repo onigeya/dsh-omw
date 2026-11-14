@@ -8,24 +8,23 @@
  * - execute 顺序：空白 id 参数错误（不耗配额）→ 判库（db_unavailable，不耗配额）→ 配额（与
  *   memory_recall 同一实例/同一桶）→ 遍历（含 depth=1 超时降级）→ 失败信封。
  *
- * hint 语义（spec D4/D5/D8）：
+ * hint 语义（spec D4/D5/D8；判定与文案统一在 tools/related-shared.ts）：
  * - 起点不存在 ⇒ 成功值空结果 + `hint:'未找到该记忆。'`（AC:882-884）；
- * - 结果非空但**所有**邻居 `pathValid=false` ⇒ 空结果 + `hint:'evidence expired'`（AC:889）；
+ * - 截断前没有任何邻居存在有效路径（`anyValidPath=false`）⇒ 空结果 + `hint:'evidence expired'`（AC:889 / F-02）；
  * - 超时后 depth=1 重试成功 ⇒ `partial:true` + `hint:'partial'`（AC:891-893）；
- * - 起点自身失效 ⇒ hint 追加「起点已失效」（spec D5 ②，不拦截遍历）。
+ * - 起点自身失效但仍有有效邻居 ⇒ hint 追加「起点已失效」（spec D5 ②，起点不参与证据链判定）。
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import {
   clampRelatedDepth,
   RelatedTraversalTimeoutError,
-  type RelatedTraversalItem,
   type RelatedTraversalResult,
 } from '../db/edges.js'
 import { MemoryDbError } from '../db/errors.js'
-import { truncateRecallText } from '../recall/core.js'
 import { summarizeMemoryText } from '../summarize.js'
 import { failedEnvelope, quotaOwnerOf, type ToolFailure } from './recall-shared.js'
+import { toRelatedSuccessView, type RelatedViewEntry } from './related-shared.js'
 import type { RecallQuota } from './recall-quota.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
@@ -166,60 +165,32 @@ const OUTPUT_SCHEMA = {
   ],
 } as const satisfies ValueSchemaSpec
 
-/** 空结果 hint：起点不存在（AC:882-884）。 */
-export const RELATED_HINT_START_MISSING = '未找到该记忆。'
-/** 无有效证据链（AC:889）。 */
-export const RELATED_HINT_EVIDENCE_EXPIRED = 'evidence expired'
-/** 超时降级（AC:891-893）。 */
-export const RELATED_HINT_PARTIAL = 'partial'
-/** 起点自身失效的附加说明（spec D5 ②）。 */
-export const RELATED_HINT_START_INVALID = '起点已失效，结果为邻居记忆'
-
-/** 内核条目 → canonical 条目（text 复用 3.1 的 256-token 截断；失效标记按需出现）。 */
-function toResultEntry(item: RelatedTraversalItem): MemoryRelatedResultEntry {
-  const text = truncateRecallText(item.text)
+/** 内核视图条目 → 输出条目（AC:880 的 snake_case 边界；判定/截断都已在共享件完成）。 */
+function toOutputEntry(entry: RelatedViewEntry): MemoryRelatedResultEntry {
   return {
-    id: item.id,
-    layer: item.layer,
-    hops: item.hops,
-    edge_type: item.edgeType,
-    ...(item.reason === null ? {} : { reason: item.reason }),
-    text: text.text,
-    ...(text.truncated ? { truncated: true } : {}),
-    ...(item.invalid ? { invalid: true } : {}),
-    ...(item.invalidAt === null ? {} : { invalid_at: item.invalidAt }),
-    ...(item.expiredAt === null ? {} : { expired_at: item.expiredAt }),
+    id: entry.id,
+    layer: entry.layer,
+    hops: entry.hops,
+    edge_type: entry.edgeType,
+    ...(entry.reason === undefined ? {} : { reason: entry.reason }),
+    text: entry.text,
+    ...(entry.truncated === true ? { truncated: true } : {}),
+    ...(entry.invalid === true ? { invalid: true } : {}),
+    ...(entry.invalidAt === undefined ? {} : { invalid_at: entry.invalidAt }),
+    ...(entry.expiredAt === undefined ? {} : { expired_at: entry.expiredAt }),
   }
 }
 
-/** 组装 hint（部分降级 > 起点失效；正常时省略）。 */
-function relatedHint(partial: boolean, startInvalid: boolean): string | undefined {
-  const parts: string[] = []
-  if (partial) parts.push(RELATED_HINT_PARTIAL)
-  if (startInvalid) parts.push(RELATED_HINT_START_INVALID)
-  return parts.length === 0 ? undefined : parts.join('；')
-}
-
-/** 成功值组装（含 AC:889 的空结果判定与 D5 起点语义）。 */
+/** 成功值组装：D4/D5 判定、hint 与 256-token 截断全部走共享件（F-02/F-04/F-05）。 */
 function toSucceeded(result: RelatedTraversalResult, partial: boolean): MemoryRelatedSucceeded {
-  if (!result.startFound) {
-    return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_START_MISSING }
-  }
-  // AC:889：结果非空但没有任何邻居存在全有效路径 ⇒ 空结果 + evidence expired。
-  // 例外（B4 实测裁定）：**起点自身失效**时不判 evidence expired——路径有效性按 `all(nodes(p))`
-  // 计算，必然包含失效的锚点，若照判会让 D5②「起点失效仍照常遍历 + hint 提示」永不可达。
-  // 锚点由调用方指定、不属于「证据链是否有效」的判定对象，故只在其有效时判 evidence expired。
-  if (!result.start.invalid && result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
-    return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_EVIDENCE_EXPIRED }
-  }
-  const hint = relatedHint(partial, result.start.invalid)
+  const view = toRelatedSuccessView(result, { partial })
   return {
-    id: result.id,
-    depth: result.depth,
-    total: result.total,
-    results: result.results.map(toResultEntry),
-    ...(hint === undefined ? {} : { hint }),
-    ...(partial ? { partial: true } : {}),
+    id: view.id,
+    depth: view.depth,
+    total: view.total,
+    results: view.results.map(toOutputEntry),
+    ...(view.hint === undefined ? {} : { hint: view.hint }),
+    ...(view.partial === true ? { partial: true } : {}),
   }
 }
 

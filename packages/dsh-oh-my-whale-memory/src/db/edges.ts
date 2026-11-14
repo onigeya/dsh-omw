@@ -238,8 +238,9 @@ export interface RelatedTraversalItem {
   readonly invalidAt: string | null
   readonly expiredAt: string | null
   /**
-   * 该邻居存在至少一条「路径上所有节点均未失效」的路径（spec D4 的判定原语）。
-   * 只作 RETURN 布尔取回，**绝不**用于过滤（D3）；失效邻居恒为 false（自身即失效）。
+   * 该邻居在 depth 内**存在至少一条**邻居侧全有效路径（spec D4 的判定原语；F-02）。
+   * 跨路径 OR：同一邻居的多条路径只要有一条除起点外全有效即为 true（不是「min-hops 那条」）。
+   * 起点不参与判定（F-04）；只作 RETURN 布尔取回、**绝不**用于过滤（D3）。
    */
   readonly pathValid: boolean
 }
@@ -260,6 +261,11 @@ export interface RelatedTraversalResult {
   readonly start: RelatedTraversalStart
   /** 去重归并后、20 条截断**前**的邻居总数（spec D6 的 total 口径）。 */
   readonly total: number
+  /**
+   * 截断**前**是否存在任一「邻居侧全有效路径」的邻居（F-02：evidence expired 判定必须用它，
+   * 不能用 20 条截断后的 `results`——有效路径可能来自第 21 名而被截断）。
+   */
+  readonly anyValidPath: boolean
   /** 已排序：按跳数升序；同跳有效优先于失效（AC:880/888）。 */
   readonly results: readonly RelatedTraversalItem[]
 }
@@ -281,7 +287,11 @@ function relatedTraversalStatement(edgeType: typeof EVIDENCE | typeof RELATED, d
     'RETURN n.id AS id, n.layer AS layer, n.text AS text,',
     '  n.invalid_at AS invalid_at, n.expired_at AS expired_at,',
     '  length(p) AS hops,',
-    '  all(x IN nodes(p) WHERE x.invalid_at IS NULL AND x.expired_at IS NULL) AS path_valid,',
+    // path_valid = **邻居侧**有效性：起点节点豁免（F-04：起点不是证据链判定对象），
+    // 其余节点必须未失效。写法用节点比较 `x.id = m.id` 而非参数——0.22.3 的 `all()` 内
+    // 出现参数表达式会触发 `UNREACHABLE_CODE` 断言（探针 P4d/start-exclude 实测），
+    // 而 `x.id = m.id`（或 `id(x) = id(m)`）在同一 all() 内可用（2026-11-14 实测）。
+    '  all(x IN nodes(p) WHERE x.id = m.id OR (x.invalid_at IS NULL AND x.expired_at IS NULL)) AS path_valid,',
     '  relationships(p) AS rels',
     'ORDER BY hops ASC, id ASC',
   ].join('\n')
@@ -372,7 +382,15 @@ function mergeTraversalRows(
       pathValid: row.path_valid === true,
     }
     const current = merged.get(id)
-    if (current === undefined || isBetterTraversal(item, current)) merged.set(id, item)
+    if (current === undefined) {
+      merged.set(id, item)
+      continue
+    }
+    // F-02：有效性跨路径 OR——展示用字段（hops/reason/edgeType）仍取最优那条路径，
+    // 但「是否存在全有效路径」只要任一命中路径成立就成立。
+    const pathValid = current.pathValid || item.pathValid
+    const preferred = isBetterTraversal(item, current) ? item : current
+    merged.set(id, { ...preferred, pathValid })
   }
 }
 
@@ -436,5 +454,14 @@ export async function traverseRelated(
     }
     : START_NOT_FOUND
 
-  return { id, depth, startFound, start, total: all.length, results }
+  return {
+    id,
+    depth,
+    startFound,
+    start,
+    total: all.length,
+    // F-02：截断前聚合——有效路径可能来自第 21+ 名邻居，不能用截断后的 results 判定。
+    anyValidPath: all.some((item) => item.pathValid),
+    results,
+  }
 }
