@@ -551,6 +551,7 @@ export async function apply(
     resolveRoute: (session) => (resolved.llmProvider !== undefined && resolved.llmModel !== undefined
       ? { provider: resolved.llmProvider, model: resolved.llmModel }
       : routeFromSession(session)),
+    // warn（降级可见）+ info（B4b 结构化观测单行；fire-and-forget）
     logger: ctx.logger,
   })
   const eventHost = ctx as unknown as {

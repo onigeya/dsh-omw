@@ -102,7 +102,11 @@ export interface OpenstartGeneratorOptions {
   readonly enabled: () => boolean
   /** 路由：Config 的 llmProvider/llmModel 优先，缺省 `routeFromSession` 回退链（AC:567）。 */
   readonly resolveRoute?: (session: unknown) => OpenstartRoute | null
-  readonly logger?: { warn(message: string): void }
+  readonly logger?: {
+    warn(message: string): void
+    /** 结构化观测单行（fire-and-forget；注入完成时调用，B4）。 */
+    info?(message: string): void
+  }
   /** 覆盖默认超时/条数（测试注入）。 */
   readonly timeoutMs?: number
   readonly topK?: number
@@ -226,7 +230,7 @@ export function createOpenstartGenerator(
 
   /**
    * 收尾：预算裁剪（唯一裁剪点 `budget.ts`）→ 写 ready → 记录 `lastInjection` 观测摘要
-   * （进程内、不持久化；B4 的 `/memory status` 读取）。文本为空 ⇒ 视为零注入 skipped。
+   * （进程内、不持久化；B4 的 `/memory status` 读取）→ 结构化观测单行。文本为空 ⇒ 视为零注入 skipped。
    */
   const finalize = (key: string, draft: InjectionDraft, degraded: boolean, startedAt: Date): void => {
     const budget: InjectionBudgetResult = applyInjectionBudget(draft)
@@ -236,7 +240,7 @@ export function createOpenstartGenerator(
     }
     options.store.markReady(key, budget.text)
     const finishedAt = now()
-    options.store.setLastInjection({
+    const summary = {
       sessionKey: key,
       items: budget.items.length,
       chars: budget.chars,
@@ -244,10 +248,23 @@ export function createOpenstartGenerator(
       truncated: budget.truncated,
       overBudget: budget.overBudget,
       keptInviolable: budget.keptInviolable,
-      unit: 'chars',
+      unit: 'chars' as const,
       elapsedMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
       at: finishedAt.toISOString(),
-    })
+    }
+    options.store.setLastInjection(summary)
+    // Story 3.3 / B4b：观测事件——结构化单行，fire-and-forget（**不**写 generation_log、
+    // 不含原文/凭据、不阻塞主路径）。logger 自身抛错只吞掉，绝不影响已完成的注入结果。
+    try {
+      options.logger?.info?.(
+        'injection: ' +
+        `items=${summary.items} chars=${summary.chars} degraded=${String(summary.degraded)} ` +
+        `truncated=${String(summary.truncated)} overBudget=${String(summary.overBudget)} ` +
+        `keptInviolable=${summary.keptInviolable} elapsedMs=${summary.elapsedMs} unit=${summary.unit}`,
+      )
+    } catch {
+      // 观测是 best-effort（NFR8）：失败不影响注入结果，也不冒泡。
+    }
   }
 
   return async (payload) => {

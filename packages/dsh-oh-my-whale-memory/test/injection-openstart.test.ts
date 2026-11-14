@@ -97,6 +97,8 @@ function makeGenerator(args: {
   readonly llm?: OpenstartLlmPort | undefined
   readonly enabled?: boolean
   readonly timeoutMs?: number
+  /** B4b：观测 logger（info 断言用；缺省空实现）。 */
+  readonly logger?: { warn: (message: string) => void; info?: (message: string) => void }
 }) {
   const store = args.store ?? createInjectionStore()
   const { port, calls: recallCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
@@ -107,7 +109,7 @@ function makeGenerator(args: {
     enabled: () => args.enabled ?? true,
     resolveRoute: () => ROUTE,
     timeoutMs: args.timeoutMs,
-    logger: { warn: vi.fn() },
+    logger: args.logger ?? { warn: vi.fn() },
   })
   return { store, generate, recallCalls }
 }
@@ -320,6 +322,49 @@ describe('createOpenstartGenerator：预算与 lastInjection（B3）', () => {
     const last = store.readLastInjection()
     expect(last).toMatchObject({ overBudget: true, keptInviolable: 1, unit: 'chars' })
     expect(last?.chars).toBeGreaterThan(8000)
+  })
+})
+
+describe('createOpenstartGenerator：观测事件（B4b）', () => {
+  it('注入完成 ⇒ logger.info 单行含全部结构化字段（injection/items/chars/degraded/truncated/overBudget/keptInviolable/elapsedMs/unit）', async () => {
+    const info = vi.fn()
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({ llm, logger: { warn: vi.fn(), info } })
+
+    await generate(payload('s-observe'))
+
+    expect(info).toHaveBeenCalledTimes(1)
+    const line = String(info.mock.calls[0]?.[0])
+    expect(line.startsWith('injection: ')).toBe(true)
+    for (const field of [
+      'items=',
+      'chars=',
+      'degraded=false',
+      'truncated=false',
+      'overBudget=false',
+      'keptInviolable=0',
+      'elapsedMs=',
+      'unit=chars',
+    ]) {
+      expect(line).toContain(field)
+    }
+    // 不含原文/凭据（NFR9）。
+    expect(line).not.toContain('用户偏好')
+    expect(line).not.toContain('sk-')
+    expect(store.readLastInjection()?.items).toBeGreaterThan(0)
+  })
+
+  it('logger.info 抛错不影响注入结果（fire-and-forget / 不阻塞主路径）', async () => {
+    const info = vi.fn(() => {
+      throw new Error('logger down')
+    })
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({ llm, logger: { warn: vi.fn(), info } })
+
+    await expect(generate(payload('s-logger-throw'))).resolves.toBeUndefined()
+    expect(info).toHaveBeenCalledTimes(1)
+    expect(store.read('s-logger-throw')).toMatchObject({ status: 'ready' })
+    expect(store.textFor('s-logger-throw')).toContain('记忆摘要')
   })
 })
 
