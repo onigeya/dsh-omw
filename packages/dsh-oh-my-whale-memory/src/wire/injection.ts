@@ -76,6 +76,8 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
   //    监听器不调 next 即短路宿主决策，宿主随后读 decision.kind 会 TypeError）。
   //    生成预算：生成与「硬预算计时器」race，超时立即 next()；无论成功/失败/超时/抛错，
   //    三条路径都 return next()（生成失败绝不影响宿主决策）。
+  // F-04：同一预算也传给 generator，embed/recall/LLM 全链共享（不再各自超时叠加）。
+  const budgetMs = Math.max(1, Math.trunc(options.generationBudgetMs ?? OPENSTART_LLM_TIMEOUT_MS))
   const generator = createOpenstartGenerator({
     store: options.store,
     recall: options.recallStore,
@@ -87,9 +89,9 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       ? { provider: options.resolved.llmProvider, model: options.resolved.llmModel }
       : routeFromSession(session)),
     logger: ctx.logger,
+    budgetMs,
   })
   const host = ctx as unknown as AgentPreStepHost
-  const budgetMs = Math.max(1, Math.trunc(options.generationBudgetMs ?? OPENSTART_LLM_TIMEOUT_MS))
   host.on?.('agent/pre-step', async (payload, next) => {
     const generation = generator(payload as OpenstartPreStepPayload).catch(() => {
       // 生成失败/超时/异常只在注入面降级，绝不影响宿主决策。

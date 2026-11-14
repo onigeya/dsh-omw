@@ -58,8 +58,17 @@ function makeHost(options: { withSystemPrompt?: boolean } = {}): CapturedHost {
 
 const ITEM: RecallResultItem = { id: 'l1-1', layer: 'L1', kind: 'work_fact', priority: 0, text: '证据原文' }
 
-function makeRecall(options: { readonly mode?: 'ok' | 'throw' | 'hang' } = {}): MemoryRecallStore {
+function makeRecall(options: { readonly mode?: 'ok' | 'throw' | 'hang' | 'embed-hang' } = {}): MemoryRecallStore {
   const mode = options.mode ?? 'ok'
+  if (mode === 'embed-hang') {
+    return {
+      embeddingEnabled: true,
+      embedQuery: () => new Promise<readonly number[] | null>(() => {}),
+      async recall(): Promise<RecallCoreResult> {
+        return { total: 1, results: [ITEM], degraded: false, hint: '' }
+      },
+    } as unknown as MemoryRecallStore
+  }
   return {
     embeddingEnabled: false,
     embedQuery: async () => null,
@@ -141,6 +150,33 @@ describe('wireInjection / agent/pre-step waterfall（F-01）', () => {
     expect(decision).toEqual(DEFAULT_DECISION)
     expect(next).toHaveBeenCalledTimes(1)
     expect(elapsed).toBeLessThan(2000) // 硬预算 10ms；远小于 3s，证明不永久挂起
+  })
+
+  it('embed 超预算（挂起）时监听器仍按硬预算返回 next，不阻塞宿主（F-04）', async () => {
+    const { listener } = wire({ recall: makeRecall({ mode: 'embed-hang' }), budgetMs: 10 })
+    const next = vi.fn(async () => DEFAULT_DECISION)
+
+    const started = Date.now()
+    const decision = await listener(PAYLOAD, next)
+    const elapsed = Date.now() - started
+
+    expect(decision).toEqual(DEFAULT_DECISION)
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(elapsed).toBeLessThan(2000)
+  })
+
+  it('payload.signal 已取消 ⇒ 不生成（next 仍被调用、无 ready 状态）（F-04）', async () => {
+    const { store, listener } = wire()
+    const next = vi.fn(async () => DEFAULT_DECISION)
+    const cancelled = new AbortController()
+    cancelled.abort()
+
+    const decision = await listener({ ...PAYLOAD, signal: cancelled.signal }, next)
+
+    expect(decision).toEqual(DEFAULT_DECISION)
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(store.textFor('s-f01')).toBe('')
+    expect(store.read('s-f01')?.status).toBe('skipped')
   })
 
   it('prompt 面缺失（裸 ctx）时只注册监听，不抛错', async () => {

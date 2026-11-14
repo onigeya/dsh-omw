@@ -38,17 +38,22 @@ function runtimeContextMessage(text: string) {
 }
 
 function makeRecall(items: readonly RecallResultItem[], embeddingEnabled = true) {
-  const calls: Array<{ query: string; queryVector: readonly number[] | null; limit: number }> = []
+  // F-04：记录 embed/recall 收到的取消信号，断言全链共享预算 + 宿主 signal。
+  const calls: Array<{ query: string; queryVector: readonly number[] | null; limit: number; signal?: AbortSignal }> = []
+  const embedCalls: Array<{ query: string; signal?: AbortSignal }> = []
   const port: OpenstartRecallPort = {
     embeddingEnabled,
-    embedQuery: vi.fn(async () => [1, 0, 0, 0]),
+    embedQuery: async (query, signal) => {
+      embedCalls.push({ query, signal })
+      return [1, 0, 0, 0]
+    },
     async recall(input) {
-      calls.push({ query: input.query, queryVector: input.queryVector, limit: input.limit })
+      calls.push({ query: input.query, queryVector: input.queryVector, limit: input.limit, signal: input.signal })
       const result: RecallCoreResult = { total: items.length, results: [...items], degraded: !embeddingEnabled, hint: '' }
       return result
     },
   }
-  return { port, calls }
+  return { port, calls, embedCalls }
 }
 
 type LlmHandler = (input: {
@@ -103,7 +108,7 @@ function makeGenerator(args: {
   readonly route?: OpenstartRoute | null
 }) {
   const store = args.store ?? createInjectionStore()
-  const { port, calls: recallCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
+  const { port, calls: recallCalls, embedCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
   const generate = createOpenstartGenerator({
     store,
     recall: port,
@@ -113,7 +118,7 @@ function makeGenerator(args: {
     timeoutMs: args.timeoutMs,
     logger: args.logger ?? { warn: vi.fn() },
   })
-  return { store, generate, recallCalls }
+  return { store, generate, recallCalls, embedCalls }
 }
 
 function payload(sessionId: string, text = '我偏好 ESM'): OpenstartPreStepPayload {
@@ -419,6 +424,41 @@ describe('createOpenstartGenerator：观测事件（B4b）', () => {
     expect(summaryLine.endsWith('…')).toBe(true)
     expect(summaryLine.length).toBeLessThanOrEqual(1200)
   })
+
+describe('createOpenstartGenerator：总预算与取消信号（F-04）', () => {
+  it('payload.signal 已取消 ⇒ 不开始生成（零 embed/零 recall/零 LLM），状态 skipped', async () => {
+    const { llm, calls } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate, recallCalls, embedCalls } = makeGenerator({ llm })
+
+    await generate({
+      messages: [humanMessage('我偏好 ESM')],
+      agent: { session: { id: 's-aborted' } },
+      signal: AbortSignal.abort(),
+    })
+
+    expect(embedCalls).toHaveLength(0)
+    expect(recallCalls).toHaveLength(0)
+    expect(calls).toHaveLength(0)
+    expect(store.read('s-aborted')).toMatchObject({ status: 'skipped' })
+  })
+
+  it('embed 与 recall 都收到取消信号（AbortSignal.any(剩余预算, 宿主 signal)）', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate, recallCalls, embedCalls } = makeGenerator({ llm })
+    const hostSignal = new AbortController().signal
+
+    await generate({
+      messages: [humanMessage('我偏好 ESM')],
+      agent: { session: { id: 's-signal' } },
+      signal: hostSignal,
+    })
+
+    expect(embedCalls[0]?.signal).toBeInstanceOf(AbortSignal)
+    expect(recallCalls[0]?.signal).toBeInstanceOf(AbortSignal)
+    // 未取消时正常 ready（信号只是共享预算的载体，不改变成功路径）。
+    expect(store.read('s-signal')).toMatchObject({ status: 'ready' })
+  })
+})
 
 describe('prompt 与 schema 同文件（§14）', () => {
   it('buildOpenstartMessages：sentinel preamble 在首行、含 schema、query 与候选', () => {

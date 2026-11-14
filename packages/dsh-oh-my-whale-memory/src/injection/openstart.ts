@@ -62,6 +62,8 @@ export interface OpenstartRecallPort {
     readonly query: string
     readonly queryVector: readonly number[] | null
     readonly limit: number
+    /** F-04：与总预算/宿主取消共享的取消信号（recall 内核可据此提前收手）。 */
+    readonly signal?: AbortSignal
   }): Promise<RecallCoreResult>
 }
 
@@ -91,6 +93,8 @@ export interface OpenstartMessageLike {
 export interface OpenstartPreStepPayload {
   readonly messages?: readonly OpenstartMessageLike[]
   readonly agent?: { readonly session?: unknown }
+  /** 宿主 pre-step 的取消信号（turn 取消/终止）；已取消时不得开始生成或写 ready（F-04）。 */
+  readonly signal?: AbortSignal
 }
 
 export interface OpenstartGeneratorOptions {
@@ -110,6 +114,8 @@ export interface OpenstartGeneratorOptions {
   /** 覆盖默认超时/条数（测试注入）。 */
   readonly timeoutMs?: number
   readonly topK?: number
+  /** F-04：整条生成链（embed/recall/LLM）共享的预算；缺省 = timeoutMs/3000ms。 */
+  readonly budgetMs?: number
   /** 时钟（观测用：`at` / `elapsedMs`；测试注入固定时间）。 */
   readonly now?: () => Date
 }
@@ -194,6 +200,16 @@ export function buildInjectionDraft(args: {
   }
 }
 
+/**
+ * F-04：把「剩余总预算」与「宿主取消信号」合成一个 AbortSignal。
+ * `AbortSignal.any` 在任一来源中止时中止（Node ≥20；本仓 Node ≥24）。
+ */
+function budgetSignal(remainingMs: number, hostSignal?: AbortSignal): AbortSignal {
+  const signals: AbortSignal[] = [AbortSignal.timeout(Math.max(1, Math.trunc(remainingMs)))]
+  if (hostSignal !== undefined) signals.push(hostSignal)
+  return AbortSignal.any(signals)
+}
+
 /** 单次摘要 LLM 调用；任何失败（超时/异常/不可解析）返回 null（不重试）。 */
 async function generateSummary(args: {
   readonly llm: OpenstartLlmPort
@@ -201,8 +217,11 @@ async function generateSummary(args: {
   readonly messages: RequestMessage[]
   readonly allowedIds: ReadonlySet<string>
   readonly timeoutMs: number
+  /** F-04：宿主取消信号（已取消 ⇒ 直接返回 null，不发起 LLM 调用）。 */
+  readonly hostSignal?: AbortSignal
 }): Promise<OpenstartSummary | null> {
-  const signal = AbortSignal.timeout(args.timeoutMs)
+  if (args.hostSignal?.aborted === true) return null
+  const signal = budgetSignal(args.timeoutMs, args.hostSignal)
   try {
     const folded = await foldStream(args.llm.stream({
       provider: args.route.provider,
@@ -278,6 +297,23 @@ export function createOpenstartGenerator(
     if (options.store.read(key) !== undefined) return
     options.store.markPending(key)
     const startedAt = now()
+    // F-04：整条生成链共享同一预算（embed/recall/LLM）；宿主已取消 ⇒ 不开始生成、不写 ready。
+    const budgetMs = Math.max(1, Math.trunc(options.budgetMs ?? options.timeoutMs ?? OPENSTART_LLM_TIMEOUT_MS))
+    const deadline = startedAt.getTime() + budgetMs
+    const remainingMs = (): number => deadline - now().getTime()
+    const hostSignal = payload.signal
+    const aborted = (): boolean => hostSignal?.aborted === true
+    const commit = (draft: InjectionDraft, degraded: boolean): void => {
+      if (aborted()) {
+        options.store.markSkipped(key)
+        return
+      }
+      finalize(key, draft, degraded, startedAt)
+    }
+    if (aborted()) {
+      options.store.markSkipped(key)
+      return
+    }
 
     // Config 关闭 ⇒ 零 recall、零 LLM（AC:945-947）。
     if (!options.enabled()) {
@@ -299,18 +335,28 @@ export function createOpenstartGenerator(
       let queryVector: readonly number[] | null = null
       if (options.recall.embeddingEnabled) {
         try {
-          queryVector = await options.recall.embedQuery(query)
+          // F-04：embed 的取消信号取 min(剩余总预算, 宿主取消)；自身 4s 超时由 recallStore 内部预算负责。
+          queryVector = await options.recall.embedQuery(query, budgetSignal(remainingMs(), hostSignal))
         } catch {
           queryVector = null
         }
       }
-      recalled = await options.recall.recall({ query, queryVector, limit: topK })
+      // 取消/预算已耗尽 ⇒ 不再发起 recall（已取消的 turn 不再跑检索）。
+      if (aborted() || remainingMs() <= 0) {
+        options.store.markSkipped(key)
+        return
+      }
+      recalled = await options.recall.recall({ query, queryVector, limit: topK, signal: budgetSignal(remainingMs(), hostSignal) })
     } catch (error) {
       options.logger?.warn(`开局注入跳过：召回失败（${errorMessage(error)}）`)
       options.store.markSkipped(key)
       return
     }
 
+    if (aborted()) {
+      options.store.markSkipped(key)
+      return
+    }
     const results = recalled.results
     if (results.length === 0) {
       // 召回命中为空 ⇒ 零注入（AC:928-930；唯一允许零注入的路径）。
@@ -322,7 +368,7 @@ export function createOpenstartGenerator(
     const hasL2 = results.some((item) => item.layer === 'L2')
     if (!hasL2) {
       // 无 L2 命中 ⇒ 降级仅 L1（AC:924-926）；不调 LLM（预算仍走唯一裁剪点）。
-      finalize(key, { ...draft, evidence: [] }, true, startedAt)
+      commit({ ...draft, evidence: [] }, true)
       return
     }
 
@@ -341,7 +387,7 @@ export function createOpenstartGenerator(
         options.store.markSkipped(key)
         return
       }
-      finalize(key, { ...buildInjectionDraft({ results }), evidence: [] }, true, startedAt)
+      commit({ ...buildInjectionDraft({ results }), evidence: [] }, true)
       return
     }
 
@@ -351,9 +397,10 @@ export function createOpenstartGenerator(
       messages: buildOpenstartMessages(query, results),
       allowedIds: new Set(results.map((item) => item.id)),
       timeoutMs,
+      hostSignal,
     })
     if (summary !== null) {
-      finalize(key, buildInjectionDraft({ results, summary: summary.summary }), false, startedAt)
+      commit(buildInjectionDraft({ results, summary: summary.summary }), false)
       return
     }
     // 摘要失败/超时/不可解析 ⇒ 阶梯降级：仅 L1 原文；L1 也为空 ⇒ 无注入（AC:937-939）。
