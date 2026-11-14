@@ -104,20 +104,18 @@ function nativeBackend(module: LoadedModule): StorageBackend {
       // 扩展是每进程装载（失败含 Windows 缺 OpenSSL 3），必须冒泡。
       // 只读实例（install: false）只 LOAD 不 INSTALL：扩展已由写者实例安装，无需联网下载。
       if (options?.install === false) {
-        // 两条各自 try/catch：vector 失败不得挡住 fts（否则只读实例连关键词单路也丢），
-        // 但失败仍要冒泡（调用方决定吞不吞）——保留**最后**一个错误再抛。
-        let failure: unknown
-        try {
-          await connection.query('LOAD vector;')
-        } catch (error) {
-          failure = error
+        // 两条各自 try/catch：vector 失败不得挡住 fts（否则只读实例连关键词单路也丢）；
+        // 失败仍要冒泡（调用方决定吞不吞），但必须**逐项**带上原因——只抛「最后一个失败」
+        // 会让「fts 可用而 vector 不可用」这种部分成功状态不可辨（Story 3.1 / F-06）。
+        const failures: string[] = []
+        for (const extension of ['vector', 'fts'] as const) {
+          try {
+            await connection.query(`LOAD ${extension};`)
+          } catch (error) {
+            failures.push(`${extension}: ${error instanceof Error ? error.message : String(error)}`)
+          }
         }
-        try {
-          await connection.query('LOAD fts;')
-        } catch (error) {
-          failure = error
-        }
-        if (failure !== undefined) throw failure
+        if (failures.length > 0) throw new Error(`扩展 LOAD 失败（${failures.join('；')}）`)
         return
       }
       await connection.query('INSTALL vector; LOAD vector;')

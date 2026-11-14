@@ -495,6 +495,8 @@ export async function apply(
       dim: embedding.dim,
       modelId: embedding.modelId,
       readOnly: lock.mode === 'readonly',
+      // F-06：只读实例的扩展装载失败由此记 warn（写者路径用不到该出口）。
+      logger: ctx.logger,
     })
   } catch (error) {
     // 开库失败就不该占着写者锁——释放引用后把原始错误抛给宿主。

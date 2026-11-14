@@ -83,6 +83,12 @@ export interface OpenMemoryDatabaseOptions {
    * 只读实例不建目录/建表/写元数据/装扩展，也不执行任何写语句。
    */
   readOnly?: boolean
+  /**
+   * 只读实例的扩展装载告警出口（Story 3.1 / F-06）：只读 best-effort `LOAD` 失败时
+   * 经此记 warn（vector / fts 各自的结果与首个原因）——降级不留静默路径（D8）。
+   * 写者路径不装载扩展（建库时装），此字段对它无意义。
+   */
+  logger?: { warn(message: string): void }
 }
 
 export interface MemoryDatabase {
@@ -227,14 +233,25 @@ async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
  * 失败的首查会把整个 Database 置为不可用——之后连 `table_info`/`MATCH` 都抛同一错误。
  * 因此绝不能把它放在 createReadOnlyHandle 里抢先于 schema 读。
  *
- * 装载失败吞掉：只读开库不得回归；扩展缺失时 recall 查询会以失败信封暴露（可见降级）。
+ * 装载失败记 warn 而不抛（只读开库不得回归），但**必须可见**（D8 / F-06）：warn 里带
+ * 逐项原因（vector / fts 各自的结果由 backend 组合），运维才能区分
+ * 「扩展没装 / 缺 OpenSSL 3 / 真故障」，也才能看出是不是部分成功。
  * wasm 后端下扩展静态编译，`loadExtensions` 是 no-op。
  */
-async function tryLoadReadOnlyExtensions(backend: StorageBackend, connection: MemoryConnection): Promise<void> {
+async function tryLoadReadOnlyExtensions(
+  backend: StorageBackend,
+  connection: MemoryConnection,
+  dbPath: string,
+  logger?: { warn(message: string): void },
+): Promise<void> {
   try {
     await backend.loadExtensions(connection, { install: false })
-  } catch {
-    // 只读开库不回归：扩展装不上时让查询期以失败信封暴露。
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    logger?.warn(
+      `只读实例装载 vector/fts 扩展失败（${dbPath}）：${reason}；` +
+      '相关检索路可能不可用——召回会以 degraded 或失败信封显式暴露，不静默。',
+    )
   }
 }
 
@@ -395,7 +412,7 @@ async function initializeReadOnlyDatabase(
       )
     }
     // Story 3.1：schema 校验通过（库已成功打开）后再尽力装载扩展，让只读实例保留 recall。
-    await tryLoadReadOnlyExtensions(handle.backend, connection)
+    await tryLoadReadOnlyExtensions(handle.backend, connection, dbPath, options.logger)
 
     const store: MemoryDatabase = {
       dbPath,
