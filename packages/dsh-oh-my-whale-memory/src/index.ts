@@ -338,10 +338,21 @@ export async function apply(
     async embedQuery(query) {
       const database = db
       if (!database) return null
+      // F-02 / AD-14：查询向量与节点向量必须同一模型。写者模式开库时会把库内 pin 改写成本次
+      // 配置的模型（database.ts），只读模式不改写——此时若配置与 pin 不一致，用配置模型取
+      // 查询向量、再对库内异模型向量算余弦，结果排序是噪声。直接跳过向量路（degraded + warn）。
+      const configuredModel = resolved.embedding.model
+      if (configuredModel !== undefined && configuredModel !== database.modelId) {
+        ctx.logger.warn(
+          `召回跳过语义向量路：配置 embedding.model=${configuredModel} 与库内 pin=${database.modelId} 不一致` +
+          '（异模型向量不可比对）；只读实例不修改库级元数据，本次仅关键词单路。',
+        )
+        return null
+      }
       const client = getRecallEmbeddingClient(database.dim)
       if (!client) return null
       const result = await client.embed(
-        resolved.embedding.model ?? database.modelId,
+        configuredModel ?? database.modelId,
         [query],
         AbortSignal.timeout(RECALL_EMBED_TIMEOUT_MS),
       )
@@ -353,7 +364,15 @@ export async function apply(
       return result.vectors[0] ?? null
     },
     async recall(input) {
-      return runRecall(input)
+      const result = await runRecall(input)
+      // F-01：向量路查询异常已由内核降级（关键词路照常），这里把原因记一次 warn——
+      // 配置态降级（本来就没有查询向量）不重复告警，它由 embedding 配置告警覆盖。
+      if (result.degraded && input.queryVector !== null) {
+        ctx.logger.warn(
+          `召回向量路查询失败，已降级为关键词单路：${result.vectorError ?? '未知原因'}`,
+        )
+      }
+      return result
     },
   }
   /**

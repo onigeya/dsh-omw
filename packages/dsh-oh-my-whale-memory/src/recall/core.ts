@@ -131,9 +131,18 @@ export interface RecallResultItem {
 export interface RecallCoreResult {
   readonly total: number
   readonly results: readonly RecallResultItem[]
-  /** true = 只走了关键词单路（无查询向量），降级必须可见（FR-11）。 */
+  /** true = 只走了关键词单路（无查询向量，或向量路查询异常降级），降级必须可见（FR-11）。 */
   readonly degraded: boolean
   readonly hint: string
+  /**
+   * 向量路查询异常的原因（仅诊断用，最多给 `ctx.logger.warn`；**不外发**到工具/命令输出）。
+   * 缺省 = 向量路没有失败（含「本来就没有查询向量」的配置态降级）。
+   */
+  readonly vectorError?: string
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 /** 向量路（探针 P3）：`WHERE <共享谓词> AND node.embedding_model_id = $model_id`；
@@ -223,7 +232,11 @@ function addRankedRows(
  * 混合检索：两路各取 `retrievalTopK` → RRF 融合 → 层权重 × priority 加权 →
  * 排序（-1 恒置顶 → score 降序 → recorded_at 降序 → id 升序）→ 层过滤 → 截断。
  *
- * 查询出错（扩展缺失、索引缺失等）原样冒泡——工具面负责收敛成失败信封；
+ * 降级阶梯（spec I/O 矩阵「向量路异常」行）：向量路查询异常（扩展未装 / 索引缺失 /
+ * `QUERY_VECTOR_INDEX` 抛错）**只降级向量路**——继续关键词路、结果标 `degraded: true`、
+ * 原因经 {@link RecallCoreResult.vectorError} 交给调用方记 warn。关键词路的命中绝不因
+ * 向量路故障丢失。仅当**两路都失败**时才抛（工具面收敛为失败信封）。
+ *
  * 无命中不是错误：返回 `total: 0` 的正常成功值。
  */
 export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreResult> {
@@ -232,30 +245,46 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   const topK = Math.max(1, Math.trunc(input.retrievalTopK))
   const query = input.query.trim()
   const candidates = new Map<string, RecallCandidate>()
+  const hasQueryVector = input.queryVector !== null && input.queryVector.length > 0
 
   // ---- 向量路：有查询向量才走；模型不符的节点已在 Cypher 内排除。 ----
-  const vectorRows = input.queryVector === null || input.queryVector.length === 0
-    ? []
-    : await queryRows(input.connection, VECTOR_PATH_STATEMENT, {
-      q: [...input.queryVector],
-      k: topK,
-      model_id: input.embeddingModelId,
-      now,
-    })
+  // 异常不冒泡（F-01）：本路失败只降级，关键词路有独立预算（spec I/O 矩阵 :65）。
+  let vectorRows: Record<string, unknown>[] = []
+  let vectorError: string | undefined
+  if (hasQueryVector) {
+    try {
+      vectorRows = await queryRows(input.connection, VECTOR_PATH_STATEMENT, {
+        q: [...input.queryVector!],
+        k: topK,
+        model_id: input.embeddingModelId,
+        now,
+      })
+    } catch (error) {
+      vectorError = errorMessage(error)
+    }
+  }
   addRankedRows(candidates, vectorRows, rrfK)
 
   // ---- 关键词路：FTS 查询串必须内联（P2）；空串不发查询。 ----
-  const keywordRows = query === ''
-    ? []
-    : await queryRows(input.connection, keywordPathStatement(query), {
-      k: BM25_K,
-      b: BM25_B,
-      top: topK,
-      now,
-    })
+  let keywordRows: Record<string, unknown>[] = []
+  let keywordError: unknown
+  if (query !== '') {
+    try {
+      keywordRows = await queryRows(input.connection, keywordPathStatement(query), {
+        k: BM25_K,
+        b: BM25_B,
+        top: topK,
+        now,
+      })
+    } catch (error) {
+      keywordError = error
+    }
+  }
+  // 两路都失败 ⇒ 没有任何可用结果，原样抛（工具面收敛成 failed 信封，不静默返回空）。
+  if (vectorError !== undefined && keywordError !== undefined) throw keywordError
   addRankedRows(candidates, keywordRows, rrfK)
 
-  const degraded = input.queryVector === null || input.queryVector.length === 0
+  const degraded = !hasQueryVector || vectorError !== undefined
 
   // ---- RRF → 层权重 × priority 乘法系数（score 只作排序，不外发）。 ----
   const layerWeightOf = (layer: string): number => {
@@ -309,5 +338,11 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
       ? '无匹配记忆。'
       : '混合检索（语义向量路 + 关键词路，RRF 融合排序）。'
 
-  return { total, results, degraded, hint }
+  return {
+    total,
+    results,
+    degraded,
+    hint,
+    ...(vectorError !== undefined ? { vectorError } : {}),
+  }
 }

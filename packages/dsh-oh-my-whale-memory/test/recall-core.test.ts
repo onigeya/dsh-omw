@@ -9,6 +9,7 @@
  * 开库次数：本文件 1 次（LadybugDB 每进程约 15 个实例封顶）。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import type * as lbug from '@ladybugdb/core'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { upsertMemory } from '../src/db/memory'
 import { memoryNodeId } from '../src/db/id'
@@ -331,6 +332,58 @@ describe('runRecallCore：稳定次级键与标注', () => {
     // 换行归一不影响 token 命中：与空格分隔的同一查询等价。
     const spaced = await recall({ query: 'alpha beta', queryVector: null })
     expect(result.total).toBe(spaced.total)
+  })
+})
+
+describe('runRecallCore：向量路异常降级（F-01 / spec I/O 矩阵「向量路异常」行）', () => {
+  /** 只让向量路语句抛错的连接代理：关键词路原样放行到真库。 */
+  function vectorFailingConnection(reason: string): lbug.Connection {
+    return {
+      async prepare(statement: string) {
+        if (statement.includes('QUERY_VECTOR_INDEX')) throw new Error(reason)
+        return store.connection.prepare(statement)
+      },
+      async execute(prepared: unknown, params: unknown) {
+        return store.connection.execute(
+          prepared as Parameters<typeof store.connection.execute>[0],
+          params as Parameters<typeof store.connection.execute>[1],
+        )
+      },
+    } as unknown as lbug.Connection
+  }
+
+  it('向量路抛错 ⇒ 降级关键词单路（degraded:true）且 FTS 命中不丢；vectorError 带出原因', async () => {
+    const result = await recall({
+      query: 'alpha',
+      queryVector: A,
+      connection: vectorFailingConnection('vector extension not loaded'),
+    })
+    expect(result.degraded).toBe(true)
+    expect(result.hint).toContain('降级')
+    expect(result.vectorError).toContain('vector extension not loaded')
+    // 关键词路独立预算：本可用的 FTS 命中一条不少（F-01 的核心诉求）。
+    const baseline = await recall({ query: 'alpha', queryVector: null })
+    expect(result.total).toBe(baseline.total)
+    const ids = new Set(result.results.map((item) => item.id))
+    expect(ids.has(nid('alpha recall l1 secondary'))).toBe(true)
+  })
+
+  it('无向量 + 向量路失败时仍是正常成功值（vectorError 缺省：本路没失败）', async () => {
+    const result = await recall({ query: 'alpha', queryVector: null })
+    expect(result.degraded).toBe(true)
+    expect(result.vectorError).toBeUndefined()
+  })
+
+  it('两路都失败才抛：任何一路可用都绝不丢命中', async () => {
+    // 关键词路也一并抛错 ⇒ 没有任何可返回结果，原样抛（工具面收敛失败信封）。
+    const allFailing = {
+      async prepare() {
+        throw new Error('prepare failed')
+      },
+    } as unknown as lbug.Connection
+    await expect(
+      recall({ query: 'alpha', queryVector: A, connection: allFailing }),
+    ).rejects.toThrow('prepare failed')
   })
 })
 
