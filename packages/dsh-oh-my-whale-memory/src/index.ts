@@ -77,6 +77,7 @@ import {
   type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
+import { createMemoryRelatedTool } from './tools/memory-related.js'
 import {
   createMemoryRecallTool,
   type MemoryRecallStore,
@@ -431,7 +432,8 @@ export async function apply(
     if (!result.startFound) {
       return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_START_MISSING }
     }
-    if (result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
+    // 与工具面同口径（B4 裁定）：起点失效时不判 evidence expired（锚点不属于证据链判定对象）。
+    if (!result.start.invalid && result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
       return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_EVIDENCE_EXPIRED }
     }
     return {
@@ -528,6 +530,13 @@ export async function apply(
   ctx.tools.register(createMemoryRecallTool({
     // 库未就绪（无 profile / 建库未完成）⇒ undefined ⇒ db_unavailable 失败信封。
     getRecallStore: () => (db === undefined ? undefined : recallStore),
+    quota: recallQuota,
+  }))
+  // Story 3.2：memory_related 与 memory_recall 同属「召回族」，共享同一个配额实例
+  // （B3 已建 relatedStore；本块只补注册）。同样在只读早退**之前**注册——只读实例
+  // 的遍历是纯读路径，照样可用；不新增 ctx.effect（entry-exports 的 closer 数不变）。
+  ctx.tools.register(createMemoryRelatedTool({
+    getRelatedStore: () => (db === undefined ? undefined : relatedStore),
     quota: recallQuota,
   }))
 

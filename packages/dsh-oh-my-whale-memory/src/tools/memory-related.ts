@@ -206,7 +206,10 @@ function toSucceeded(result: RelatedTraversalResult, partial: boolean): MemoryRe
     return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_START_MISSING }
   }
   // AC:889：结果非空但没有任何邻居存在全有效路径 ⇒ 空结果 + evidence expired。
-  if (result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
+  // 例外（B4 实测裁定）：**起点自身失效**时不判 evidence expired——路径有效性按 `all(nodes(p))`
+  // 计算，必然包含失效的锚点，若照判会让 D5②「起点失效仍照常遍历 + hint 提示」永不可达。
+  // 锚点由调用方指定、不属于「证据链是否有效」的判定对象，故只在其有效时判 evidence expired。
+  if (!result.start.invalid && result.results.length > 0 && result.results.every((item) => !item.pathValid)) {
     return { id: result.id, depth: result.depth, total: 0, results: [], hint: RELATED_HINT_EVIDENCE_EXPIRED }
   }
   const hint = relatedHint(partial, result.start.invalid)

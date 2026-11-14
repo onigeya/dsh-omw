@@ -180,6 +180,23 @@ describe('memory_related execute（假 store）', () => {
     expect(value.hint).toContain(RELATED_HINT_START_INVALID)
   })
 
+  it('B4 裁定：起点失效时不判 evidence expired（否则 D5② 永不可达）——邻居 pathValid=false 仍返回', async () => {
+    const store = makeStore({
+      traverse: async () => ({
+        id: 'A',
+        depth: 1,
+        startFound: true,
+        start: { invalid: true, invalidAt: '2026-03-01T00:00:00.000Z', expiredAt: null },
+        total: 1,
+        // 路径含失效起点 ⇒ pathValid 恒 false；但结果必须可见 + hint 起点已失效。
+        results: [{ ...VALID_ITEM, pathValid: false }],
+      }),
+    })
+    const value = await makeTool(store).execute({ id: 'A' }, execOf('s-start-invalid-expired'))
+    expect(value.results).toHaveLength(1)
+    expect(value.hint).toContain(RELATED_HINT_START_INVALID)
+  })
+
   it('超时 ⇒ depth=1 重试成功给 partial + hint:partial（AC:891-893，独立预算）', async () => {
     const traverse = vi.fn()
       .mockRejectedValueOnce(new Error('budget'))

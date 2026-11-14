@@ -90,9 +90,9 @@ describe('memory 插件入口导出形态', () => {
       embedding: { endpoint: 'ftp://x', token: 'sk-test', model: 'bge-m3' },
     })).rejects.toThrow(/embedding\.endpoint/)
 
-    // 每次成功走到注册步骤的 apply 都注册了两个工具（Story 1.6 memory_remember +
-    // Story 3.1 memory_recall）；硬校验在注册之前抛错，不计入。两次 apply ⇒ 4。
-    expect(registered).toHaveLength(4)
+    // 每次成功走到注册步骤的 apply 都注册了三个工具（Story 1.6 memory_remember +
+    // Story 3.1 memory_recall + Story 3.2 memory_related）；硬校验在注册之前抛错，不计入。两次 apply ⇒ 6。
+    expect(registered).toHaveLength(6)
   })
 
   it('有 profileContext 时 apply 在 <profile>/memory/lbug.db 建库并注册 close effect（AC1）', async () => {
@@ -119,9 +119,9 @@ describe('memory 插件入口导出形态', () => {
     expect(plugin.memoryRuntimeState()).toMatchObject({ readonly: false, dbPath: resolveMemoryDbPath(dir) })
     expect(info.mock.calls[0][0]).toMatch(/记忆库就绪/)
     expect(info.mock.calls[0][0]).toContain(resolveMemoryDbPath(dir))
-    // Story 1.6 + 3.1：工具在建就绪前注册，每次 apply 共两个（不按 profile 重复注册）。
-    expect(registered).toHaveLength(2)
-    expect(registered.map((definition) => definition.name)).toEqual(['memory_remember', 'memory_recall'])
+    // Story 1.6 + 3.1 + 3.2：工具在建就绪前注册，每次 apply 共三个（不按 profile 重复注册）。
+    expect(registered).toHaveLength(3)
+    expect(registered.map((definition) => definition.name)).toEqual(['memory_remember', 'memory_recall', 'memory_related'])
 
     // dim 不符 → 拒绝启动（AC5）：db closer 与锁 closer 都不新增，只多出 Story 1.7
     // 无条件注册的命令 effect；刚拿到的锁引用被回滚。
