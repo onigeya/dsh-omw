@@ -90,8 +90,8 @@ interface CapturedApply {
   readonly warn: ReturnType<typeof vi.fn>
   /** `session/event` 监听器（apply 注册的配额重置点）。 */
   readonly listeners: Array<(session: unknown, event: unknown) => void>
-  /** `agent/pre-step` 监听器（Story 3.3：开局注入的生成入口）。 */
-  readonly preStepListeners: Array<(payload: unknown) => Promise<void> | void>
+  /** `agent/pre-step` 监听器（Story 3.3：开局注入的生成入口；F-01 起为 waterfall 两参签名）。 */
+  readonly preStepListeners: Array<(payload: unknown, next: () => Promise<unknown>) => Promise<unknown>>
   /** 注入面 context provider 对该会话返回的文本（Story 3.3 / C 的只读 e2e 断言）。 */
   injectionText(sessionId: string): string
   /** 逐个 await 的 disposer（释放写者锁、停消费者）。 */
@@ -109,7 +109,7 @@ async function applyPlugin(
   const tools: CapturedTool[] = []
   const commands: MemoryCommandDefinition[] = []
   const listeners: Array<(session: unknown, event: unknown) => void> = []
-  const preStepListeners: Array<(payload: unknown) => Promise<void> | void> = []
+  const preStepListeners: Array<(payload: unknown, next: () => Promise<unknown>) => Promise<unknown>> = []
   // Story 3.3 / C：捕获注入面的 context provider，读「首个请求前 provider 实际返回的文本」。
   const promptContexts: Array<{ name: string; text: string | ((context: unknown) => string) }> = []
   const closers: Array<() => unknown> = []
@@ -141,7 +141,7 @@ async function applyPlugin(
     on: (event: string, listener: (session: unknown, payload: unknown) => void) => {
       if (event === 'session/event') listeners.push(listener)
       // Story 3.3：注入生成入口（agent/pre-step）也要被捕获，才能复演首个请求的注入链路。
-      if (event === 'agent/pre-step') preStepListeners.push(listener as (payload: unknown) => Promise<void> | void)
+      if (event === 'agent/pre-step') preStepListeners.push(listener as (payload: unknown, next: () => Promise<unknown>) => Promise<unknown>)
       return () => {}
     },
     effect: (factory: () => () => unknown) => closers.push(factory()),
@@ -488,17 +488,19 @@ describe('只读实例召回（F-05 / F-06 / AC「只读实例检索照常」）
         expect(related.results?.[0]).toMatchObject({ hops: 1, edge_type: 'RELATED', reason: 'rel-ro' })
 
         // Story 3.3 / C：只读实例的**开局注入生成链路**同样可用（纯读 + 可选 LLM）。
-        // 直接复演首个 turn 的 `agent/pre-step`（fake session 带已记录路由；本夹具无 L2 ⇒
-        // L1-only 降级路径不调 LLM），随后 `/memory status` 必须可见注入行——证明
-        // 「识别首条真人消息 → recall → 预算裁剪 → 注入状态」在只读实例跑通且不写库。
+        // F-01：按真实 waterfall 契约调用——监听器必须调用 `next()` 并返回其决策。
         const injectSession = {
           id: 'ro-inject',
           requestHeader: () => ({ config: { provider: 'fake-provider', model: 'fake-model' } }),
         }
-        await applied.preStepListeners[0]!({
-          messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'alpha' }] }],
-          agent: { session: injectSession },
-        })
+        const decision = await applied.preStepListeners[0]!(
+          {
+            messages: [{ role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'alpha' }] }],
+            agent: { session: injectSession },
+          },
+          async () => ({ kind: 'enter', messages: [] }),
+        )
+        expect(decision).toEqual({ kind: 'enter', messages: [] })
         const injectedText = applied.injectionText('ro-inject')
         expect(injectedText).toContain('相关记忆（开局注入）')
         expect(injectedText).toContain('ro-recall-1')

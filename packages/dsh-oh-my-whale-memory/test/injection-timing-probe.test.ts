@@ -19,6 +19,7 @@ import {
   type InjectionPromptHost,
 } from '../src/injection/prompt'
 import { createInjectionStore } from '../src/injection/state'
+import type { OpenstartPreStepPayload } from '../src/injection/openstart'
 
 /** 宿主的 claimed 消息最小形状（只用到 role/source/content）。 */
 interface ClaimedMessage {
@@ -174,5 +175,81 @@ describe('注入时序探针（R1 主通道）', () => {
     // index.ts 的守卫形状：服务缺失 ⇒ 不注册（此处直接断言该判据）。
     expect(host?.systemPrompt).toBeUndefined()
     expect(store.textFor('s-bare')).toBe('')
+  })
+})
+
+/**
+ * F-02（评审教训）：探针必须建模**真实 waterfall 语义**——监听器签名是
+ * `(payload, next) => PreStepDecision`，生成后必须 `return next()` 把决策交回宿主；
+ * 直接把它当普通无返回函数调用，会掩盖「不调 next 短路宿主」这类 P1（F-01）。
+ */
+interface PreStepDecisionLike {
+  readonly kind: 'enter'
+  readonly messages: readonly unknown[]
+}
+
+/** 生产形态的监听器（与 `wire/injection.ts` 同构）：生成 → 无论成败都 `return next()`。 */
+function makeWaterfallListener(
+  store: ReturnType<typeof createInjectionStore>,
+  generate: (text: string) => Promise<string | null>,
+): (payload: OpenstartPreStepPayload, next: () => Promise<PreStepDecisionLike>) => Promise<PreStepDecisionLike> {
+  return async (payload, next) => {
+    const session = payload.agent?.session as { id?: string } | undefined
+    const key = session?.id ?? 'unknown'
+    const human = payload.messages?.find((message) => message.source?.kind === 'user')
+    if (human !== undefined && store.read(key) === undefined) {
+      store.markPending(key)
+      try {
+        const text = await generate((human.content ?? []).map((block) => String(block.text ?? '')).join('\n'))
+        if (text === null) store.markSkipped(key)
+        else store.markReady(key, text)
+      } catch {
+        // 生成异常不得影响宿主决策（F-01 的 catch 语义）。
+      }
+    }
+    return next()
+  }
+}
+
+describe('F-02：真实 waterfall 语义（next 必须被调用、消息不被吞）', () => {
+  it('生成后返回 next 的决策、next 恰好 1 次、消息原样交回；provider 文本非空', async () => {
+    const store = createInjectionStore()
+    const { host, contexts } = makeHost()
+    registerInjectionPrompt(host, store)
+    const provider = contexts.find((context) => context.name === INJECTION_CONTEXT_NAME)!.text as
+      (context: unknown) => string
+    const listener = makeWaterfallListener(store, async (text) => `摘要：${text}`)
+    const human = humanMessage('我偏好 ESM')
+    const defaultDecision: PreStepDecisionLike = { kind: 'enter', messages: [human] }
+    const next = vi.fn(async () => defaultDecision)
+
+    const decision = await listener(
+      { messages: [human], agent: { session: { id: 's-waterfall' } } },
+      next,
+    )
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(decision).toEqual(defaultDecision)
+    // 消息未被吞：返回的正是宿主默认决策里的消息对象。
+    expect(decision.messages[0]).toBe(human)
+    // refreshContext 语义的耦合断言：listener 返回后状态 ready、provider 文本非空。
+    expect(store.read('s-waterfall')?.status).toBe('ready')
+    expect(provider({ agent: { session: { id: 's-waterfall' } } })).toContain('摘要：我偏好 ESM')
+  })
+
+  it('生成抛错时仍返回 next 的决策（异常不放大、不吞消息）', async () => {
+    const store = createInjectionStore()
+    const human = humanMessage('随便一句')
+    const defaultDecision: PreStepDecisionLike = { kind: 'enter', messages: [human] }
+    const next = vi.fn(async () => defaultDecision)
+    const listener = makeWaterfallListener(store, async () => {
+      throw new Error('llm down')
+    })
+
+    const decision = await listener({ messages: [human], agent: { session: { id: 's-waterfall-err' } } }, next)
+
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(decision).toEqual(defaultDecision)
+    expect(store.textFor('s-waterfall-err')).toBe('')
   })
 })

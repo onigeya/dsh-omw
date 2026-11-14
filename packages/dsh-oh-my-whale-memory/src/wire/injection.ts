@@ -18,15 +18,39 @@ import type { MemoryRecallStore } from '../tools/memory-recall.js'
 import { routeFromSession } from '../distill/session-route.js'
 import { registerInjectionPrompt, type InjectionPromptHost } from '../injection/prompt.js'
 import {
+  OPENSTART_LLM_TIMEOUT_MS,
   createOpenstartGenerator,
   type OpenstartLlmPort,
   type OpenstartPreStepPayload,
 } from '../injection/openstart.js'
 import type { InjectionStore } from '../injection/state.js'
 
-/** `agent/pre-step` 宿主事件面（waterfall；裸 ctx 无 on ⇒ 降级为不监听）。 */
+/**
+ * 宿主 `PreStepDecision` 的结构视图（`packages/core/agent/src/runtime-types.ts:139-146`）。
+ * 本包不引宿主 agent 运行时类型，只按 `kind` 传给 waterfall 下游。
+ */
+type PreStepDecisionLike =
+  | { readonly kind: 'reject' }
+  | {
+    readonly kind: 'enter'
+    readonly messages: readonly unknown[]
+    readonly startsRequestSeries?: true
+  }
+
+/**
+ * `agent/pre-step` 宿主事件面（waterfall；裸 ctx 无 on ⇒ 降级为不监听）。
+ * 监听器签名必须是 `(payload, next) => Promise<PreStepDecision>`：**不调用 `next()` 即有意
+ * 短路宿主 waterfall**（docs/cordis-tutorial/04-events.md:138、docs/subsystems/core.md:1014-1031），
+ * 宿主 `agent.ts:302-313` 会读 `decision.kind`——返回 `undefined` 会让首个 step 抛 TypeError（F-01）。
+ */
 interface AgentPreStepHost {
-  on?(event: 'agent/pre-step', listener: (payload: unknown) => Promise<void> | void): unknown
+  on?(
+    event: 'agent/pre-step',
+    listener: (
+      payload: unknown,
+      next: () => Promise<PreStepDecisionLike>,
+    ) => Promise<PreStepDecisionLike>,
+  ): unknown
 }
 
 export interface InjectionWiringOptions {
@@ -34,6 +58,11 @@ export interface InjectionWiringOptions {
   readonly store: InjectionStore
   readonly recallStore: MemoryRecallStore
   readonly resolved: RuntimeConfig
+  /**
+   * 生成等待的硬预算（默认 = 摘要 LLM 的 3s 预算）：无论生成成功/失败/超时/抛错，
+   * 监听器都必须在该预算内向宿主交回决策，绝不阻塞首个请求（F-01 / D2）。
+   */
+  readonly generationBudgetMs?: number
 }
 
 export function wireInjection(ctx: Context, options: InjectionWiringOptions): void {
@@ -43,8 +72,10 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     registerInjectionPrompt(systemPromptHost, options.store)
   }
 
-  // 2) 生成入口：`agent/pre-step`（宿主 waterfall 会 await 监听器 promise ⇒ 3s 预算即
-  //    「首个请求前最多等 3s」；超时/失败由 generator 内部降级，不抛）。
+  // 2) 生成入口：`agent/pre-step`。**必须调用 next() 并把决策交回宿主**（F-01：waterfall
+  //    监听器不调 next 即短路宿主决策，宿主随后读 decision.kind 会 TypeError）。
+  //    生成预算：生成与「硬预算计时器」race，超时立即 next()；无论成功/失败/超时/抛错，
+  //    三条路径都 return next()（生成失败绝不影响宿主决策）。
   const generator = createOpenstartGenerator({
     store: options.store,
     recall: options.recallStore,
@@ -58,5 +89,20 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     logger: ctx.logger,
   })
   const host = ctx as unknown as AgentPreStepHost
-  host.on?.('agent/pre-step', (payload) => generator(payload as OpenstartPreStepPayload))
+  const budgetMs = Math.max(1, Math.trunc(options.generationBudgetMs ?? OPENSTART_LLM_TIMEOUT_MS))
+  host.on?.('agent/pre-step', async (payload, next) => {
+    const generation = generator(payload as OpenstartPreStepPayload).catch(() => {
+      // 生成失败/超时/异常只在注入面降级，绝不影响宿主决策。
+    })
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const budget = new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, budgetMs)
+    })
+    try {
+      await Promise.race([generation, budget])
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+    return next()
+  })
 }
