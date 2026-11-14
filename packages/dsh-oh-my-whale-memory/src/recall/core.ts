@@ -49,7 +49,7 @@ export const RECALL_TEXT_TOKEN_BUDGET = 256
  * （`estimateTokens` / `splitToBudget`，distill/llm-refine.ts:133/150），取**首段**并追加
  * `…`。只改返回的 text，**不改节点集合**：命中不丢，需要全文时按 id 另查（`/memory show`）。
  */
-function truncateRecallText(text: string): { readonly text: string; readonly truncated: boolean } {
+export function truncateRecallText(text: string): { readonly text: string; readonly truncated: boolean } {
   if (estimateTokens(text) <= RECALL_TEXT_TOKEN_BUDGET) return { text, truncated: false }
   const first = splitToBudget(text, RECALL_TEXT_TOKEN_BUDGET)[0]
   // splitToBudget 对非空超预算文本至少返回一段；兜底仅为不让 undefined 漏进结果。

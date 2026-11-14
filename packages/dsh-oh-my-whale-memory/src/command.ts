@@ -41,6 +41,8 @@ export const MEMORY_SHOW_SUBCOMMAND = 'show'
 export const MEMORY_STATUS_SUBCOMMAND = 'status'
 /** `recall` 子命令：混合检索（Story 3.1）。 */
 export const MEMORY_RECALL_SUBCOMMAND = 'recall'
+/** `related` 子命令：沿证据链/语义关系遍历邻居（Story 3.2）。 */
+export const MEMORY_RELATED_SUBCOMMAND = 'related'
 
 /**
  * `list` 默认返回条数。
@@ -96,7 +98,16 @@ export const MEMORY_RECALL_USAGE = [
   '示例：/memory recall RRF 融合',
 ].join('\n')
 
-/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall 五条）。 */
+/** `related` 子命令缺少 id / depth 非法时的 usage 提示（Story 3.2）。 */
+export const MEMORY_RELATED_USAGE = [
+  '用法：/memory related <id> [depth]',
+  '',
+  '沿证据链与语义关系网遍历一条记忆的邻居（EVIDENCE + RELATED 无向，按跳数升序，最多 20 条）。',
+  'depth 可选 1..3，缺省 2。',
+  '示例：/memory related <记忆 id> 2',
+].join('\n')
+
+/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall / related 六条）。 */
 export const MEMORY_COMMAND_USAGE = [
   '用法：/memory <子命令>',
   '',
@@ -109,6 +120,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_STATUS_USAGE,
   '',
   MEMORY_RECALL_USAGE,
+  '',
+  MEMORY_RELATED_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -160,6 +173,30 @@ export interface MemoryCommandRecallResult {
   readonly results: readonly MemoryCommandRecallEntry[]
   readonly degraded: boolean
   readonly hint: string
+}
+
+/** 关联遍历命中项（命令层镜像 `tools/related-shared.ts` 的共享视图；不 import db 模块）。 */
+export interface MemoryCommandRelatedEntry {
+  readonly id: string
+  readonly layer: string
+  readonly hops: number
+  readonly edgeType: 'EVIDENCE' | 'RELATED'
+  readonly reason?: string
+  readonly text: string
+  readonly truncated?: boolean
+  readonly invalid?: boolean
+  readonly invalidAt?: string
+  readonly expiredAt?: string
+}
+
+/** 关联遍历结果（与 memory_related 工具成功值同形：results + hint + partial）。 */
+export interface MemoryCommandRelatedResult {
+  readonly id: string
+  readonly depth: number
+  readonly total: number
+  readonly results: readonly MemoryCommandRelatedEntry[]
+  readonly hint?: string
+  readonly partial?: boolean
 }
 
 /** 单条记忆详情（db 层 `getMemoryById` 的返回形状；字段与 show 渲染顺序一致）。 */
@@ -296,15 +333,21 @@ export interface MemoryCommandDependencies {
    * 配额在 memory_recall 工具面消耗；抛错由 handler 收敛为 error 结果。
    */
   recallMemories(input: { readonly query: string; readonly limit: number }): Promise<MemoryCommandRecallResult>
+  /**
+   * 关联遍历（Story 3.2；渲染层只消费结果）。手动 `related` 同样**不计入** turn 配额；
+   * 抛错由 handler 收敛为 error 结果。
+   */
+  relatedMemories(input: { readonly id: string; readonly depth?: number }): Promise<MemoryCommandRelatedResult>
 }
 
-/** 解析结果：五个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
+/** 解析结果：六个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
 export type MemoryCommandParseResult =
   | { kind: 'remember', text: string, classification?: MemoryInboxWriteOptions }
   | { kind: 'list', query?: string }
   | { kind: 'show', id: string }
   | { kind: 'status' }
   | { kind: 'recall', query: string }
+  | { kind: 'related', id: string, depth?: number }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -365,6 +408,7 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
  * - `show` → 其余 trim 后为 id；为空给 `MEMORY_SHOW_USAGE`；
  * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
  * - `recall` → 其余 trim 后为检索 query；为空给 `MEMORY_RECALL_USAGE`（Story 3.1）；
+ * - `related` → 其余 trim 后为 `<id> [depth]`（Story 3.2，depth 非正整数 → usage）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
@@ -385,6 +429,8 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return payload ? { kind: 'invalid', usage: MEMORY_STATUS_USAGE } : { kind: 'status' }
     case MEMORY_RECALL_SUBCOMMAND:
       return payload ? { kind: 'recall', query: payload } : { kind: 'invalid', usage: MEMORY_RECALL_USAGE }
+    case MEMORY_RELATED_SUBCOMMAND:
+      return parseRelatedPayload(payload)
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -399,6 +445,24 @@ function errorText(error: unknown): string {
 
 // 列表/召回共用的文本摘要（60 code point 截断）已抽到 ./summarize.ts（Story 3.1：
 // memory_recall 工具 presenter 也要同一规则，命令层不 import db 模块故单独成模块）。
+
+/**
+ * 解析 `related` 的 payload：`<id> [depth]`（Story 3.2）。
+ * - 缺 id → usage；超过两个 token → usage（不静默忽略多余输入）；
+ * - depth 必须是**正整数**（非整数/0/负数 → usage；>3 由遍历层夹紧到 3，与工具面同口径）。
+ */
+function parseRelatedPayload(payload: string): MemoryCommandParseResult {
+  if (!payload) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const tokens = payload.split(/\s+/)
+  if (tokens.length > 2) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const id = tokens[0]!
+  if (tokens.length === 1) return { kind: 'related', id }
+  const depthToken = tokens[1]!
+  if (!/^\d+$/.test(depthToken)) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const depth = Number(depthToken)
+  if (!Number.isSafeInteger(depth) || depth < 1) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  return { kind: 'related', id, depth }
+}
 
 /** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，绝不出现 `undefined`。 */
 function renderValue(value: unknown): string {
@@ -434,6 +498,24 @@ function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: str
     `记忆列表（共 ${entries.length} 条，最近优先）：`,
     ...entries.map((entry) => `- ${entry.id} [${entry.layer}] ${summarizeMemoryText(entry.text)}`),
   ].join('\n')
+}
+
+/**
+ * 关联渲染（Story 3.2）：首行 `记忆关联（共 total 条，显示 N 条）：`（total = 20 条截断前），
+ * 其后每行 `- <id> <hops>跳 [<edge_type>] <text摘要>`，失效邻居追加「（已失效）」；
+ * 末行展示 hint（evidence expired / partial / 起点已失效）。无命中是**成功值**。
+ */
+function renderMemoryRelated(result: MemoryCommandRelatedResult): string {
+  if (result.results.length === 0) return result.hint ?? '无匹配记忆。'
+  const lines = [
+    `记忆关联（共 ${result.total} 条，显示 ${result.results.length} 条）：`,
+    ...result.results.map((entry) => {
+      const mark = entry.invalid === true ? '（已失效）' : ''
+      return `- ${entry.id} ${entry.hops}跳 [${entry.edgeType}] ${summarizeMemoryText(entry.text)}${mark}`
+    }),
+  ]
+  if (result.hint !== undefined && result.hint !== '') lines.push(result.hint)
+  return lines.join('\n')
 }
 
 /**
@@ -558,9 +640,9 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
 export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '记录与浏览长期记忆（remember / list / show / status / recall）',
+    description: '记录与浏览长期记忆（remember / list / show / status / recall / related）',
     input: {
-      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query>',
+      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query> | related <id> [depth]',
     },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
@@ -591,6 +673,14 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
             // 库未就绪/查询失败由 deps 抛错，下面的 catch 收敛为 error 结果。
             const result = await deps.recallMemories({ query: parsed.query, limit: MEMORY_RECALL_DEFAULT_LIMIT })
             return { kind: 'success', text: renderMemoryRecall(result) }
+          }
+          case 'related': {
+            // 手动遍历同样不计入 turn 配额（与 recall 同口径）；depth 缺省由遍历层夹紧。
+            const input = parsed.depth === undefined
+              ? { id: parsed.id }
+              : { id: parsed.id, depth: parsed.depth }
+            const result = await deps.relatedMemories(input)
+            return { kind: 'success', text: renderMemoryRelated(result) }
           }
         }
       } catch (error) {

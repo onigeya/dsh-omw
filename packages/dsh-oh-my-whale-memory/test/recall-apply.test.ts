@@ -22,6 +22,7 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
 import type { MemoryCommandDefinition } from '../src/command'
 import { openMemoryDatabase } from '../src/db/database'
+import { writeEvidenceEdges, writeRelatedEdges } from '../src/db/edges'
 import { memoryNodeId } from '../src/db/id'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import {
@@ -30,7 +31,9 @@ import {
   createFtsIndexStatement,
   createL0RawTableStatement,
   createMemoryTableStatement,
+  createEvidenceTableStatement,
   createMetaTableStatement,
+  createRelatedTableStatement,
   createVectorIndexStatement,
 } from '../src/db/schema'
 import { cleanupTempDirs, makeTempDir } from './tmp'
@@ -56,8 +59,33 @@ interface CapturedTool {
   output: { render: (args: unknown, value: unknown) => Array<{ type: string; text: string }> }
 }
 
+/** `memory_related` 工具的最小结构视图（Story 3.2 / B4 装配面）。 */
+interface CapturedRelatedTool {
+  name: string
+  execute: (args: { id: string; depth?: number }, exec?: unknown) => Promise<{
+    id?: string
+    depth?: number
+    total?: number
+    results?: Array<{
+      id: string
+      layer: string
+      hops: number
+      edge_type: string
+      reason?: string
+      text: string
+      invalid?: boolean
+      invalid_at?: string
+    }>
+    hint?: string
+    partial?: boolean
+    action?: 'failed'
+    error?: { code: string; message: string; retryable: boolean }
+  }>
+}
+
 interface CapturedApply {
   readonly tool: CapturedTool
+  readonly relatedTool: CapturedRelatedTool
   readonly command: MemoryCommandDefinition | undefined
   readonly warn: ReturnType<typeof vi.fn>
   /** `session/event` 监听器（apply 注册的配额重置点）。 */
@@ -110,8 +138,11 @@ async function applyPlugin(
 
   const tool = tools.find((candidate) => candidate.name === 'memory_recall')
   if (!tool) throw new Error('apply 未注册 memory_recall 工具')
+  const relatedTool = tools.find((candidate) => candidate.name === 'memory_related') as CapturedRelatedTool | undefined
+  if (!relatedTool) throw new Error('apply 未注册 memory_related 工具（Story 3.2 / B4）')
   return {
     tool,
+    relatedTool,
     command: commands[0],
     warn,
     listeners,
@@ -143,6 +174,15 @@ function buildReadonlyStatements(dim: number): string[] {
     `CREATE (m:memory {id: 'ro-recall-1', layer: 'L1', kind: 'note', priority: 0, ` +
       `text: 'alpha readonly recall 夹具', valid_at: '${TS(1)}', recorded_at: '${TS(1)}', ` +
       'invalid_at: NULL, expired_at: NULL, source_refs: []})',
+    // Story 3.2 / B4：只读关联遍历夹具——两类边表 + 一个**不含 alpha** 的邻居（不污染上面的
+    // recall 断言：关键词路按 'alpha' 只命中 ro-recall-1；向量路因模型 pin 不一致被跳过）。
+    createEvidenceTableStatement(),
+    createRelatedTableStatement(),
+    `CREATE (m:memory {id: 'ro-related-b', layer: 'L1', kind: 'note', priority: 0, ` +
+      `text: '关联遍历只读邻居', valid_at: '${TS(1)}', recorded_at: '${TS(1)}', ` +
+      'invalid_at: NULL, expired_at: NULL, source_refs: []})',
+    "MATCH (a:memory {id: 'ro-recall-1'}), (b:memory {id: 'ro-related-b'}) " +
+      "CREATE (a)-[:RELATED {reason: 'rel-ro'}]->(b)",
     createVectorIndexStatement(),
     createFtsIndexStatement(),
   ]
@@ -206,12 +246,75 @@ describe('配额端到端（F-08 / spec D7）', () => {
       applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
       expect((await applied.tool.execute({ query: 'alpha' }, exec)).action).toBeUndefined()
 
+      // Story 3.2 / B4：memory_related 与 memory_recall 共享**同一配额桶**——reset 后已用 1 次
+      // （recall）；再拼 2 次（related + recall）⇒ 满 3；第 4 次不论哪个工具都拒。
+      expect((await applied.relatedTool.execute({ id: 'absent-id' }, exec)).action).toBeUndefined()
+      expect((await applied.tool.execute({ query: 'alpha' }, exec)).action).toBeUndefined()
+      const sharedBlocked = await applied.relatedTool.execute({ id: 'absent-id' }, exec)
+      expect(sharedBlocked.error).toMatchObject({ code: 'quota_exceeded', retryable: false })
+      applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
+
+      // `/memory related` 命令面**不计配额**（与 `/memory recall` 同口径）：随后 3 次工具
+      // 调用仍全部放行；命令本身走真 deps（起点存在但无邻居 ⇒ 成功值「无匹配记忆。」）。
+      const startId = memoryNodeId('L1', 'quota e2e alpha')
+      const relatedCommand = await applied.command!.handler({ rawInput: ` related ${startId}` })
+      expect(relatedCommand.kind).toBe('success')
+      for (let i = 0; i < 3; i += 1) {
+        expect((await applied.tool.execute({ query: 'alpha' }, exec)).action).toBeUndefined()
+      }
+      applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
+
       // exec.agent 缺失 ⇒ 'unknown' 桶；耗尽后，无 session 的 turn/end 派发也必须能恢复它
       // （否则某宿主路径缺 exec.agent 时 unknown 桶进程内永不恢复，F-08 的核心场景）。
       for (let i = 0; i < 3; i += 1) await applied.tool.execute({ query: 'alpha' })
       expect((await applied.tool.execute({ query: 'alpha' })).error).toMatchObject({ code: 'quota_exceeded' })
       applied.listeners[0]!(null, { type: 'turn/end' })
       expect((await applied.tool.execute({ query: 'alpha' })).action).toBeUndefined()
+
+      // Story 3.2 / B4：写者实例的真库关联遍历。复用 applyPlugin 已打开的写者 facade
+      // （同进程同路径不新开 Database），所以本用例的开库次数不变。
+      const db = await openMemoryDatabase({
+        dbPath: resolveMemoryDbPath(dir),
+        dim: 1024,
+        modelId: 'bge-m3',
+      })
+      const a = (await db.upsertMemory({ layer: 'L1', text: 'related e2e a' })).id
+      const b = (await db.upsertMemory({ layer: 'L1', text: 'related e2e b' })).id
+      const c = (await db.upsertMemory({ layer: 'L2', text: 'related e2e c' })).id
+      const invalidStart = (await db.upsertMemory({ layer: 'L1', text: 'related e2e invalid start' })).id
+      const invalidNeighbor = (await db.upsertMemory({ layer: 'L1', text: 'related e2e invalid neighbor' })).id
+      await db.connection.query(
+        `CREATE (l:l0_raw {id: 'rel-e2e-l0', raw_text: 'raw', recorded_at: '${TS(1)}', actor: 'test'})`,
+      )
+      await writeEvidenceEdges(db.connection, [
+        { fromId: 'rel-e2e-l0', fromLayer: 'L0', toId: a, toLayer: 'L1', reason: 'ev-l0-a' },
+        { fromId: a, fromLayer: 'L1', toId: c, toLayer: 'L2', reason: 'ev-a-c' },
+      ])
+      await writeRelatedEdges(db.connection, [
+        { fromId: a, toId: b, reason: 'rel-a-b' },
+        { fromId: invalidStart, toId: invalidNeighbor, reason: 'rel-inv' },
+      ])
+      const markInvalid = await db.connection.prepare('MATCH (m:memory {id: $id}) SET m.invalid_at = $invalid_at')
+      await db.connection.execute(markInvalid, { id: invalidStart, invalid_at: TS(5) })
+
+      const relatedExec = { agent: { session: { id: 'rel-e2e' } } }
+      const relatedValue = await applied.relatedTool.execute({ id: a, depth: 2 }, relatedExec)
+      expect(relatedValue.action).toBeUndefined()
+      const neighbourById = new Map((relatedValue.results ?? []).map((item) => [item.id, item]))
+      expect(neighbourById.get(b)).toMatchObject({ hops: 1, edge_type: 'RELATED', reason: 'rel-a-b' })
+      expect(neighbourById.get(c)).toMatchObject({ hops: 1, edge_type: 'EVIDENCE', reason: 'ev-a-c' })
+      // D2：无向 EVIDENCE 的另一端是 l0_raw，端点约束保证它不进结果面。
+      expect(relatedValue.results?.some((item) => item.id === 'rel-e2e-l0')).toBe(false)
+      expect(relatedValue.hint).toBeUndefined()
+
+      // D5 ② + B4 裁定：起点自身失效仍照常遍历（不判 evidence expired），hint 可见。
+      const fromInvalid = await applied.relatedTool.execute({ id: invalidStart }, relatedExec)
+      expect(fromInvalid.results?.map((item) => item.id)).toEqual([invalidNeighbor])
+      expect(String(fromInvalid.hint)).toContain('起点已失效')
+
+      // AC:882-884：起点不存在 ⇒ 成功值 + 未找到 hint（不抛错）。
+      const missing = await applied.relatedTool.execute({ id: 'absent-id' }, relatedExec)
+      expect(missing).toMatchObject({ total: 0, results: [], hint: '未找到该记忆。' })
     } finally {
       await applied.close()
     }
@@ -349,6 +452,15 @@ describe('只读实例召回（F-05 / F-06 / AC「只读实例检索照常」）
         expect(command.kind).toBe('success')
         expect(command.text).toContain('ro-recall-1')
         expect(command.text).toContain('[L1]')
+
+        // Story 3.2 / B4：只读实例的关联遍历同样是纯读路径（真库 RELATED 邻居可达）。
+        const related = await applied.relatedTool.execute(
+          { id: 'ro-recall-1' },
+          { agent: { session: { id: 'ro-related' } } },
+        )
+        expect(related.action).toBeUndefined()
+        expect(related.results?.map((item) => item.id)).toEqual(['ro-related-b'])
+        expect(related.results?.[0]).toMatchObject({ hops: 1, edge_type: 'RELATED', reason: 'rel-ro' })
       } finally {
         await applied.close()
       }

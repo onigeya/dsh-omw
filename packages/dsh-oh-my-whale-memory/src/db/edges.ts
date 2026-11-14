@@ -184,3 +184,288 @@ export async function readEvidenceInEdgeIds(connection: lbug.Connection, id: str
   const rows = await queryRows(connection, DIRECT_IN_EDGE_IDS, { id })
   return rows.map((row) => String(row.from_id))
 }
+
+// ---------------------------------------------------------------------------
+// 图遍历原语（Story 3.2 / FR-12 / AC:872-889）
+//
+// ⚠️ **升版必回归**（与 eii.ts:20-21 同款）：本模块依赖多处 0.22.3 未文档化行为——
+// `relationships(p)` 的序列化形状（`reason`/`_label`）、`length(p)`、`all()` 内动态属性
+// 语义、REL TABLE GROUP 上的无向变长路径。LadybugDB 升级（AD-3 四条件）时必须回归本模块。
+//
+// 形态由 2026-11-14 探针钉死（probe-3-2b.md）：
+// - `type()` / `last()` / `head()` 在 0.22.3 **不存在**（Catalog exception），故 edge_type
+//   只能由**语句常量**给出 ⇒ EVIDENCE、RELATED 各一条无向变长语句（spec D1 方案）。
+// - `relationships(p)` 可作 RETURN 值且按路径方向序列化（含 `reason`）⇒ 末元素即「最后一跳」
+//   的关系，用它取 `reason`（AC:880 的可选字段）；GROUP 边上同样可用（探针 G1）。
+// - 端点显式 `(n:memory)`：无向 EVIDENCE 会走到 l0_raw（探针 2b 实测），不约束会污染结果面。
+// - **路径不带有效性过滤**：`all(x IN nodes(p) WHERE …)` 作 RETURN 布尔（探针 P4b/P4d：
+//   作 WHERE 会整条剔掉含失效中间节点的路径，且内部参数表达式触发 0.22.3 断言）。
+// ---------------------------------------------------------------------------
+
+/** 遍历深度缺省值（AC:875）。 */
+export const RELATED_DEFAULT_DEPTH = 2
+/** 遍历深度上限（AC:875）。 */
+export const RELATED_MAX_DEPTH = 3
+/** 结果条数上限（AC:880）。 */
+export const RELATED_MAX_RESULTS = 20
+
+/** 遍历超时（AC:891-893 的降级由调用方做；本原语只负责把「超预算」变成可捕获的错误）。 */
+export class RelatedTraversalTimeoutError extends Error {
+  readonly reason = 'related-traversal-timeout'
+
+  constructor(timeoutMs: number) {
+    super(`记忆关联遍历超过 ${timeoutMs}ms 预算（LadybugDB 0.22.3 无查询取消 API，底层查询可能仍在跑）`)
+    this.name = 'RelatedTraversalTimeoutError'
+  }
+}
+
+/** `traverseRelated` 输入。`now` 不参与判据：AC:886 只按 `invalid_at` / `expired_at` 判失效。 */
+export interface TraverseRelatedInput {
+  readonly id: string
+  /** 跳数 1..3；缺省 {@link RELATED_DEFAULT_DEPTH}，越界夹紧。 */
+  readonly depth?: number
+  /** 单次遍历预算（ms）；超时抛 {@link RelatedTraversalTimeoutError}。 */
+  readonly timeoutMs?: number
+}
+
+/** 一个遍历命中的邻居（已按 id 归并、取最小 hops 的一条路径）。 */
+export interface RelatedTraversalItem {
+  readonly id: string
+  readonly layer: string
+  readonly text: string
+  readonly hops: number
+  readonly edgeType: typeof EVIDENCE | typeof RELATED
+  /** 末跳关系的 reason；无则 null（AC:880 标可选）。 */
+  readonly reason: string | null
+  /** 节点自身失效（`invalid_at` 或 `expired_at` 非空，AC:886-888）。 */
+  readonly invalid: boolean
+  readonly invalidAt: string | null
+  readonly expiredAt: string | null
+  /**
+   * 该邻居在 depth 内**存在至少一条**邻居侧全有效路径（spec D4 的判定原语；F-02）。
+   * 跨路径 OR：同一邻居的多条路径只要有一条除起点外全有效即为 true（不是「min-hops 那条」）。
+   * 起点不参与判定（F-04）；只作 RETURN 布尔取回、**绝不**用于过滤（D3）。
+   */
+  readonly pathValid: boolean
+}
+
+/** 起点自身的有效性（spec D5 ②：起点失效不拦截遍历，但工具层要能提示「起点已失效」）。 */
+export interface RelatedTraversalStart {
+  readonly invalid: boolean
+  readonly invalidAt: string | null
+  readonly expiredAt: string | null
+}
+
+export interface RelatedTraversalResult {
+  readonly id: string
+  readonly depth: number
+  /** 起点是否在库内（AC:882-884：不存在 → 空结果 + hint，由调用方渲染）。 */
+  readonly startFound: boolean
+  /** 起点自身有效性；`startFound:false` 时为零值。 */
+  readonly start: RelatedTraversalStart
+  /** 去重归并后、20 条截断**前**的邻居总数（spec D6 的 total 口径）。 */
+  readonly total: number
+  /**
+   * 截断**前**是否存在任一「邻居侧全有效路径」的邻居（F-02：evidence expired 判定必须用它，
+   * 不能用 20 条截断后的 `results`——有效路径可能来自第 21 名而被截断）。
+   */
+  readonly anyValidPath: boolean
+  /** 已排序：按跳数升序；同跳有效优先于失效（AC:880/888）。 */
+  readonly results: readonly RelatedTraversalItem[]
+}
+
+/** 深度夹紧的唯一实现（缺省 2、[1,3]；非有限回落缺省）。 */
+export function clampRelatedDepth(depth: number | undefined): number {
+  if (depth === undefined || !Number.isFinite(depth)) return RELATED_DEFAULT_DEPTH
+  return Math.min(RELATED_MAX_DEPTH, Math.max(1, Math.trunc(depth)))
+}
+
+/**
+ * 一条边型的无向变长路径语句。`depth` 必须内联（探针 P5：`*1..$depth` 是 Parser exception），
+ * 故只接受 {@link clampRelatedDepth} 之后的 1..3 整数。
+ */
+function relatedTraversalStatement(edgeType: typeof EVIDENCE | typeof RELATED, depth: number): string {
+  return [
+    `MATCH p = (m:${MEMORY_TABLE} {id: $id})-[:${edgeType}*1..${depth}]-(n:${MEMORY_TABLE})`,
+    'WHERE n.id <> $id',
+    'RETURN n.id AS id, n.layer AS layer, n.text AS text,',
+    '  n.invalid_at AS invalid_at, n.expired_at AS expired_at,',
+    '  length(p) AS hops,',
+    // path_valid = **邻居侧**有效性：起点节点豁免（F-04：起点不是证据链判定对象），
+    // 其余节点必须未失效。写法用节点比较 `x.id = m.id` 而非参数——0.22.3 的 `all()` 内
+    // 出现参数表达式会触发 `UNREACHABLE_CODE` 断言（探针 P4d/start-exclude 实测），
+    // 而 `x.id = m.id`（或 `id(x) = id(m)`）在同一 all() 内可用（2026-11-14 实测）。
+    '  all(x IN nodes(p) WHERE x.id = m.id OR (x.invalid_at IS NULL AND x.expired_at IS NULL)) AS path_valid,',
+    '  relationships(p) AS rels',
+    'ORDER BY hops ASC, id ASC',
+  ].join('\n')
+}
+
+const START_NODE_STATEMENT = [
+  'MATCH (m:' + MEMORY_TABLE + ' {id: $id})',
+  'RETURN m.invalid_at AS invalid_at, m.expired_at AS expired_at',
+].join('\n')
+
+/** 起点不存在时的零值（工具层据此跳过「起点已失效」提示）。 */
+const START_NOT_FOUND: RelatedTraversalStart = { invalid: false, invalidAt: null, expiredAt: null }
+
+/**
+ * 带预算的查询：`Promise.race` 只是**调用方**预算（0.22.3 无查询取消 API），超时后底层查询
+ * 仍会跑完——超时方吞掉它后续的 rejection，避免未处理拒绝把宿主/进程搞崩。
+ */
+async function queryRowsWithinBudget(
+  connection: lbug.Connection,
+  statement: string,
+  params: Record<string, lbug.LbugValue>,
+  timeoutMs: number | undefined,
+): Promise<Record<string, unknown>[]> {
+  const query = (async () => {
+    const prepared = await connection.prepare(statement)
+    return collectRows(await connection.execute(prepared, params))
+  })()
+  if (timeoutMs === undefined) return await query
+
+  let timer: ReturnType<typeof setTimeout> | undefined
+  let timedOut = false
+  try {
+    return await Promise.race([
+      query,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true
+          reject(new RelatedTraversalTimeoutError(timeoutMs))
+        }, timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    if (timedOut) query.catch(() => {})
+  }
+}
+
+function nullishString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value)
+}
+
+/** 从 `relationships(p)` 的末元素取 reason（形状见文件头：`{ reason, _label, … }`）。 */
+function lastHopReason(rels: unknown): string | null {
+  if (!Array.isArray(rels) || rels.length === 0) return null
+  const last = rels[rels.length - 1] as { readonly reason?: unknown } | null
+  const reason = last?.reason
+  return typeof reason === 'string' && reason.length > 0 ? reason : null
+}
+
+/** 归并时的确定性取舍（spec D7）：min hops → path_valid 优先 → EVIDENCE 优先 → id 升序。 */
+function isBetterTraversal(next: RelatedTraversalItem, current: RelatedTraversalItem): boolean {
+  if (next.hops !== current.hops) return next.hops < current.hops
+  if (next.pathValid !== current.pathValid) return next.pathValid
+  if (next.edgeType !== current.edgeType) return next.edgeType === EVIDENCE
+  return next.id < current.id
+}
+
+/** 把一条边型的行并入按 id 归并的表（同 id 多路径取最优一条，探针 P1/P4g 实测会重行）。 */
+function mergeTraversalRows(
+  merged: Map<string, RelatedTraversalItem>,
+  rows: readonly Record<string, unknown>[],
+  edgeType: typeof EVIDENCE | typeof RELATED,
+): void {
+  for (const row of rows) {
+    const id = String(row.id)
+    const invalidAt = nullishString(row.invalid_at)
+    const expiredAt = nullishString(row.expired_at)
+    const item: RelatedTraversalItem = {
+      id,
+      layer: String(row.layer ?? ''),
+      text: String(row.text ?? ''),
+      hops: Number(row.hops ?? Number.POSITIVE_INFINITY),
+      edgeType,
+      reason: lastHopReason(row.rels),
+      invalid: invalidAt !== null || expiredAt !== null,
+      invalidAt,
+      expiredAt,
+      pathValid: row.path_valid === true,
+    }
+    const current = merged.get(id)
+    if (current === undefined) {
+      merged.set(id, item)
+      continue
+    }
+    // F-02：有效性跨路径 OR——展示用字段（hops/reason/edgeType）仍取最优那条路径，
+    // 但「是否存在全有效路径」只要任一命中路径成立就成立。
+    const pathValid = current.pathValid || item.pathValid
+    const preferred = isBetterTraversal(item, current) ? item : current
+    merged.set(id, { ...preferred, pathValid })
+  }
+}
+
+/** 最终排序（AC:880「按跳数升序」为主键；同跳内有效先于失效，再按 id 升序保证确定性）。 */
+function compareTraversal(a: RelatedTraversalItem, b: RelatedTraversalItem): number {
+  if (a.hops !== b.hops) return a.hops - b.hops
+  // AC:888 的「补入」语义：同一跳数下有效邻居排在失效邻居之前。
+  if (a.invalid !== b.invalid) return a.invalid ? 1 : -1
+  if (a.id === b.id) return 0
+  return a.id < b.id ? -1 : 1
+}
+
+/**
+ * 沿 EVIDENCE / RELATED 边做无向 BFS（AC:872-889 / FR-12）。
+ *
+ * 两条语句（两型分查）并行发出，JS 侧按 id 归并取最小 hops，然后**有效邻居优先**填满
+ * {@link RELATED_MAX_RESULTS}，不足时用失效邻居补位（AC:888）。起点不存在时返回空结果 +
+ * `startFound:false`（不抛错，AC:882-884）；起点自身失效不拦截（spec D5：它是锚点不是候选）。
+ *
+ * 只读：不写库、不开事务。
+ */
+export async function traverseRelated(
+  connection: lbug.Connection,
+  input: TraverseRelatedInput,
+): Promise<RelatedTraversalResult> {
+  const id = input.id
+  const depth = clampRelatedDepth(input.depth)
+  const [evidenceRows, relatedRows, startRows] = await Promise.all([
+    queryRowsWithinBudget(connection, relatedTraversalStatement(EVIDENCE, depth), { id }, input.timeoutMs),
+    queryRowsWithinBudget(connection, relatedTraversalStatement(RELATED, depth), { id }, input.timeoutMs),
+    // 起点存在性/有效性：无论有无邻居都读一次（区分「起点不存在」与「起点无邻居」，
+    // AC:882-884 / spec D5）；与两条遍历语句并行，不额外增加调用方等待。
+    queryRowsWithinBudget(connection, START_NODE_STATEMENT, { id }, input.timeoutMs),
+  ])
+  const merged = new Map<string, RelatedTraversalItem>()
+  mergeTraversalRows(merged, evidenceRows, EVIDENCE)
+  mergeTraversalRows(merged, relatedRows, RELATED)
+
+  const all = [...merged.values()]
+  const valid = all.filter((item) => !item.invalid).sort(compareTraversal)
+  const invalid = all.filter((item) => item.invalid).sort(compareTraversal)
+  const validCount = Math.min(valid.length, RELATED_MAX_RESULTS)
+  // AC:888 的分组只决定 **20 条入选**（有效优先、不足补失效）；展示顺序仍按 AC:880
+  // 「跳数升序」——把失效组直接追加在末尾会让 2 跳的有效邻居排到 1 跳的失效邻居前面，
+  // 违反 AC:880。故入选后统一按 compareTraversal 重排（同跳有效在前、再 id 升序）。
+  const results = [
+    ...valid.slice(0, RELATED_MAX_RESULTS),
+    ...invalid.slice(0, RELATED_MAX_RESULTS - validCount),
+  ].sort(compareTraversal)
+
+  // 起点行（与遍历并行取回）：不存在 ⇒ startFound:false + 零值 start。
+  const startRow = startRows[0]
+  const startFound = startRow !== undefined
+  const startInvalidAt = nullishString(startRow?.invalid_at)
+  const startExpiredAt = nullishString(startRow?.expired_at)
+  const start: RelatedTraversalStart = startFound
+    ? {
+      invalid: startInvalidAt !== null || startExpiredAt !== null,
+      invalidAt: startInvalidAt,
+      expiredAt: startExpiredAt,
+    }
+    : START_NOT_FOUND
+
+  return {
+    id,
+    depth,
+    startFound,
+    start,
+    total: all.length,
+    // F-02：截断前聚合——有效路径可能来自第 21+ 名邻居，不能用截断后的 results 判定。
+    anyValidPath: all.some((item) => item.pathValid),
+    results,
+  }
+}

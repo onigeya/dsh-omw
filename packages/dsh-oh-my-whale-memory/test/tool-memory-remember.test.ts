@@ -80,7 +80,8 @@ beforeAll(async () => {
   await apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
   // Story 3.1：每次 apply 注册两个工具（memory_remember + memory_recall）；
   // 本文件只取第一个（memory_remember）。
-  expect(registered).toHaveLength(2)
+  // apply 无条件注册三个工具（Story 1.6 remember + 3.1 recall + 3.2 related），本用例只用第一个。
+  expect(registered).toHaveLength(3)
   expect(registered[0].name).toBe('memory_remember')
   tool = registered[0]
   // 复用同一绝对路径的句柄（database.ts 按绝对路径去重），用于行级断言。
@@ -201,7 +202,7 @@ describe('memory_remember 工具（Story 1.6）', () => {
     const { ctx } = fakeCtx({ registered: bareRegistered })
     await apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
     // Story 3.1 起每次 apply 注册两个工具；memory_remember 仍是第一个。
-    expect(bareRegistered).toHaveLength(2)
+    expect(bareRegistered).toHaveLength(3)
     expect(bareRegistered[0].name).toBe('memory_remember')
 
     const value = await bareRegistered[0].execute({ content: 'anything' })

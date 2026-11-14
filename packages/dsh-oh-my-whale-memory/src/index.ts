@@ -71,18 +71,25 @@ import {
   createMemoryCommandDefinition,
   type MemoryCommandDependencies,
   type MemoryCommandRecallResult,
+  type MemoryCommandRelatedResult,
   type MemoryCommandsRuntime,
   type MemoryInboxWriteOptions,
   type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
+import { createMemoryRelatedTool } from './tools/memory-related.js'
 import {
   createMemoryRecallTool,
   type MemoryRecallStore,
 } from './tools/memory-recall.js'
+import {
+  RELATED_TRAVERSAL_TIMEOUT_MS,
+  type MemoryRelatedStore,
+} from './tools/memory-related.js'
+import { toRelatedSuccessView } from './tools/related-shared.js'
+import { traverseRelated } from './db/edges.js'
 import { createQuotaResetListener, createRecallTurnQuota } from './tools/recall-quota.js'
 import { runRecallCore, type RecallCoreResult } from './recall/core.js'
-import type { EmbedClient } from './embedding/client.js'
 import {
   createInboxConsumer,
   drainInboxBackgroundTasks,
@@ -96,7 +103,7 @@ import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingBackfill } from './embedding/backfill.js'
 import { createEvidenceBackfill } from './wiki/evidence-backfill.js'
 import { countRelatedSkips, createRelationRunner } from './wiki/relations.js'
-import { createEmbeddingClient } from './embedding/client.js'
+import { createEmbeddingClient, type EmbedClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
 import { routeFromSession } from './distill/session-route.js'
 import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
@@ -394,6 +401,33 @@ export async function apply(
     // F-07：total（截断前命中数）必须透传到命令面，否则「共 N 条」只会报显示条数。
     return { total: core.total, results: core.results, degraded: core.degraded, hint: core.hint }
   }
+  /**
+   * Story 3.2：关联遍历能力（命令面 + B4 的工具面共用同一 store）。
+   * `traverse` 直接转发 `db/edges.ts` 的 `traverseRelated`；超时预算取工具面同一常量。
+   */
+  const relatedStore: MemoryRelatedStore = {
+    traverse: (input) => traverseRelated(readConnection().connection, {
+      id: input.id,
+      ...(input.depth === undefined ? {} : { depth: input.depth }),
+      timeoutMs: input.timeoutMs ?? RELATED_TRAVERSAL_TIMEOUT_MS,
+    }),
+  }
+  /**
+   * `/memory related` 的 dep（Story 3.2）：手动遍历**不计入** turn 配额（与 recall 同口径）。
+   * D4/D5 判定、hint 与 256-token 截断统一走 `tools/related-shared.ts`（F-05：与工具面同口径，
+   * 命令面**不**引入 depth=1 重试——spec D8 有意为之，超时由 handler 收敛为 error 结果）。
+   */
+  const relatedMemories = async (input: {
+    readonly id: string
+    readonly depth?: number
+  }): Promise<MemoryCommandRelatedResult> => {
+    const result = await relatedStore.traverse({
+      id: input.id,
+      ...(input.depth === undefined ? {} : { depth: input.depth }),
+      timeoutMs: RELATED_TRAVERSAL_TIMEOUT_MS,
+    })
+    return toRelatedSuccessView(result)
+  }
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
   // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
@@ -450,6 +484,7 @@ export async function apply(
     getMemoryById,
     getStatus,
     recallMemories,
+    relatedMemories,
   }
   // 命令的 effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
   ctx.effect(
@@ -470,6 +505,13 @@ export async function apply(
   ctx.tools.register(createMemoryRecallTool({
     // 库未就绪（无 profile / 建库未完成）⇒ undefined ⇒ db_unavailable 失败信封。
     getRecallStore: () => (db === undefined ? undefined : recallStore),
+    quota: recallQuota,
+  }))
+  // Story 3.2：memory_related 与 memory_recall 同属「召回族」，共享同一个配额实例
+  // （B3 已建 relatedStore；本块只补注册）。同样在只读早退**之前**注册——只读实例
+  // 的遍历是纯读路径，照样可用；不新增 ctx.effect（entry-exports 的 closer 数不变）。
+  ctx.tools.register(createMemoryRelatedTool({
+    getRelatedStore: () => (db === undefined ? undefined : relatedStore),
     quota: recallQuota,
   }))
 
