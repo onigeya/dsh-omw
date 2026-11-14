@@ -99,6 +99,8 @@ function makeGenerator(args: {
   readonly timeoutMs?: number
   /** B4b：观测 logger（info 断言用；缺省空实现）。 */
   readonly logger?: { warn: (message: string) => void; info?: (message: string) => void }
+  /** F-09：路由注入（缺省 ROUTE；null = 解析不出路由）。 */
+  readonly route?: OpenstartRoute | null
 }) {
   const store = args.store ?? createInjectionStore()
   const { port, calls: recallCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
@@ -107,7 +109,7 @@ function makeGenerator(args: {
     recall: port,
     getLlm: () => ('llm' in args ? args.llm : undefined),
     enabled: () => args.enabled ?? true,
-    resolveRoute: () => ROUTE,
+    resolveRoute: () => ('route' in args ? args.route : ROUTE),
     timeoutMs: args.timeoutMs,
     logger: args.logger ?? { warn: vi.fn() },
   })
@@ -238,13 +240,42 @@ describe('createOpenstartGenerator：降级阶梯（D2）', () => {
     expect(store.read('s-disabled')).toMatchObject({ status: 'skipped' })
   })
 
-  it('无 ctx.llm ⇒ skipped（零 LLM，不抛错）', async () => {
+  it('无 ctx.llm ⇒ 仅 L1 降级（F-03：不是 skipped；零 LLM、recall 照跑）', async () => {
     const { store, generate, recallCalls } = makeGenerator({ llm: undefined })
 
     await generate(payload('s-no-llm'))
 
-    expect(recallCalls).toHaveLength(0)
-    expect(store.read('s-no-llm')).toMatchObject({ status: 'skipped' })
+    // 有命中 ⇒ 必须走 L1-only；recall 仍执行（F-03 顺序：只有召回空才零注入）。
+    expect(recallCalls).toHaveLength(1)
+    expect(store.read('s-no-llm')).toMatchObject({ status: 'ready' })
+    const text = store.textFor('s-no-llm')
+    expect(text).toContain('相关记忆（开局注入）')
+    expect(text).toContain('[L1] l1-1')
+    expect(text).not.toContain('记忆摘要')
+    expect(store.readLastInjection()).toMatchObject({ degraded: true })
+  })
+
+  it('无 ctx.llm 且命中仅 L2（无 L1）⇒ skipped（无 L1 可降级）', async () => {
+    const { store, generate, recallCalls } = makeGenerator({ llm: undefined, recallItems: [L2_ITEM] })
+
+    await generate(payload('s-no-llm-no-l1'))
+
+    expect(recallCalls).toHaveLength(1)
+    expect(store.read('s-no-llm-no-l1')).toMatchObject({ status: 'skipped' })
+  })
+
+  it('F-09：resolveRoute 返回 null（有 ctx.llm 但无 provider/model 且 session 无路由）⇒ 仅 L1 降级', async () => {
+    const { llm, calls } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({ llm, route: null })
+
+    await generate(payload('s-no-route'))
+
+    // 有 llm 但无路由 ⇒ 不调 LLM，走仅 L1（与超时/失败同一阶梯）。
+    expect(calls).toHaveLength(0)
+    expect(store.read('s-no-route')).toMatchObject({ status: 'ready' })
+    const text = store.textFor('s-no-route')
+    expect(text).toContain('[L1] l1-1')
+    expect(text).not.toContain('记忆摘要')
   })
 
   it('非真人首条消息（仅 runtime-context）⇒ 不生成、不改状态', async () => {

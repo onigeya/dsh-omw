@@ -284,17 +284,6 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
-    const llm = options.getLlm()
-    if (llm === undefined) {
-      options.store.markSkipped(key)
-      return
-    }
-    const route = options.resolveRoute?.(payload.agent?.session) ?? routeFromSession(payload.agent?.session)
-    if (route === null) {
-      options.logger?.warn('开局注入跳过：无法解析 LLM 路由（无 Config llmProvider/llmModel，session 也无已记录请求目标）')
-      options.store.markSkipped(key)
-      return
-    }
 
     const query = messageText(human).trim().slice(0, OPENSTART_MAX_QUERY_CHARS)
     if (query === '') {
@@ -303,6 +292,8 @@ export function createOpenstartGenerator(
     }
 
     // recall：不重写检索，直接复用 3.1 的内核；embedding 不可用/失败 ⇒ 关键词单路仍可用。
+    // F-03 顺序（AC:937-939 / I/O 矩阵 / D12）：Config 关闭 → skip；否则先 recall，
+    // **只有召回命中为空才零注入**；无 llm/无路由属于「摘要生成失败」，走仅 L1 降级。
     let recalled: RecallCoreResult
     try {
       let queryVector: readonly number[] | null = null
@@ -322,7 +313,7 @@ export function createOpenstartGenerator(
 
     const results = recalled.results
     if (results.length === 0) {
-      // 召回命中为空 ⇒ 零注入（AC:928-930）。
+      // 召回命中为空 ⇒ 零注入（AC:928-930；唯一允许零注入的路径）。
       options.store.markSkipped(key)
       return
     }
@@ -332,6 +323,25 @@ export function createOpenstartGenerator(
     if (!hasL2) {
       // 无 L2 命中 ⇒ 降级仅 L1（AC:924-926）；不调 LLM（预算仍走唯一裁剪点）。
       finalize(key, { ...draft, evidence: [] }, true, startedAt)
+      return
+    }
+
+    // F-03：无 ctx.llm / 无路由（Config 未配且 session 无已记录目标）不是「跳过」，而是
+    // 「摘要生成失败」——直接走仅 L1 降级（不调 LLM、不报错），与超时/失败同一阶梯。
+    const llm = options.getLlm()
+    const route = llm === undefined
+      ? null
+      : (options.resolveRoute?.(payload.agent?.session) ?? routeFromSession(payload.agent?.session))
+    if (llm === undefined || route === null) {
+      if (llm !== undefined) {
+        options.logger?.warn('开局注入摘要降级：无法解析 LLM 路由（无 Config llmProvider/llmModel，session 也无已记录请求目标），仅注入 L1 原文')
+      }
+      if (l1.length === 0) {
+        options.logger?.warn('开局注入跳过：摘要不可用且无 L1 证据可降级')
+        options.store.markSkipped(key)
+        return
+      }
+      finalize(key, { ...buildInjectionDraft({ results }), evidence: [] }, true, startedAt)
       return
     }
 
