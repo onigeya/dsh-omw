@@ -37,7 +37,7 @@
 import { stat } from 'node:fs/promises'
 import type * as lbug from '@ladybugdb/core'
 import { ensureAuditTables } from './audit.js'
-import { loadStorageBackend, type StorageBackend } from './backend.js'
+import { loadStorageBackend, runPrepared, runStatement, type StorageBackend, type StorageBackendKind } from './backend.js'
 import { ensureInboxTables, ensureL2InboxTables } from '../inbox/queue.js'
 import { ensureEdgeTables } from './edges.js'
 import { MemoryDbError } from './errors.js'
@@ -315,21 +315,23 @@ async function initializeDatabase(
   const columns = await readTableColumns(connection, MEMORY_TABLE)
   const { metaDim, actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
 
-  await connection.query(createMetaTableStatement())
-  await connection.query(createMemoryTableStatement(dim))
+  // 建库/迁移期的 DDL 也走 runStatement：`await connection.query(...)` 的返回值不释放
+  // 就是一次 buffer pool pin 泄漏（见 backend.ts closeQueryResult）。
+  await runStatement(connection, createMetaTableStatement())
+  await runStatement(connection, createMemoryTableStatement(dim))
   // Story 2.4（U1）：memory.parent_id 的旧库补列。新库由上面的 CREATE 直接带上；
   // 旧库的 CREATE ... IF NOT EXISTS 是 no-op（实测不会加列），故用幂等 ALTER 补。
   // `columns` 是建表**之前**读的列清单：新库为 null（跳过），旧库缺列才 ALTER。
   // 只读实例走 initializeReadOnlyDatabase，不经过本函数——绝不执行任何写语句（AC2）。
   if (columns !== null && !columns.has(PARENT_ID_COLUMN)) {
-    await connection.query(alterMemoryAddParentIdStatement())
+    await runStatement(connection, alterMemoryAddParentIdStatement())
   }
   // Story 2.5（U16）：memory.support 的旧库补列，与 parent_id 同一模式（先判列再 ALTER，
   // 不做 IF NOT EXISTS），同样由 write 路径独有：只读实例不经本函数。
   if (columns !== null && !columns.has(SUPPORT_COLUMN)) {
-    await connection.query(alterMemoryAddSupportStatement())
+    await runStatement(connection, alterMemoryAddSupportStatement())
   }
-  await connection.query(createL0RawTableStatement())
+  await runStatement(connection, createL0RawTableStatement())
   await ensureAuditTables(connection)
   // Story 2.2：INBOX 队列表与审计表一样在唯一迁移点建（IF NOT EXISTS，幂等）。
   await ensureInboxTables(connection)
@@ -519,6 +521,39 @@ async function closeHandle(handle: RawHandle): Promise<void> {
   await handle.backend.close(handle.database, handle.connection)
 }
 
+/**
+ * 关闭并驱逐某路径的进程内句柄（插件禁用/卸载时的资源回收入口，Story 1.5 / AD-12 的句柄缓存出口）。
+ *
+ * 为什么需要：facade 的 `close()` 只删 `facades` 表——`handles` 里的 Database/Connection 会留到
+ * 进程退出，buffer pool、文件句柄与 wasm worker 侧的结果对象都白占着。本函数把句柄真正关掉
+ * 并从两张表里驱逐，使下一次 apply 重新建连（而不是复用旧句柄）。
+ *
+ * 后端差异（2026-11-14 实测，0.22.3；两后端各自 close→同进程重开→真实读写）：
+ * - **wasm**（Electron 宿主 / `ELECTRON_RUN_AS_NODE` 的生产路径）：close 后同进程重开立即成功，
+ *   3/3 轮 open→close→open 全部通过且计数递增 ⇒ 关闭是安全的，回收后仍可重新 apply；
+ * - **native**（纯 Node 宿主）：close 后同进程重开在 2s 内必失败
+ *   `IO exception: Could not set lock on file ... (Error: 33)`（多次重试不稳定恢复）⇒ 关闭会把
+ *   「禁用→启用」打死。本函数不做后端判断：**是否调用由调用方按 {@link memoryDatabaseBackendKind}
+ *   决定**（index.ts 的 dispose 只在 wasm 下真关）。
+ *
+ * 幂等：句柄不存在时只清 facade，是 no-op；关闭失败由 backend 吞掉（回收路径不该抛）。
+ */
+export async function closeMemoryDatabase(dbPath: string): Promise<void> {
+  const handle = handles.get(dbPath)
+  facades.delete(dbPath)
+  if (handle === undefined) return
+  handles.delete(dbPath)
+  await closeHandle(handle)
+}
+
+/**
+ * 该路径句柄所属后端；无句柄（未打开/已被 {@link closeMemoryDatabase} 驱逐）时按当前运行时判定。
+ * 调用方据此决定「关闭句柄」是否安全——见 {@link closeMemoryDatabase} 的两后端实测差异。
+ */
+export function memoryDatabaseBackendKind(dbPath: string): StorageBackendKind {
+  return handles.get(dbPath)?.backend.kind ?? loadStorageBackend().kind
+}
+
 async function pathExists(path: string): Promise<boolean> {
   try {
     await stat(path)
@@ -591,13 +626,13 @@ function isMissingCatalogEntry(error: unknown): boolean {
 async function ensureIndexes(connection: MemoryConnection): Promise<void> {
   const rows = await queryAll(connection, 'CALL show_indexes() RETURN table_name AS table_name, index_name AS index_name, index_type AS index_type')
   const names = new Set(rows.map((row) => String(row.index_name)))
-  if (!names.has(VECTOR_INDEX_NAME)) await connection.query(createVectorIndexStatement())
-  if (!names.has(FTS_INDEX_NAME)) await connection.query(createFtsIndexStatement())
+  if (!names.has(VECTOR_INDEX_NAME)) await runStatement(connection, createVectorIndexStatement())
+  if (!names.has(FTS_INDEX_NAME)) await runStatement(connection, createFtsIndexStatement())
 }
 
 async function mergeMetaValue(connection: MemoryConnection, key: string, value: string): Promise<void> {
   const statement = await connection.prepare(
     `MERGE (m:${META_TABLE} {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value`,
   )
-  await connection.execute(statement, { key, value })
+  await runPrepared(connection, statement, { key, value })
 }

@@ -15,6 +15,7 @@
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type * as lbug from '@ladybugdb/core'
+import { runStatement } from './backend.js'
 
 /** 每个连接一条串行链，保证同一时刻至多一个显式事务。 */
 const writeChains = new WeakMap<object, Promise<unknown>>()
@@ -81,18 +82,19 @@ export async function runInTransaction<T>(
   const previous = writeChains.get(connection) ?? Promise.resolve()
   const run = previous.then(async () => {
     const flag: OpenTransaction = { active: true }
-    await connection.query('BEGIN TRANSACTION')
+    // 事务控制语句的 QueryResult 同样要释放：不释放就是每次写事务泄漏 3 个结果（pin buffer pool）。
+    await runStatement(connection, 'BEGIN TRANSACTION')
     try {
       const result = await openTransactions.run(
         withOpenTransaction(held, connection, flag),
         work,
       )
-      await connection.query('COMMIT')
+      await runStatement(connection, 'COMMIT')
       flag.active = false
       return result
     } catch (error) {
       try {
-        await connection.query('ROLLBACK')
+        await runStatement(connection, 'ROLLBACK')
       } catch {
         // 见文件头第 1 条：语句出错时引擎已自动回滚，这里的 ROLLBACK 必然报
         // 「无活动事务」。原始错误才是要上抛的那个。

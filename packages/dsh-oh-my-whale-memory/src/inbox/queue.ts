@@ -20,6 +20,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
+import { runStatement } from '../db/backend.js'
 import { collectRows } from '../db/rows.js'
 import { L1_INBOX_TABLE, L2_INBOX_TABLE, createInboxTableStatement } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
@@ -399,7 +400,8 @@ export function createInboxQueue(table: string): InboxQueue {
     table,
     async ensureTables(connection) {
       await runInTransaction(connection, async () => {
-        await connection.query(createInboxTableStatement(table))
+        // 结果必须释放，否则 pin 满 buffer pool（见 ../db/backend.ts closeQueryResult）。
+        await runStatement(connection, createInboxTableStatement(table))
       })
     },
     writeItem,

@@ -23,6 +23,7 @@
  */
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
+import { runPrepared, runStatement } from './backend.js'
 import { MemoryDbError } from './errors.js'
 import { uuid5 } from './id.js'
 import { collectRows, queryAll } from './rows.js'
@@ -280,8 +281,9 @@ export function buildInvalidatedByKey(sourceId: string, targetId: string): strin
  */
 export async function ensureAuditTables(connection: lbug.Connection): Promise<void> {
   await runInTransaction(connection, async () => {
-    await connection.query(createGenerationLogTableStatement())
-    await connection.query(createKeyedDecisionTableStatement())
+    // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+    await runStatement(connection, createGenerationLogTableStatement())
+    await runStatement(connection, createKeyedDecisionTableStatement())
   })
 }
 
@@ -295,7 +297,8 @@ export async function insertGenerationLog(
 ): Promise<string> {
   const id = entry.id ?? randomUUID()
   const statement = await connection.prepare(INSERT_GENERATION_LOG)
-  await connection.execute(statement, {
+  // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+  await runPrepared(connection, statement, {
     id,
     recorded_at: entry.recordedAt,
     actor: entry.actor,
@@ -326,7 +329,8 @@ export async function insertKeyedDecision(
   entry: KeyedDecisionEntry,
 ): Promise<string> {
   const statement = await connection.prepare(MERGE_KEYED_DECISION)
-  await connection.execute(statement, {
+  // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+  await runPrepared(connection, statement, {
     judge_key: entry.judgeKey,
     new_id: entry.newId,
     old_id: entry.oldId,
