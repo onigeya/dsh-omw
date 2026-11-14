@@ -359,9 +359,11 @@ function mergeTraversalRows(
   }
 }
 
-/** 最终排序（spec D7）：hops 升序 → id 升序（同 hops 的取舍已在归并阶段完成）。 */
+/** 最终排序（AC:880「按跳数升序」为主键；同跳内有效先于失效，再按 id 升序保证确定性）。 */
 function compareTraversal(a: RelatedTraversalItem, b: RelatedTraversalItem): number {
   if (a.hops !== b.hops) return a.hops - b.hops
+  // AC:888 的「补入」语义：同一跳数下有效邻居排在失效邻居之前。
+  if (a.invalid !== b.invalid) return a.invalid ? 1 : -1
   if (a.id === b.id) return 0
   return a.id < b.id ? -1 : 1
 }
@@ -393,10 +395,13 @@ export async function traverseRelated(
   const valid = all.filter((item) => !item.invalid).sort(compareTraversal)
   const invalid = all.filter((item) => item.invalid).sort(compareTraversal)
   const validCount = Math.min(valid.length, RELATED_MAX_RESULTS)
+  // AC:888 的分组只决定 **20 条入选**（有效优先、不足补失效）；展示顺序仍按 AC:880
+  // 「跳数升序」——把失效组直接追加在末尾会让 2 跳的有效邻居排到 1 跳的失效邻居前面，
+  // 违反 AC:880。故入选后统一按 compareTraversal 重排（同跳有效在前、再 id 升序）。
   const results = [
     ...valid.slice(0, RELATED_MAX_RESULTS),
     ...invalid.slice(0, RELATED_MAX_RESULTS - validCount),
-  ]
+  ].sort(compareTraversal)
 
   const startFound = all.length > 0
     ? true

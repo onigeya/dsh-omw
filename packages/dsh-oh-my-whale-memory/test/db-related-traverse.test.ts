@@ -12,7 +12,13 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { writeEvidenceEdges, writeRelatedEdges, traverseRelated } from '../src/db/edges'
+import {
+  RelatedTraversalTimeoutError,
+  RELATED_MAX_RESULTS,
+  traverseRelated,
+  writeEvidenceEdges,
+  writeRelatedEdges,
+} from '../src/db/edges'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -29,12 +35,26 @@ async function seedL0(id: string, rawText: string | null): Promise<void> {
   await exec(`CREATE (l:l0_raw {id: '${id}', raw_text: ${rawText === null ? 'NULL' : `'${rawText}'`}, recorded_at: '${T0}', actor: 'test'})`)
 }
 
-async function seedMemory(id: string, layer: string, invalidAt: string | null = null): Promise<void> {
+async function seedMemory(
+  id: string,
+  layer: string,
+  invalidAt: string | null = null,
+  expiredAt: string | null = null,
+): Promise<void> {
   await exec([
     `CREATE (m:memory {id: '${id}', layer: '${layer}', kind: '', priority: 0, text: '${id} 的内容',`,
     `  valid_at: '${T0}', recorded_at: '${T0}',`,
-    `  invalid_at: ${invalidAt === null ? 'NULL' : `'${invalidAt}'`}, expired_at: NULL})`,
+    `  invalid_at: ${invalidAt === null ? 'NULL' : `'${invalidAt}'`},`,
+    `  expired_at: ${expiredAt === null ? 'NULL' : `'${expiredAt}'`}})`,
   ].join(' '))
+}
+
+/** 批量写 RELATED 边（`from` → 每个 `to`，reason 统一前缀）。 */
+async function relate(from: string, to: readonly string[], reasonPrefix: string): Promise<void> {
+  await writeRelatedEdges(
+    store.connection,
+    to.map((target) => ({ fromId: from, toId: target, reason: `${reasonPrefix}-${target}` })),
+  )
 }
 
 beforeAll(async () => {
@@ -59,6 +79,48 @@ beforeAll(async () => {
     { fromId: 'A', toId: 'D', reason: 'rel-a-d' },
     { fromId: 'D', toId: 'C', reason: 'rel-d-c' },
   ])
+
+  // ---- B2 夹具（各场景独立连通分量，互不干扰） ----
+  // ① 失效中间节点可穿过：i1 → i2(失效) → i3。
+  await seedMemory('i1', 'L1')
+  await seedMemory('i2', 'L1', '2026-03-01T00:00:00.000Z')
+  await seedMemory('i3', 'L1')
+  await relate('i1', ['i2'], 'rel-i1')
+  await relate('i2', ['i3'], 'rel-i2')
+
+  // ② 有效节点但唯一路径经失效中间节点：q0 → qm(失效) → qt。
+  await seedMemory('q0', 'L1')
+  await seedMemory('qm', 'L1', null, '2026-03-02T00:00:00.000Z')
+  await seedMemory('qt', 'L2')
+  await relate('q0', ['qm'], 'rel-q0')
+  await relate('qm', ['qt'], 'rel-qm')
+
+  // ③ 有效优先 / 不足补失效：p0 有 2 个有效 + 3 个失效邻居。
+  await seedMemory('p0', 'L1')
+  await seedMemory('pv1', 'L1')
+  await seedMemory('pv2', 'L1')
+  await seedMemory('pi1', 'L1', '2026-03-03T00:00:00.000Z')
+  await seedMemory('pi2', 'L1', null, '2026-03-04T00:00:00.000Z')
+  await seedMemory('pi3', 'L1', '2026-03-05T00:00:00.000Z')
+  await relate('p0', ['pv1', 'pv2', 'pi1', 'pi2', 'pi3'], 'rel-p0')
+
+  // ④ 结果上限：c0 有 21 个有效 + 3 个失效邻居（有效已超 20 ⇒ 失效不补位）。
+  await seedMemory('c0', 'L1')
+  const capValid = Array.from({ length: 21 }, (_, index) => `cv${String(index + 1).padStart(2, '0')}`)
+  for (const id of capValid) await seedMemory(id, 'L1')
+  for (const id of ['ci1', 'ci2', 'ci3']) await seedMemory(id, 'L1', '2026-03-06T00:00:00.000Z')
+  await relate('c0', [...capValid, 'ci1', 'ci2', 'ci3'], 'rel-c0')
+
+  // ⑤ 全部邻居无全有效路径：e0 → ea(失效) / eb(过期)。
+  await seedMemory('e0', 'L1')
+  await seedMemory('ea', 'L1', '2026-03-07T00:00:00.000Z')
+  await seedMemory('eb', 'L1', null, '2026-03-08T00:00:00.000Z')
+  await relate('e0', ['ea', 'eb'], 'rel-e0')
+
+  // ⑥ 起点自身失效：s0(失效) → s1。
+  await seedMemory('s0', 'L1', '2026-03-09T00:00:00.000Z')
+  await seedMemory('s1', 'L1')
+  await relate('s0', ['s1'], 'rel-s0')
 })
 
 afterAll(async () => {
@@ -107,5 +169,87 @@ describe('traverseRelated：无向 BFS 与结果面约束（AC:872-880）', () =
     expect((await traverseRelated(store.connection, { id: 'A', depth: 99 })).depth).toBe(3)
     expect((await traverseRelated(store.connection, { id: 'A', depth: 0 })).depth).toBe(1)
     expect((await traverseRelated(store.connection, { id: 'A' })).depth).toBe(2)
+  })
+})
+
+describe('失效节点分组（AC:886/888/889 / spec D3/D4）', () => {
+  it('i1→i2(失效)→i3：失效中间节点不被整条剔除；i2 标 invalid、i3 的 pathValid=false', async () => {
+    const result = await traverseRelated(store.connection, { id: 'i1', depth: 2 })
+
+    // 关键反例：路径级有效性过滤（eii 的 all(...) WHERE 形态）会把 i3 一起剔掉；这里两条都在。
+    expect(result.results.map((item) => item.id)).toEqual(['i2', 'i3'])
+    const byId = new Map(result.results.map((item) => [item.id, item]))
+    expect(byId.get('i2')).toMatchObject({
+      hops: 1,
+      invalid: true,
+      invalidAt: '2026-03-01T00:00:00.000Z',
+      pathValid: false,
+    })
+    expect(byId.get('i3')).toMatchObject({ hops: 2, invalid: false, pathValid: false })
+  })
+
+  it('有效优先、不足补失效：2 有效 + 3 失效 ⇒ 有效在前，失效补入并带标记（AC:888）', async () => {
+    const result = await traverseRelated(store.connection, { id: 'p0', depth: 1 })
+
+    expect(result.total).toBe(5)
+    expect(result.results).toHaveLength(5)
+    expect(result.results.slice(0, 2).map((item) => item.id)).toEqual(['pv1', 'pv2'])
+    expect(result.results.slice(0, 2).every((item) => !item.invalid)).toBe(true)
+    expect(result.results.slice(2).map((item) => item.id).sort()).toEqual(['pi1', 'pi2', 'pi3'])
+    expect(result.results.slice(2).every((item) => item.invalid)).toBe(true)
+  })
+
+  it('有效命中 ≥20 ⇒ 失效不补位（21 有效 + 3 失效 → 20 条全有效）', async () => {
+    const result = await traverseRelated(store.connection, { id: 'c0', depth: 1 })
+
+    expect(result.total).toBe(24)
+    expect(result.results).toHaveLength(RELATED_MAX_RESULTS)
+    expect(result.results.every((item) => !item.invalid)).toBe(true)
+  })
+
+  it('全部邻居无全有效路径 ⇒ pathValid 全 false（B3 据此返回 hint:evidence expired，AC:889）', async () => {
+    const result = await traverseRelated(store.connection, { id: 'e0', depth: 1 })
+
+    expect(result.total).toBe(2)
+    expect(result.results.every((item) => item.invalid)).toBe(true)
+    expect(result.results.every((item) => !item.pathValid)).toBe(true)
+  })
+
+  it('有效节点但唯一路径经失效中间节点 ⇒ invalid=false 且 pathValid=false（D4 判定所需）', async () => {
+    const result = await traverseRelated(store.connection, { id: 'q0', depth: 2 })
+
+    const qt = result.results.find((item) => item.id === 'qt')
+    expect(qt).toMatchObject({ hops: 2, invalid: false, pathValid: false })
+  })
+})
+
+describe('起点语义（spec D5）', () => {
+  it('起点自身失效 ⇒ 照常遍历、不拦截（它是锚点不是候选；hint 由 B3 渲染）', async () => {
+    const result = await traverseRelated(store.connection, { id: 's0', depth: 1 })
+
+    expect(result).toMatchObject({ id: 's0', startFound: true, total: 1 })
+    expect(result.results[0]).toMatchObject({ id: 's1', hops: 1, invalid: false })
+  })
+})
+
+describe('超时与确定性（spec D7/D8）', () => {
+  it('超时 ⇒ RelatedTraversalTimeoutError（不吞成空结果/降级），为 B3 的 depth=1 重试铺路', async () => {
+    // 假连接：prepare 永不 resolve ⇒ 确定性触发预算分支（真库上 1ms 超时会随机器快慢抖动）。
+    const hanging = { prepare: () => new Promise(() => {}) } as unknown as Parameters<typeof traverseRelated>[0]
+    const started = Date.now()
+
+    await expect(traverseRelated(hanging, { id: 'A', timeoutMs: 10 }))
+      .rejects.toBeInstanceOf(RelatedTraversalTimeoutError)
+    // 预算分支生效且不会等满查询（底层查询仍在跑，本断言只钉调用方时延）。
+    expect(Date.now() - started).toBeLessThan(1000)
+  })
+
+  it('确定性：同输入两次遍历的 id/hops/edgeType/invalid/reason 顺序完全一致', async () => {
+    const first = await traverseRelated(store.connection, { id: 'A', depth: 2 })
+    const second = await traverseRelated(store.connection, { id: 'A', depth: 2 })
+
+    const project = (result: Awaited<ReturnType<typeof traverseRelated>>) =>
+      result.results.map((item) => [item.id, item.hops, item.edgeType, item.invalid, item.reason])
+    expect(project(second)).toEqual(project(first))
   })
 })
