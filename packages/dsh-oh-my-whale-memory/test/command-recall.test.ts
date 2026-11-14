@@ -31,7 +31,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       unembedded: 0,
       readonly: false,
     }),
-    recallMemories: async () => ({ results: [], degraded: false, hint: '' }),
+    recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '' }),
     ...overrides,
   }
 }
@@ -72,6 +72,7 @@ describe('parseMemoryCommand（recall 分支）', () => {
 describe('handler：recall 的参数与渲染', () => {
   it('dep 收到 { query, limit: 5 }；命中按 RRF 顺序渲染 id + layer + 摘要', async () => {
     const recallMemories = vi.fn(async () => ({
+      total: 7,
       results: [
         { ...ENTRY, id: 'id-2', layer: 'L1', text: '第二条' },
         ENTRY,
@@ -85,16 +86,19 @@ describe('handler：recall 的参数与渲染', () => {
 
     expect(recallMemories).toHaveBeenCalledExactlyOnceWith({ query: 'RRF', limit: MEMORY_RECALL_DEFAULT_LIMIT })
     expect(result.kind).toBe('success')
+    // F-07：首行报**截断前** total（7），并显示实际渲染条数（2）——不再把 5/2 条当总数。
     expect(result.text).toBe([
-      '记忆召回（共 2 条，按 RRF 排序）：',
+      '记忆召回（共 7 条，显示 2 条，按 RRF 排序）：',
       '- id-2 [L1] 第二条',
       '- id-rrf [L2] RRF 融合只在应用层做',
+      '混合检索',
     ].join('\n'))
     expect(result.text).not.toContain('降级检索')
   })
 
   it('摘要按 60 code point 截断加 …', async () => {
     const recallMemories = vi.fn(async () => ({
+      total: 1,
       results: [{ ...ENTRY, text: 'z'.repeat(61) }],
       degraded: false,
       hint: '',
@@ -102,26 +106,27 @@ describe('handler：recall 的参数与渲染', () => {
     const definition = createMemoryCommandDefinition(makeDeps({ recallMemories }))
     const result = await definition.handler({ rawInput: ' recall zzz' })
     expect(result.text).toBe([
-      '记忆召回（共 1 条，按 RRF 排序）：',
+      '记忆召回（共 1 条，显示 1 条，按 RRF 排序）：',
       `- id-rrf [L2] ${'z'.repeat(60)}…`,
     ].join('\n'))
   })
 
-  it('降级检索：末行追加 degraded 标注', async () => {
+  it('降级检索：hint 由内核承载并原样展示（不再各拼文案）', async () => {
     const recallMemories = vi.fn(async () => ({
+      total: 1,
       results: [ENTRY],
       degraded: true,
-      hint: '降级检索',
+      hint: '降级检索：embedding 不可用，本次仅走关键词单路（语义向量路未参与）。',
     }))
     const definition = createMemoryCommandDefinition(makeDeps({ recallMemories }))
     const result = await definition.handler({ rawInput: ' recall RRF' })
     expect(result.kind).toBe('success')
-    expect(result.text).toContain('（降级检索：embedding 不可用，仅关键词单路）')
+    expect(result.text).toContain('降级检索：embedding 不可用')
   })
 
   it("无命中 → success '无匹配记忆。'（矩阵行「命令命中为空」）", async () => {
     const definition = createMemoryCommandDefinition(makeDeps({
-      recallMemories: async () => ({ results: [], degraded: false, hint: '无匹配记忆。' }),
+      recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '无匹配记忆。' }),
     }))
     const result = await definition.handler({ rawInput: ' recall 量子' })
     expect(result).toEqual({ kind: 'success', text: '无匹配记忆。' })

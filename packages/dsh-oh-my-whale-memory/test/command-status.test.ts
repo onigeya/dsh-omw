@@ -27,7 +27,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
     listMemories: async () => [],
     getMemoryById: async () => null,
     getStatus: async () => STATUS_BASE,
-    recallMemories: async () => ({ results: [], degraded: false, hint: '' }),
+    recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '' }),
     ...overrides,
   }
 }

@@ -210,16 +210,14 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           ]
         }
         if (result.total === 0 || result.results.length === 0) {
-          const suffix = result.degraded === true ? '（降级检索：embedding 不可用，仅关键词单路）' : ''
-          return [{ type: 'text', text: `无匹配记忆。${suffix}` }]
+          // 降级/无命中的措辞只由内核 hint 承载（F-07：两个渲染面不再各拼一份文案）。
+          return [{ type: 'text', text: result.hint }]
         }
         const lines = [
-          `记忆召回（共 ${result.results.length} 条，按 RRF 排序）：`,
+          `记忆召回（共 ${result.total} 条，显示 ${result.results.length} 条，按 RRF 排序）：`,
           ...result.results.map((item) => `- ${item.id} [${item.layer}] ${summarizeMemoryText(item.text)}`),
         ]
-        if (result.degraded === true) {
-          lines.push('（降级检索：embedding 不可用，仅关键词单路）')
-        }
+        if (result.hint !== '') lines.push(result.hint)
         return [{ type: 'text', text: lines.join('\n') }]
       },
     },

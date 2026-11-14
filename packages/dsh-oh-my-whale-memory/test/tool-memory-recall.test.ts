@@ -124,12 +124,16 @@ describe('memory_recall 工具形态', () => {
       query: 'q',
       total: 1,
       results: [HIT],
-      hint: 'h',
+      hint: '降级检索：embedding 不可用，本次仅走关键词单路（语义向量路未参与）。',
       degraded: true,
     })
     expect(degradedText[0]?.text).toContain('降级检索')
 
-    const emptyText = tool.output.render({}, { query: 'q', total: 0, results: [], hint: 'h' })
+    // F-07：首行报截断前 total；空结果直接展示内核 hint（不再各拼文案）。
+    const truncatedText = tool.output.render({}, { query: 'q', total: 7, results: [HIT], hint: '' })
+    expect(truncatedText[0]?.text).toContain('共 7 条，显示 1 条')
+
+    const emptyText = tool.output.render({}, { query: 'q', total: 0, results: [], hint: '无匹配记忆。' })
     expect(emptyText[0]?.text).toContain('无匹配记忆')
 
     const failedText = tool.output.render(

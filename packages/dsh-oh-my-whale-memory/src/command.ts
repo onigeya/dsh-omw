@@ -154,8 +154,9 @@ export interface MemoryCommandRecallEntry {
   readonly evidence?: readonly string[]
 }
 
-/** 召回结果（与 memory_recall 工具成功值同形：results + degraded + hint）。 */
+/** 召回结果（与 memory_recall 工具成功值同形：results + degraded + hint；total = limit 截断前命中数）。 */
 export interface MemoryCommandRecallResult {
+  readonly total: number
   readonly results: readonly MemoryCommandRecallEntry[]
   readonly degraded: boolean
   readonly hint: string
@@ -437,22 +438,18 @@ function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: str
 
 /**
  * 召回渲染（Story 3.1）：与 memory_recall 工具的 presenter 同形摘要——
- * 首行 `记忆召回（共 N 条，按 RRF 排序）：`，其后每行 `- <id> [<layer>] <text摘要>`；
- * 降级时末行追加 `（降级检索：embedding 不可用，仅关键词单路）`。
- * 无命中是**正常成功值**（`无匹配记忆。`），不是错误；无命中但降级时仍带降级标注
- * （与工具 presenter 的措辞逐字一致，降级绝不静默）。
+ * 首行 `记忆召回（共 <total> 条，显示 <N> 条，按 RRF 排序）：`（**total 是 limit 截断前**
+ * 的融合命中数，D6：用户据此看到「还有多少没显示」），其后每行 `- <id> [<layer>] <text摘要>`；
+ * 末行展示内核 `hint`（降级/无命中的说明**只有 hint 一个来源**，两个渲染面不再各拼文案）。
+ * 无命中是**正常成功值**，直接返回 hint（`无匹配记忆。` / 降级版），不是错误。
  */
 function renderMemoryRecall(result: MemoryCommandRecallResult): string {
-  if (result.results.length === 0) {
-    return result.degraded ? '无匹配记忆。（降级检索：embedding 不可用，仅关键词单路）' : '无匹配记忆。'
-  }
+  if (result.results.length === 0) return result.hint
   const lines = [
-    `记忆召回（共 ${result.results.length} 条，按 RRF 排序）：`,
+    `记忆召回（共 ${result.total} 条，显示 ${result.results.length} 条，按 RRF 排序）：`,
     ...result.results.map((entry) => `- ${entry.id} [${entry.layer}] ${summarizeMemoryText(entry.text)}`),
   ]
-  if (result.degraded) {
-    lines.push('（降级检索：embedding 不可用，仅关键词单路）')
-  }
+  if (result.hint !== '') lines.push(result.hint)
   return lines.join('\n')
 }
 

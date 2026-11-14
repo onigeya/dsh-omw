@@ -385,7 +385,8 @@ export async function apply(
   }): Promise<MemoryCommandRecallResult> => {
     const queryVector = await recallStore.embedQuery(input.query)
     const core = await recallStore.recall({ query: input.query, queryVector, limit: input.limit })
-    return { results: core.results, degraded: core.degraded, hint: core.hint }
+    // F-07：total（截断前命中数）必须透传到命令面，否则「共 N 条」只会报显示条数。
+    return { total: core.total, results: core.results, degraded: core.degraded, hint: core.hint }
   }
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
