@@ -169,6 +169,16 @@ describe('纯函数：常量 / 夹紧 / 转义', () => {
   })
 })
 
+describe('runRecallCore：F-09 取消信号', () => {
+  it('已取消的信号在发语句前就中止（reject，不返回部分结果）', async () => {
+    const controller = new AbortController()
+    controller.abort()
+    await expect(
+      recall({ query: 'alpha', queryVector: A, signal: controller.signal }),
+    ).rejects.toThrow(/abort/i)
+  })
+})
+
 describe('runRecallCore：双路融合与层权重', () => {
   it('query=alpha 双路命中：返回 {total>0, results, degraded:false, hint}，字段齐全', async () => {
     const result = await recall({ query: 'alpha', queryVector: A })

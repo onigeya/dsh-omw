@@ -128,6 +128,12 @@ export interface RecallCoreInput {
   readonly layer?: string | null
   /** 当前时刻（缺省 `new Date().toISOString()`；测试注入）。 */
   readonly now?: string
+  /**
+   * 调用方的取消信号（F-09：宿主 `ToolExecutionInput.signal` 透传）。
+   * LadybugDB 0.22.3 无查询取消 API，故这里只在**每条语句前后**检查：已取消则不再发下一条、
+   * 原样抛出取消原因（由工具面收敛为失败信封），绝不让中断后的召回继续跑完整流程。
+   */
+  readonly signal?: AbortSignal
 }
 
 export interface RecallResultItem {
@@ -264,6 +270,8 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   let vectorRows: Record<string, unknown>[] = []
   let vectorError: string | undefined
   if (hasQueryVector) {
+    // F-09：发语句前先看取消信号；catch 里若已取消则原样抛（不当作「向量路异常降级」）。
+    input.signal?.throwIfAborted()
     try {
       vectorRows = await queryRows(input.connection, VECTOR_PATH_STATEMENT, {
         q: [...input.queryVector!],
@@ -272,6 +280,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
         now,
       })
     } catch (error) {
+      if (input.signal?.aborted) throw error
       vectorError = errorMessage(error)
     }
   }
@@ -281,6 +290,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   let keywordRows: Record<string, unknown>[] = []
   let keywordError: unknown
   if (query !== '') {
+    input.signal?.throwIfAborted()
     try {
       keywordRows = await queryRows(input.connection, KEYWORD_PATH_STATEMENT, {
         q: query,
@@ -290,10 +300,12 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
         now,
       })
     } catch (error) {
+      if (input.signal?.aborted) throw error
       keywordError = error
     }
   }
   // 两路都失败 ⇒ 没有任何可用结果，原样抛（工具面收敛成 failed 信封，不静默返回空）。
+  input.signal?.throwIfAborted()
   if (vectorError !== undefined && keywordError !== undefined) throw keywordError
   addRankedRows(candidates, keywordRows, rrfK)
 

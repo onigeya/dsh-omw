@@ -298,6 +298,8 @@ export async function apply(
     readonly queryVector: readonly number[] | null
     readonly limit: number
     readonly layer?: string
+    /** F-09：宿主取消信号，透传进内核在每条语句边界检查。 */
+    readonly signal?: AbortSignal
   }): Promise<RecallCoreResult> => {
     const database = readConnection()
     return runRecallCore({
@@ -311,6 +313,7 @@ export async function apply(
       priorityWeight: resolved.priorityWeight,
       limit: input.limit,
       layer: input.layer ?? null,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
     })
   }
   /**
@@ -335,7 +338,7 @@ export async function apply(
     get embeddingEnabled() {
       return db !== undefined && resolved.embeddingMode === 'enabled'
     },
-    async embedQuery(query) {
+    async embedQuery(query, signal) {
       const database = db
       if (!database) return null
       // F-02 / AD-14：查询向量与节点向量必须同一模型。写者模式开库时会把库内 pin 改写成本次
@@ -351,10 +354,13 @@ export async function apply(
       }
       const client = getRecallEmbeddingClient(database.dim)
       if (!client) return null
+      // F-09：宿主取消信号与本地 4s 超时任一触发即中止 embed（any 取先到者）。
+      const timeout = AbortSignal.timeout(RECALL_EMBED_TIMEOUT_MS)
+      const combinedSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
       const result = await client.embed(
         configuredModel ?? database.modelId,
         [query],
-        AbortSignal.timeout(RECALL_EMBED_TIMEOUT_MS),
+        combinedSignal,
       )
       if (!result.ok) {
         // 降级必须可见（FR-11）：日志可见 + 结果标 degraded。

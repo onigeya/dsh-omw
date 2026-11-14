@@ -265,6 +265,37 @@ describe('memory_recall execute（假 store）', () => {
     expect((await tool.execute({ query: 'q' }, s2)).total).toBe(1)
   })
 
+  it('F-09：exec.signal 透传到 embedQuery 与内核', async () => {
+    const embedQuery = vi.fn(async () => [1, 0, 0, 0])
+    const recall = vi.fn(async () => ({ total: 1, results: [HIT], degraded: false, hint: '混合检索' }))
+    const store = makeStore({ embedQuery, recall })
+    const tool = makeTool(store, createRecallTurnQuota(10))
+    const controller = new AbortController()
+    const value = await tool.execute(
+      { query: 'RRF' },
+      { agent: { session: { id: 's-sig' } }, signal: controller.signal },
+    )
+    expect(value.total).toBe(1)
+    expect(embedQuery).toHaveBeenCalledExactlyOnceWith('RRF', controller.signal)
+    expect(recall.mock.calls[0]?.[0].signal).toBe(controller.signal)
+  })
+
+  it('F-09：已取消的 signal 让内核抛错 ⇒ 失败信封（不抛、不当成功）', async () => {
+    const store = makeStore({
+      recall: async (input) => {
+        input.signal?.throwIfAborted()
+        return { total: 0, results: [], degraded: false, hint: '' }
+      },
+    })
+    const tool = makeTool(store, createRecallTurnQuota(10))
+    const value = await tool.execute(
+      { query: 'RRF' },
+      { agent: { session: { id: 's-abort' } }, signal: AbortSignal.abort() },
+    )
+    expect(value.action).toBe('failed')
+    expect(value.error?.code).toBe('db_read_failed')
+  })
+
   it('库未就绪：getRecallStore → undefined ⇒ db_unavailable（不抛异常）', async () => {
     const tool = makeTool(undefined)
     const value = await tool.execute({ query: 'q' })
