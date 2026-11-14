@@ -18,9 +18,9 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
-import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
-import { inboxSessionKey } from '../inbox/idle-gate.js'
+import { MemoryDbError } from '../db/errors.js'
 import { clampRecallLimit, type RecallCoreResult, type RecallResultItem } from '../recall/core.js'
+import { failedEnvelope, quotaOwnerOf, type ToolFailure } from './recall-shared.js'
 import type { RecallQuota } from './recall-quota.js'
 import { summarizeMemoryText } from '../summarize.js'
 
@@ -86,14 +86,8 @@ export interface MemoryRecallSucceeded {
   readonly degraded?: boolean
 }
 
-export interface MemoryRecallFailed {
-  action: 'failed'
-  error: {
-    code: MemoryDbErrorCode
-    message: string
-    retryable: boolean
-  }
-}
+/** 失败分支的 canonical 形态与 memory_related 同源（见 tools/recall-shared.ts）。 */
+export type MemoryRecallFailed = ToolFailure
 
 export type MemoryRecallValue = MemoryRecallSucceeded | MemoryRecallFailed
 
@@ -171,23 +165,6 @@ const OUTPUT_SCHEMA = {
 } as const satisfies ValueSchemaSpec
 
 /**
- * 配额 owner（spec D7）：`ToolRunContext` 自身无 session 字段，但 `exec.agent.session` 存在
- * （宿主 filesystem.md:316 的同源用法）。经 `inboxSessionKey` 取会话键——与 turn 边界
- * `session/event` 监听器（recall-quota.ts）落到**同一个键**，两边才能对上同一只桶。
- * 缺 session 身份时归 `'unknown'` 桶（保守拒绝）。结构窄化而不引 dsh-agent/dsh-session 类型
- * （本包未依赖它们，与 dsh-tool-fs 的 actor 处理同一形态）。
- */
-function quotaOwnerOf(exec: unknown): string {
-  const session = (exec as { readonly agent?: { readonly session?: unknown } } | null | undefined)?.agent?.session
-  return inboxSessionKey(session)
-}
-
-/** 组装 canonical failed 值（错误码锁回封闭联合，编译期防任意文本外发）。 */
-function failed(code: MemoryDbErrorCode, message: string, retryable = false): MemoryRecallFailed {
-  return { action: 'failed', error: { code, message, retryable } }
-}
-
-/**
  * 建工具定义。
  * @param options.getRecallStore 取当前检索能力——apply 先注册工具再建库，故必须是 getter；
  *                              返回 undefined 表示库未就绪（execute 返回 db_unavailable）。
@@ -228,7 +205,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
       // 0) F-13：空白 query 是**参数错误**，不是「无匹配」——向量路会拿空白文本取向量
       //    并返回任意近邻，且照常吃掉配额。先拒：不耗配额、不检索、不 embed。
       if (args.query.trim() === '') {
-        return failed(
+        return failedEnvelope(
           'invalid_query',
           'query 不能为空白：请给出要检索的内容（空白查询会让向量路返回任意近邻，不是「无匹配」）。',
         )
@@ -237,11 +214,11 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
       //    也避免配额耗尽把根因盖成 quota_exceeded）。
       const store = options.getRecallStore()
       if (!store) {
-        return failed('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未检索')
+        return failedEnvelope('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未检索')
       }
       // 2) 配额消耗（按会话键计数；同轮召回族工具共享，本工具 + 后续 memory_related/expand）。
       if (!options.quota.consume(quotaOwnerOf(exec))) {
-        return failed(
+        return failedEnvelope(
           'quota_exceeded',
           '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；回合边界（turn/start、turn/end）后自动恢复，或改用 /memory recall 手动检索。',
         )
@@ -282,9 +259,9 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
         return succeeded
       } catch (error) {
         if (error instanceof MemoryDbError) {
-          return failed(error.code, error.message, error.retryable)
+          return failedEnvelope(error.code, error.message, error.retryable)
         }
-        return failed('db_read_failed', error instanceof Error ? error.message : String(error))
+        return failedEnvelope('db_read_failed', error instanceof Error ? error.message : String(error))
       }
     },
   })

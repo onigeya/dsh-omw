@@ -162,7 +162,13 @@ describe('traverseRelated：无向 BFS 与结果面约束（AC:872-880）', () =
 
   it('起点不存在：startFound=false 的空结果（AC:882-884：不抛错）', async () => {
     const missing = await traverseRelated(store.connection, { id: 'absent-id', depth: 2 })
-    expect(missing).toMatchObject({ startFound: false, total: 0, results: [] })
+    expect(missing).toMatchObject({
+      startFound: false,
+      total: 0,
+      results: [],
+      // 起点不存在时 start 为零值（B3 据此不渲染「起点已失效」，也不误判成失效起点）。
+      start: { invalid: false, invalidAt: null, expiredAt: null },
+    })
   })
 
   it('depth 夹紧 [1,3]：99 → 3、0 → 1；缺省 2', async () => {
@@ -228,6 +234,7 @@ describe('起点语义（spec D5）', () => {
     const result = await traverseRelated(store.connection, { id: 's0', depth: 1 })
 
     expect(result).toMatchObject({ id: 's0', startFound: true, total: 1 })
+    expect(result.start).toMatchObject({ invalid: true, invalidAt: '2026-03-09T00:00:00.000Z' })
     expect(result.results[0]).toMatchObject({ id: 's1', hops: 1, invalid: false })
   })
 })

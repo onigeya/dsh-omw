@@ -242,14 +242,23 @@ export interface RelatedTraversalItem {
   readonly pathValid: boolean
 }
 
+/** 起点自身的有效性（spec D5 ②：起点失效不拦截遍历，但工具层要能提示「起点已失效」）。 */
+export interface RelatedTraversalStart {
+  readonly invalid: boolean
+  readonly invalidAt: string | null
+  readonly expiredAt: string | null
+}
+
 export interface RelatedTraversalResult {
   readonly id: string
   readonly depth: number
   /** 起点是否在库内（AC:882-884：不存在 → 空结果 + hint，由调用方渲染）。 */
   readonly startFound: boolean
+  /** 起点自身有效性；`startFound:false` 时为零值。 */
+  readonly start: RelatedTraversalStart
   /** 去重归并后、20 条截断**前**的邻居总数（spec D6 的 total 口径）。 */
   readonly total: number
-  /** 已排序：有效邻居优先；不足 20 时用失效邻居补位（AC:888）。 */
+  /** 已排序：按跳数升序；同跳有效优先于失效（AC:880/888）。 */
   readonly results: readonly RelatedTraversalItem[]
 }
 
@@ -276,7 +285,13 @@ function relatedTraversalStatement(edgeType: typeof EVIDENCE | typeof RELATED, d
   ].join('\n')
 }
 
-const MEMORY_EXISTS_STATEMENT = ['MATCH (m:' + MEMORY_TABLE + ' {id: $id})', 'RETURN m.id AS id'].join('\n')
+const START_NODE_STATEMENT = [
+  'MATCH (m:' + MEMORY_TABLE + ' {id: $id})',
+  'RETURN m.invalid_at AS invalid_at, m.expired_at AS expired_at',
+].join('\n')
+
+/** 起点不存在时的零值（工具层据此跳过「起点已失效」提示）。 */
+const START_NOT_FOUND: RelatedTraversalStart = { invalid: false, invalidAt: null, expiredAt: null }
 
 /**
  * 带预算的查询：`Promise.race` 只是**调用方**预算（0.22.3 无查询取消 API），超时后底层查询
@@ -383,13 +398,16 @@ export async function traverseRelated(
 ): Promise<RelatedTraversalResult> {
   const id = input.id
   const depth = clampRelatedDepth(input.depth)
-  const rowsByType = await Promise.all([
+  const [evidenceRows, relatedRows, startRows] = await Promise.all([
     queryRowsWithinBudget(connection, relatedTraversalStatement(EVIDENCE, depth), { id }, input.timeoutMs),
     queryRowsWithinBudget(connection, relatedTraversalStatement(RELATED, depth), { id }, input.timeoutMs),
+    // 起点存在性/有效性：无论有无邻居都读一次（区分「起点不存在」与「起点无邻居」，
+    // AC:882-884 / spec D5）；与两条遍历语句并行，不额外增加调用方等待。
+    queryRowsWithinBudget(connection, START_NODE_STATEMENT, { id }, input.timeoutMs),
   ])
   const merged = new Map<string, RelatedTraversalItem>()
-  mergeTraversalRows(merged, rowsByType[0]!, EVIDENCE)
-  mergeTraversalRows(merged, rowsByType[1]!, RELATED)
+  mergeTraversalRows(merged, evidenceRows, EVIDENCE)
+  mergeTraversalRows(merged, relatedRows, RELATED)
 
   const all = [...merged.values()]
   const valid = all.filter((item) => !item.invalid).sort(compareTraversal)
@@ -403,9 +421,18 @@ export async function traverseRelated(
     ...invalid.slice(0, RELATED_MAX_RESULTS - validCount),
   ].sort(compareTraversal)
 
-  const startFound = all.length > 0
-    ? true
-    : (await queryRowsWithinBudget(connection, MEMORY_EXISTS_STATEMENT, { id }, input.timeoutMs)).length > 0
+  // 起点行（与遍历并行取回）：不存在 ⇒ startFound:false + 零值 start。
+  const startRow = startRows[0]
+  const startFound = startRow !== undefined
+  const startInvalidAt = nullishString(startRow?.invalid_at)
+  const startExpiredAt = nullishString(startRow?.expired_at)
+  const start: RelatedTraversalStart = startFound
+    ? {
+      invalid: startInvalidAt !== null || startExpiredAt !== null,
+      invalidAt: startInvalidAt,
+      expiredAt: startExpiredAt,
+    }
+    : START_NOT_FOUND
 
-  return { id, depth, startFound, total: all.length, results }
+  return { id, depth, startFound, start, total: all.length, results }
 }
