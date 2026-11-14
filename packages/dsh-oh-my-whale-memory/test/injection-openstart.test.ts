@@ -368,6 +368,27 @@ describe('createOpenstartGenerator：观测事件（B4b）', () => {
   })
 })
 
+  it('摘要超长（远超 512 tokens 的等价长度）⇒ 实现不做二次 token 校验，交给预算裁剪（≤1200 字符 + 截断）', async () => {
+    // 实现现状：只通过 LLM 的 `maxTokens=512` 约束输出（引擎侧截断），不在插件侧二次 estimateTokens
+    // 校验；超长 summary 由 B3 预算的单条 1200 字符规则兜底。本用例钉住该现状，防未来语义漂移。
+    const longSummary = 's'.repeat(5000)
+    const { llm, calls } = makeLlm(replyWith(JSON.stringify({ summary: longSummary, evidence_ids: [] })))
+    const { store, generate } = makeGenerator({ llm })
+
+    await generate(payload('s-long-summary'))
+
+    expect(calls[0]?.maxTokens).toBe(512)
+    const text = store.textFor('s-long-summary')
+    expect(text).toContain('记忆摘要（开局注入）：')
+    const last = store.readLastInjection()
+    expect(last?.truncated).toBe(true)
+    expect(last?.chars).toBeLessThanOrEqual(8000)
+    // 摘要行按单条 1200 字符截断（含省略号）。
+    const summaryLine = text.split('\n')[1]!
+    expect(summaryLine.endsWith('…')).toBe(true)
+    expect(summaryLine.length).toBeLessThanOrEqual(1200)
+  })
+
 describe('prompt 与 schema 同文件（§14）', () => {
   it('buildOpenstartMessages：sentinel preamble 在首行、含 schema、query 与候选', () => {
     const messages = buildOpenstartMessages('我偏好 ESM', [L2_ITEM, L1_ITEM])
