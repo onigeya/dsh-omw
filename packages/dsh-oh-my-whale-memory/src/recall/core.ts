@@ -17,9 +17,10 @@
  *
  * 只读：本模块不写库、不触发写路径、不建索引（索引由 database.ts 建库时创建）。
  *
- * 安全（探针 P2）：FTS 查询串**必须内联字面量**——`$q` 参数绑定会静默返回空；
- * 转义反斜杠与单引号后拼进语句，注入尝试被当字面量处理。快照过滤在 Cypher 内
- * 完成（`WITH node, score MATCH (node) WHERE <共享谓词>`，探针 P1）。
+ * 安全（P2 复测 + F-03）：FTS 查询串经 `$q` **参数绑定**送进语句（prepare+execute，
+ * 绝不内联）——2026-11-14 双后端复测证明 0.22.3 上绑定可用（见 ledger-3-1.tsv 的
+ * P2 复测行）；入参仍先经 `sanitizeFtsQuery` 剥离 C0 控制字符并限长 256 code points。
+ * 快照过滤在 Cypher 内完成（`WITH node, score MATCH (node) WHERE <共享谓词>`，探针 P1）。
  */
 import type * as lbug from '@ladybugdb/core'
 import { collectRows } from '../db/rows.js'
@@ -75,11 +76,24 @@ export function clampRecallLimit(limit: number | undefined): number {
 }
 
 /**
- * FTS 查询串的内联转义（探针 P2：必须内联，`''` 双写解析失败）：
- * 反斜杠 → `\\`，单引号 → `\'`。注入尝试（`x\' OR 1=1 --`）被当字面量处理。
+ * FTS 查询串的 code point 上限（F-03）：FTS 引擎按整串分词，超长 query 只会放大
+ * 分词与匹配成本，不会更准。超限截断（不是错误）：召回是软目标。
  */
-export function escapeFtsQuery(query: string): string {
-  return query.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
+export const RECALL_FTS_QUERY_MAX_CODE_POINTS = 256
+
+/**
+ * FTS 查询串净化（F-03）：剥离 C0 控制字符（含 NUL——它们会让 FTS 引擎的查询解析
+ * 出错，叠加向量路异常时会连关键词路一起丢）、连续空白归一为单空格、trim，并按
+ * {@link RECALL_FTS_QUERY_MAX_CODE_POINTS} 截断 code points。
+ *
+ * 净化后的串经 `$q` **参数绑定**送进语句（prepare+execute，绝不内联）——注入片段
+ * 天然被当数据。探针 P2 复测（2026-11-14，@ladybugdb/core 0.22.3，native 与 wasm
+ * 双后端实测，见 ledger-3-1.tsv）：`$q` 绑定在完整语句形态下均可正常命中，缺参抛
+ * `Parameter q not found.`——实现期「绑定静默返回空、必须内联」的结论不可复现。
+ */
+export function sanitizeFtsQuery(query: string): string {
+  const singleLine = query.replace(/[\u0000-\u001F\u007F]/gu, ' ').replace(/\s+/gu, ' ').trim()
+  return Array.from(singleLine).slice(0, RECALL_FTS_QUERY_MAX_CODE_POINTS).join('')
 }
 
 export interface RecallLayerWeights {
@@ -158,22 +172,18 @@ const VECTOR_PATH_STATEMENT = [
   'ORDER BY distance, id ASC',
 ].join('\n')
 
-/** 关键词路（探针 P1）：查询串内联字面量；K/B/TOP 经参数绑定。
+/** 关键词路（探针 P1）：查询串经 `$q` **绑定**（绝不内联，spec Never 条），入参先过
+ * {@link sanitizeFtsQuery}；K/B/TOP 同样经参数绑定。
  * 次级键 `id ASC` 钉住同分并列时的次序（否则 rank 分配不稳定 ⇒ RRF 跨进程漂移）。 */
-function keywordPathStatement(query: string): string {
-  // 内联前把行终止符归一为空格：Cypher 单引号字面量不跨行，多行 query 原样内联会
-  // 直接解析失败（不是命中面问题，是语句级语法错误）。对 BM25 分词，换行与空格等价。
-  const singleLine = query.replace(/\r/g, ' ').replace(/\n/g, ' ')
-  return [
-    `CALL QUERY_FTS_INDEX('${MEMORY_TABLE}', '${FTS_INDEX_NAME}', '${escapeFtsQuery(singleLine)}', K := $k, B := $b, TOP := $top)`,
-    'WITH node, score',
-    'MATCH (node)',
-    'WHERE ' + currentSnapshotPredicate('node'),
-    'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.priority AS priority,',
-    '  node.text AS text, node.recorded_at AS recorded_at, node.source_refs AS source_refs, score',
-    'ORDER BY score DESC, id ASC',
-  ].join('\n')
-}
+const KEYWORD_PATH_STATEMENT = [
+  `CALL QUERY_FTS_INDEX('${MEMORY_TABLE}', '${FTS_INDEX_NAME}', $q, K := $k, B := $b, TOP := $top)`,
+  'WITH node, score',
+  'MATCH (node)',
+  'WHERE ' + currentSnapshotPredicate('node'),
+  'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.priority AS priority,',
+  '  node.text AS text, node.recorded_at AS recorded_at, node.source_refs AS source_refs, score',
+  'ORDER BY score DESC, id ASC',
+].join('\n')
 
 async function queryRows(
   connection: lbug.Connection,
@@ -243,7 +253,9 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   const now = input.now ?? new Date().toISOString()
   const rrfK = input.rrfK
   const topK = Math.max(1, Math.trunc(input.retrievalTopK))
-  const query = input.query.trim()
+  // F-03：关键词路的查询串一律先净化（剥离 C0 控制字符 + 限长 256 code points）再绑定。
+  // 净化只作用于 FTS 面：向量路仍用原始 query（embedding 侧无解析面）。
+  const query = sanitizeFtsQuery(input.query)
   const candidates = new Map<string, RecallCandidate>()
   const hasQueryVector = input.queryVector !== null && input.queryVector.length > 0
 
@@ -265,12 +277,13 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   }
   addRankedRows(candidates, vectorRows, rrfK)
 
-  // ---- 关键词路：FTS 查询串必须内联（P2）；空串不发查询。 ----
+  // ---- 关键词路：FTS 查询串经 $q 绑定（P2 复测：绑定可用，内联弃用）；空串不发查询。 ----
   let keywordRows: Record<string, unknown>[] = []
   let keywordError: unknown
   if (query !== '') {
     try {
-      keywordRows = await queryRows(input.connection, keywordPathStatement(query), {
+      keywordRows = await queryRows(input.connection, KEYWORD_PATH_STATEMENT, {
+        q: query,
         k: BM25_K,
         b: BM25_B,
         top: topK,

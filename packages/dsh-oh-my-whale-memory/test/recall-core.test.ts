@@ -2,9 +2,10 @@
  * 混合检索内核（src/recall/core.ts）真库钉（Story 3.1 / FR-11、FR-12）。
  *
  * 覆盖：双路 RRF 融合排序（只按 rank）、embedding_model_id 与库内 pin 不符排除、
- * 快照四条件排除、degraded 关键词单路、层权重（L2 优先 L1）与 priority=-1 恒置顶、
- * 同分稳定次级键（recorded_at 降序 → id 升序）、layer 过滤 / limit 夹紧 / truncated /
- * evidence 标注、FTS 查询串内联转义（注入被当字面量）。
+ * 快照四条件排除、degraded 关键词单路（含向量路异常降级，F-01）、层权重（L2 优先 L1）
+ * 与 priority=-1 恒置顶、同分稳定次级键（recorded_at 降序 → id 升序）、layer 过滤 /
+ * limit 夹紧 / truncated / evidence 标注、FTS 查询串净化（F-03：控制字符剥离 + 限长 +
+ * `$q` 绑定下注入被当数据）。
  *
  * 开库次数：本文件 1 次（LadybugDB 每进程约 15 个实例封顶）。
  */
@@ -19,12 +20,13 @@ import {
   BM25_B,
   BM25_K,
   RECALL_DEFAULT_LIMIT,
+  RECALL_FTS_QUERY_MAX_CODE_POINTS,
   RECALL_MAX_LIMIT,
   RECALL_MIN_LIMIT,
   RECALL_TEXT_TOKEN_BUDGET,
   clampRecallLimit,
-  escapeFtsQuery,
   runRecallCore,
+  sanitizeFtsQuery,
   type RecallCoreInput,
   type RecallCoreResult,
 } from '../src/recall/core'
@@ -153,10 +155,17 @@ describe('纯函数：常量 / 夹紧 / 转义', () => {
     expect(BM25_B).toBe(0.75)
   })
 
-  it('FTS 查询串转义：反斜杠与单引号（先反斜杠后引号）', () => {
-    expect(escapeFtsQuery("a'b")).toBe("a\\'b")
-    expect(escapeFtsQuery('a\\b')).toBe('a\\\\b')
-    expect(escapeFtsQuery("x\\' OR 1=1 --")).toBe("x\\\\\\' OR 1=1 --")
+  it('FTS 查询串净化（F-03）：剥离 C0 控制字符、空白归一、限长 256 code points', () => {
+    // NUL / 控制字符会破坏内联字面量的语句级解析 ⇒ 归一成空格（对 BM25 分词等价）。
+    expect(sanitizeFtsQuery('alpha\u0000beta')).toBe('alpha beta')
+    expect(sanitizeFtsQuery('alpha\u0001\u001F beta\u007F')).toBe('alpha beta')
+    // 空白归一 + trim：行终止符不再需要单独处理。
+    expect(sanitizeFtsQuery('  alpha\n\tbeta\r\n')).toBe('alpha beta')
+    // 长度上限按 code points 计（不是 UTF-16 code units）：CJK/emoji 不会被切成半个字符。
+    expect(RECALL_FTS_QUERY_MAX_CODE_POINTS).toBe(256)
+    expect(Array.from(sanitizeFtsQuery('记'.repeat(1000)))).toHaveLength(256)
+    expect(Array.from(sanitizeFtsQuery('😀'.repeat(1000)))).toHaveLength(256)
+    expect(sanitizeFtsQuery('')).toBe('')
   })
 })
 
@@ -318,10 +327,10 @@ describe('runRecallCore：稳定次级键与标注', () => {
     expect(estimateTokens(body)).toBeLessThanOrEqual(RECALL_TEXT_TOKEN_BUDGET)
   })
 
-  it('FTS 查询串内联转义：带引号/反斜杠的注入尝试不抛错、不放大命中', async () => {
+  it('$q 绑定（P2 复测）：带引号/反斜杠的注入尝试不抛错、不放大命中（被当数据）', async () => {
     const all = await recall({ query: 'alpha', queryVector: null })
     const injected = await recall({ query: "alpha' OR 1=1 --", queryVector: null })
-    // 不抛错即证明转义把语句保住了；命中不放大即证明注入片段被当字面量。
+    // 绑定形态下注入片段是 FTS 的查询数据：不抛错，命中不放大（仍是 token 匹配的结果）。
     expect(Number.isInteger(injected.total)).toBe(true)
     expect(injected.total).toBeLessThanOrEqual(all.total)
   })
@@ -332,6 +341,33 @@ describe('runRecallCore：稳定次级键与标注', () => {
     // 换行归一不影响 token 命中：与空格分隔的同一查询等价。
     const spaced = await recall({ query: 'alpha beta', queryVector: null })
     expect(result.total).toBe(spaced.total)
+  })
+
+  it('含 NUL/控制字符的 query（F-03）：净化后不抛错、与空白分隔同义', async () => {
+    // 未净化时内联 NUL 会让语句级解析直接失败——现在先剥离控制字符再内联。
+    const result = await recall({ query: 'alpha\u0000beta', queryVector: null })
+    const spaced = await recall({ query: 'alpha beta', queryVector: null })
+    expect(result.total).toBe(spaced.total)
+    expect(result.total).toBeGreaterThanOrEqual(1)
+  })
+
+  it('超长 query（F-03）：截断到 256 code points，不抛错、不放大命中', async () => {
+    const long = 'alpha' + ' x'.repeat(2000)
+    const result = await recall({ query: long, queryVector: null })
+    expect(result.total).toBeGreaterThanOrEqual(1)
+    // 截断只保留前 256 code points（首 token 仍是 alpha），命中不因截断放大。
+    const capped = await recall({ query: 'alpha' + ' x'.repeat(125), queryVector: null })
+    expect(result.total).toBe(capped.total)
+  })
+
+  it('FTS 语法字符（F-03 补充探针）：* / " / 布尔词 不抛错，结果有界', async () => {
+    for (const query of ['alpha*', '"alpha"', 'alpha AND beta', 'alpha OR beta']) {
+      const result = await recall({ query, queryVector: null })
+      // 语法字符被 FTS 引擎按自身的查询语法处理（不是注入面）：不抛错、命中有界即可；
+      // 关键词路任何一次抛错都会让本用例直接红掉（向量路为 null 时无降级可用）。
+      expect(Number.isInteger(result.total)).toBe(true)
+      expect(result.total).toBeLessThanOrEqual(50)
+    }
   })
 })
 
