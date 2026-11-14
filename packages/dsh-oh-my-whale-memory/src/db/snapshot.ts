@@ -1,12 +1,14 @@
 /**
  * 「当前快照」四条件谓词（FR-15 召回范围判据，单一实现）。
  *
- * Story 3.1 收敛四处口径不一的副本（有的缺 `recorded_at`、有的只看失效两列）：
- * **检索 / 浏览 / 去重 / 关系识别**这类当前快照口径的调用点只允许经本函数拼接，
- * 绝不再手写 `valid_at / recorded_at / invalid_at / expired_at` 的组合
- * （见 spec 的 Always 第 1 条）；仅判墓碑的**有意口径**除外——未嵌入计数
- * （`countUnembeddedMemories` / `listUnembeddedMemories`）与 EVIDENCE 回填游标
- * （`wiki/evidence-backfill.ts`）只按「非墓碑」取行，不是当前快照判据，不套本谓词。
+ * Story 3.1 收敛全仓口径不一的副本（有的缺 `recorded_at`、有的只看失效两列）：
+ * **检索 / 浏览 / 去重 / 关系识别 / 回填候选 / 未嵌入计数**这类当前快照口径的调用点
+ * 只允许经本函数拼接，绝不再手写 `valid_at / recorded_at / invalid_at / expired_at`
+ * 的组合（见 spec 的 Always 第 1 条）。
+ *
+ * 仅有的两处**有意例外**（不是当前快照判据，故不套本谓词）：
+ * - `getMemoryById`（`/memory show`）：墓碑语义，必须能看见已失效/已过期节点；
+ * - `countMemoriesByLayer`（占用量口径）：回答「系统里存了多少行」，不是「此刻有效多少条」。
  *
  * 四条件：
  * - `valid_at <= now`：生效时间不晚于当前时刻（NULL 比较不为真 ⇒ 未设置即排除）；

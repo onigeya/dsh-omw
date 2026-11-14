@@ -5,7 +5,7 @@
  */
 import { afterAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
-import { countUnembeddedMemories, upsertMemory } from '../src/db/memory'
+import { countUnembeddedMemories, listUnembeddedMemories, upsertMemory } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/rows'
 import { createEmbeddingBackfill } from '../src/embedding/backfill'
@@ -88,6 +88,36 @@ describe('Story 2.4 补钉：回填预算与 pin dim 校验', () => {
         "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN g.outcome AS outcome, g.reason AS reason",
       )
       expect(rows.map((row) => String(row.reason ?? '')).join('|')).toContain('dim-mismatch')
+    } finally {
+      await store.close()
+    }
+  })
+
+  it('F-04 future-valid 夹具：valid_at > now 的节点在生效前不进回填目标集（可注入 now）', async () => {
+    const store = await openDb('omw-bf-future-valid-')
+    try {
+      await upsertMemory(store.connection, {
+        layer: 'L1',
+        text: '未来才生效的事实',
+        embedding: null,
+        // 已记录但尚未生效：不满足快照四条件的 `valid_at <= now`。
+        validAt: '2999-01-01T00:00:00.000Z',
+        recordedAt: '2026-01-01T00:00:00.000Z',
+      })
+      // 当前时刻（2026+）：未生效 ⇒ 不计数、不扫描、不回填。
+      expect(await countUnembeddedMemories(store.connection)).toBe(0)
+      expect(await listUnembeddedMemories(store.connection, 10)).toHaveLength(0)
+      const client: EmbedClient = {
+        async embed(_model, input): Promise<EmbedResult> {
+          return { ok: true, vectors: input.map(() => VEC) }
+        },
+      }
+      expect(await makeBackfill(store, client).runOnce()).toBe(0)
+
+      // 显式把 clock 推到生效之后（注入 now）⇒ 进入目标集（延后补齐，不是永久跳过）。
+      const future = '3000-01-01T00:00:00.000Z'
+      expect(await countUnembeddedMemories(store.connection, future)).toBe(1)
+      expect(await listUnembeddedMemories(store.connection, 10, future)).toHaveLength(1)
     } finally {
       await store.close()
     }

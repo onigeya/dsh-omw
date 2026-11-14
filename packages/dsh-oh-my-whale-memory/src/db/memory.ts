@@ -536,17 +536,24 @@ export async function countMemoriesByLayer(connection: MemoryConnection): Promis
 
 /**
  * Story 2.4 / U5：`/memory status` 的「未嵌入节点数」——把路径②（向量去重）看不见的节点
- * 变成可见数字。只数**仍有效**的行（与回填目标集同一口径：embedding 为 NULL 且未失效/未过期），
- * 这样数字会随回填收敛到 0。只读。
+ * 变成可见数字。只数**当前快照**的行（与回填目标集同一口径：embedding 为 NULL 且满足
+ * `snapshot.ts` 的四条件），这样数字会随回填收敛到 0。只读。
+ *
+ * Story 3.1 / F-04：从「只看失效两列」换成共享快照谓词——future-valid（`valid_at > now`）
+ * 的节点在生效前不算当前快照，因而不进回填目标集（延后补齐，不是永久跳过）。
+ * `now` 可注入（测试钉 clock）；缺省取当前时刻。
  */
 const COUNT_UNEMBEDDED_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE m.embedding IS NULL AND ${currentSnapshotPredicate('m')}`,
   'RETURN count(m) AS total',
 ].join(' ')
 
-export async function countUnembeddedMemories(connection: MemoryConnection): Promise<number> {
-  const rows = await queryAll(connection, COUNT_UNEMBEDDED_STATEMENT)
+export async function countUnembeddedMemories(
+  connection: MemoryConnection,
+  now: string = new Date().toISOString(),
+): Promise<number> {
+  const rows = await queryRows(connection, COUNT_UNEMBEDDED_STATEMENT, { now })
   const total = Number(rows[0]?.total ?? 0)
   return Number.isFinite(total) && total > 0 ? Math.trunc(total) : 0
 }
@@ -559,12 +566,15 @@ export interface UnembeddedMemoryEntry {
 }
 
 /**
- * 取前 `limit` 条**仍有效**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
+ * 取前 `limit` 条**当前快照**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
  * 只读。回填侧对每轮的条数另有上界（U5：≤50）。
+ *
+ * Story 3.1 / F-04：谓词换成共享四条件（`$now` 绑定）——future-valid 节点在生效前不是
+ * 当前快照，延后到它生效后的那轮补齐（回填按 `recorded_at` 游标前进，不会永久跳过）。
  */
 const LIST_UNEMBEDDED_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE m.embedding IS NULL AND ${currentSnapshotPredicate('m')}`,
   'RETURN m.id AS id, m.layer AS layer, m.text AS text',
   'ORDER BY m.recorded_at ASC, m.id ASC',
   'LIMIT $limit',
@@ -573,9 +583,11 @@ const LIST_UNEMBEDDED_STATEMENT = [
 export async function listUnembeddedMemories(
   connection: MemoryConnection,
   limit: number,
+  now: string = new Date().toISOString(),
 ): Promise<UnembeddedMemoryEntry[]> {
   const rows = await queryRows(connection, LIST_UNEMBEDDED_STATEMENT, {
     limit: Math.max(0, Math.trunc(limit)),
+    now,
   })
   return rows.map((row) => ({
     id: String(row.id),

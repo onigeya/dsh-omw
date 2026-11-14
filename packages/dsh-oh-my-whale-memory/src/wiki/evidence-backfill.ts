@@ -27,6 +27,7 @@ import {
 import { isEvidenceLayerOrder, L0_LAYER, writeEvidenceEdges, type EvidenceEdgeInput } from '../db/edges.js'
 import { collectRows } from '../db/rows.js'
 import { L0_RAW_TABLE, MEMORY_TABLE, META_KEYS, META_TABLE } from '../db/schema.js'
+import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { IdleGate } from '../inbox/idle-gate.js'
 
@@ -43,7 +44,10 @@ const PAGE_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
   'WHERE (m.recorded_at > $cursor_at OR (m.recorded_at = $cursor_at AND m.id > $cursor_id))',
   // 评审 P9（T9③ / spec D3 spec:103）：回填只取**有效**节点，墓碑/失效节点不产出边。
-  '  AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  // Story 3.1 / F-04：换成 `db/snapshot.ts` 的共享四条件谓词（`$now` 绑定）——future-valid
+  // 节点在生效前不是当前快照，会被本页排除；游标只进不退 ⇒ 该行不会被回补（spec D10
+  // 接受的代价，生产写路径 `valid_at` 恒 ≤ now，仅显式夹具可触发）。
+  '  AND ' + currentSnapshotPredicate('m'),
   'RETURN m.id AS id, m.layer AS layer, m.source_refs AS source_refs, m.recorded_at AS recorded_at',
   'ORDER BY m.recorded_at ASC, m.id ASC',
   'LIMIT $limit',
@@ -120,6 +124,7 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
       cursor_at: cursorAt,
       cursor_id: cursorId,
       limit: batchSize,
+      now: new Date().toISOString(),
     })
     if (page.length === 0) {
       // 评审 P15（T17）：只有**游标非空**（确实扫过一段）时才能把空页判为「扫完」。
