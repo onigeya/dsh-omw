@@ -151,7 +151,8 @@ describe('AC7：只读实例不启动消费者、不回收 lease', () => {
       expect(plugin.memoryRuntimeState().readonly).toBe(true)
       // 只读：不启动消费者（不接闸门/采集的 session/event 监听）；Story 3.1 起只读实例
       // 仍注册**召回配额重置**监听（memory_recall 在只读模式也可用，turn/start 恢复配额）。
-      expect(onEvents).toEqual(['session/event'])
+      // Story 3.3 起只读实例同样注册开局注入的 `agent/pre-step` 监听（注入是纯读 + LLM）。
+      expect(onEvents).toEqual(['session/event', 'agent/pre-step'])
       expect(warnLog.join('\n')).toContain(READONLY_REASON)
       expect(infoLog.join('\n')).not.toContain('记忆库就绪')
 

@@ -81,6 +81,12 @@ import { createMemoryRelatedTool } from './tools/memory-related.js'
 import { createInjectionStore } from './injection/state.js'
 import { registerInjectionPrompt, type InjectionPromptHost } from './injection/prompt.js'
 import {
+  createOpenstartGenerator,
+  type OpenstartLlmPort,
+  type OpenstartPreStepPayload,
+} from './injection/openstart.js'
+import { routeFromSession } from './distill/session-route.js'
+import {
   createMemoryRecallTool,
   type MemoryRecallStore,
 } from './tools/memory-recall.js'
@@ -107,7 +113,6 @@ import { createEvidenceBackfill } from './wiki/evidence-backfill.js'
 import { countRelatedSkips, createRelationRunner } from './wiki/relations.js'
 import { createEmbeddingClient, type EmbedClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
-import { routeFromSession } from './distill/session-route.js'
 import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
 import {
   INBOX_FAILED_VIEW_LIMIT,
@@ -527,6 +532,28 @@ export async function apply(
   if (systemPromptHost !== undefined) {
     registerInjectionPrompt(systemPromptHost, injectionStore)
   }
+
+  // Story 3.3 / B2：开局注入的生成编排——`agent/pre-step` 里识别首条真人消息、await 生成
+  // （≤3s 硬上限）并写入注入状态；随后 step() 的 `refreshContext` 让**首个请求**看到摘要
+  // （B1 探针已核实）。只读实例同样需要（纯读 + LLM），故与注入面注册一样放在只读早退前。
+  // 裸 ctx 没有 `on`/`llm` 时：监听不注册 / 生成时 skipped，不抛错。
+  const openstartGenerator = createOpenstartGenerator({
+    store: injectionStore,
+    recall: recallStore,
+    // 惰性取 ctx.llm（apply 期间不求值，N2）；缺失 ⇒ 本会话 skipped（零 LLM）。
+    getLlm: () => (ctx as unknown as { readonly llm?: OpenstartLlmPort }).llm,
+    enabled: () => resolved.injectOnNewSession,
+    // Config 的 llmProvider/llmModel 优先，缺省走 session 已记录请求目标的回退链（AC:567）。
+    resolveRoute: (session) => (resolved.llmProvider !== undefined && resolved.llmModel !== undefined
+      ? { provider: resolved.llmProvider, model: resolved.llmModel }
+      : routeFromSession(session)),
+    logger: ctx.logger,
+  })
+  const eventHost = ctx as unknown as {
+    on?: (event: string, listener: (payload: unknown) => Promise<void> | void) => unknown
+  }
+  // waterfall 会 await 监听器返回的 promise ⇒ 3s 预算即「首个请求前最多等 3s」（spec D2）。
+  eventHost.on?.('agent/pre-step', (payload) => openstartGenerator(payload as OpenstartPreStepPayload))
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
