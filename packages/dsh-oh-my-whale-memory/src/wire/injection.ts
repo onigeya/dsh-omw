@@ -24,6 +24,7 @@ import {
   type OpenstartPreStepPayload,
 } from '../injection/openstart.js'
 import type { InjectionStore } from '../injection/state.js'
+import { inboxSessionKey } from '../inbox/idle-gate.js'
 
 /**
  * 宿主 `PreStepDecision` 的结构视图（`packages/core/agent/src/runtime-types.ts:139-146`）。
@@ -51,6 +52,11 @@ interface AgentPreStepHost {
       next: () => Promise<PreStepDecisionLike>,
     ) => Promise<PreStepDecisionLike>,
   ): unknown
+}
+
+/** session/event 宿主事件面（F-05：只消费 session/disposed；裸 ctx 无 on ⇒ 不处理）。 */
+interface SessionEventHost {
+  on?(event: 'session/event', listener: (session: unknown, event: unknown) => void): unknown
 }
 
 export interface InjectionWiringOptions {
@@ -106,5 +112,15 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       if (timer !== undefined) clearTimeout(timer)
     }
     return next()
+  })
+
+  // F-05：session/disposed 清理注入状态（与 quota/session-events 同一会话键；无 session
+  // 不处理）。ctx.on 自动挂 disposer，不新增 ctx.effect（closers 保持 3/4/6）。
+  const sessionHost = ctx as unknown as SessionEventHost
+  sessionHost.on?.('session/event', (session, event) => {
+    if (session === null || session === undefined) return
+    const type = (event as { readonly type?: unknown } | null | undefined)?.type
+    if (type !== 'session/disposed') return
+    options.store.reset(inboxSessionKey(session))
   })
 }

@@ -198,7 +198,8 @@ describe('AC4 集成：真库死信进入 status', () => {
     await plugin.apply(makeCtx(dir, registeredDefs, onEvents), EMBEDDING_CONFIG)
     // Story 3.1：召回配额重置监听（只读早退之前注册）+ 写者模式的闸门/采集监听。
     // Story 3.3：开局注入的 `agent/pre-step` 监听（在只读早退前注册）。
-    expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event'])
+    // Story 3.3 / F-05：`session/disposed` 清理监听 + 写者模式的闸门/采集监听。
+    expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event', 'session/event'])
     expect(registeredDefs).toHaveLength(1)
 
     const result = await registeredDefs[0]!.handler({ rawInput: ' status' })

@@ -179,6 +179,37 @@ describe('wireInjection / agent/pre-step waterfall（F-01）', () => {
     expect(store.read('s-f01')?.status).toBe('skipped')
   })
 
+  it('session/disposed ⇒ 清理该会话注入状态，可重新生成（F-05）', async () => {
+    const { host, store, listener } = wire()
+    const next = vi.fn(async () => DEFAULT_DECISION)
+    const session = { id: 's-disposed' }
+    const payload = { ...PAYLOAD, agent: { session } }
+
+    await listener(payload, next)
+    expect(store.read('s-disposed')?.status).toBe('ready')
+
+    const disposedListener = host.listeners.find((entry) => entry.event === 'session/event')
+    expect(disposedListener).toBeDefined()
+    disposedListener!.listener(session, { type: 'session/disposed' })
+
+    expect(store.read('s-disposed')).toBeUndefined()
+    expect(store.textFor('s-disposed')).toBe('')
+
+    // disposed 后可重新生成（同 key 回到初始状态）。
+    const nextAgain = vi.fn(async () => DEFAULT_DECISION)
+    await listener(payload, nextAgain)
+    expect(store.read('s-disposed')?.status).toBe('ready')
+    expect(nextAgain).toHaveBeenCalledTimes(1)
+  })
+
+  it('session/disposed 但 session 缺失 ⇒ 不处理、不抛错（F-05）', async () => {
+    const { host, store } = wire()
+    const disposedListener = host.listeners.find((entry) => entry.event === 'session/event')!
+    expect(() => disposedListener.listener(undefined, { type: 'session/disposed' })).not.toThrow()
+    expect(() => disposedListener.listener(null, { type: 'session/disposed' })).not.toThrow()
+    expect(store.read('unknown')).toBeUndefined()
+  })
+
   it('prompt 面缺失（裸 ctx）时只注册监听，不抛错', async () => {
     const host = makeHost({ withSystemPrompt: false })
     wireInjection(host.ctx, { store: createInjectionStore(), recallStore: makeRecall(), resolved: RESOLVED })
