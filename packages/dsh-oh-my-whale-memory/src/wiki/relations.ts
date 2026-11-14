@@ -36,7 +36,7 @@ import { collectRows } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { GENERATION_LOG_TABLE, MEMORY_TABLE, META_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
-import { foldStream } from '../distill/stream-fold.js'
+import { foldStream } from '../shared/stream-fold.js'
 
 /** 邻接召回条数（AC:763 写死 top-K=8）。 */
 export const RELATION_RECALL_TOP_K = 8

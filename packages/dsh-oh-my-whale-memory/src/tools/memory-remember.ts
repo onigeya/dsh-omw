@@ -21,28 +21,17 @@ import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tool
 import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
 import type { UpsertMemoryResult } from '../db/memory.js'
 import type { MemoryActor } from '../db/audit.js'
+import { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, type MemoryKind } from '../shared/memory-vocab.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
 export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
 
-/** 直写层：L1（Epic 2 之前没有 INBOX 分拣，写入即 L1 原子记忆）。 */
-export const MEMORY_REMEMBER_LAYER = 'L1'
-
 /**
- * FR-15 七类记忆分类（PRD prd.md:72 / prd.md:298，SPINE:274-275 的同名列枚举）。
- * 写路径（工具参数 / 命令旗标）的合法 kind 取值就是这个集合；缺省为空串。
+ * 直写层 / 七类分类的单一来源是 src/shared/memory-vocab.ts（distill 与 tools 都得用，
+ * 由 tools 定义会让 distill → tools 成为目录级环 / AD-33）。这里 re-export 保持既有
+ * import 路径与调用点不变。
  */
-export const MEMORY_KINDS = [
-  'persona',
-  'episodic',
-  'instruction',
-  'work_fact',
-  'work_task',
-  'work_method',
-  'work_artifact',
-] as const
-
-export type MemoryKind = (typeof MEMORY_KINDS)[number]
+export { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, type MemoryKind }
 
 /**
  * 模型可见描述——既是能力说明，也是 FR-1 的写入护栏：

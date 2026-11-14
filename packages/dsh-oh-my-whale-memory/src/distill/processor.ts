@@ -32,7 +32,7 @@ import {
   type InboxItem,
   type InboxStatus,
 } from '../inbox/queue.js'
-import { MEMORY_REMEMBER_LAYER } from '../tools/memory-remember.js'
+import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
 import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute } from './llm-refine.js'
 import type { RelationRunner } from '../wiki/relations.js'
 

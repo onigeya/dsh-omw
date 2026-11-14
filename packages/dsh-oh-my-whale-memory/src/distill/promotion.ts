@@ -47,7 +47,7 @@ import { runInTransaction } from '../db/transaction.js'
 import type { EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
 import { l2InboxQueue, type InboxItem } from '../inbox/queue.js'
-import { MEMORY_REMEMBER_LAYER } from '../tools/memory-remember.js'
+import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
 import type { LlmPort, RefineRoute } from './llm-refine.js'
 import { refineToL2, verifyL2Statement, type L2SourceFact } from './l2-refine.js'
 import {

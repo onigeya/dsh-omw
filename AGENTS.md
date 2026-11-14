@@ -1,5 +1,5 @@
 <!-- bmad:context -->
-<!-- Verified 2026-11-09 against 6399126. Managed by bmad-project-context; edits inside this block are replaced on refresh. -->
+<!-- Verified 2026-11-13 against ea3dfa6. Managed by bmad-project-context; edits inside this block are replaced on refresh. -->
 
 ## dsh-oh-my-whale 记忆插件
 
@@ -17,6 +17,7 @@ DSH 记忆插件 v1——Zettelkasten 原子记忆 + LLM Wiki + SCD-2 双时态�
 - **LLM 单通道**：所有 LLM 调用走宿主 `ctx.llm`，显式 provider+model；插件不自带 key（AD-5/§14）。
 - **无 `ctx.settings.register` API**——SettingsForms 自动扫描 `inject` 含 `settings` 的插件；需要进 `/settings` 表单的字段必须标 `.volatile()`（AD-11）。
 - **Windows ABI 冒烟测试是 v1 Week-1 阻塞项**（AD-13）。
+- **存储后端选择（AD-32）**：纯 Node 运行时用 `@ladybugdb/core` 原生 addon；Electron 宿主（`ELECTRON_RUN_AS_NODE`，NODE_MODULE_VERSION 149）原生 addon 必然 dlopen 失败，必须走 `@ladybugdb/wasm-core/nodejs`。判据 `process.versions.electron !== undefined`（`process.type` 在该模式下恒为 undefined，不可用）；两端 0.22.3、storage version 同为 49，同一 `lbug.db` 可互换。`@ladybugdb/wasm-core` 放 `optionalDependencies`（解包约 110MB，纯 Node 宿主不强制装）；后端差异只在 `src/db/backend.ts` 收敛。
 - **不重议已关闭决策**：包名（Q-6）、compaction/start 同步快照（Q-1）、注入形式（Q-2）、SCD-2 全双时态（Q-7）、单模型通道（Q-8/m00548）。
 - **worktree 只建在 `worktrees/<name>`**——统一 `git worktree add worktrees/<name> <branch>`；不要用仓库同级路径（如 `../dsh-omw-story-1.5`、`../dsh-omw-worktrees/`），否则 worktree 散落在 `D:\workspace` 根下。`worktrees/.gitignore` 为 `*`，worktree 内容不入库。
 
@@ -33,7 +34,8 @@ DSH 记忆插件 v1——Zettelkasten 原子记忆 + LLM Wiki + SCD-2 双时态�
 - `dsh --profile <name> --dump-config` 验证 patch 层落地（不启动宿主）
 - `pnpm pack` 装进干净 profile 冒烟（PRD §14 工程纪律）
 - 测试脚本已配 `vitest run`（根统一；各包 `scripts.test = "vitest run --root ../.."` 复用同一入口），含 Windows ABI 冒烟 `packages/dsh-oh-my-whale-memory/test/abi-smoke.test.ts`
-- **Windows 上 vector/fts 扩展需要 OpenSSL 3**：LadybugDB 扩展动态链接 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`，pnpm 不随 `@ladybugdb/core` 分发，且代码不再自动探测固定目录——**必须由 PATH 环境变量提供**（例如 Git for Windows 的 `C:\Program Files\Git\mingw64\bin`）。运行测试与运行宿主（插件运行期 `INSTALL/LOAD vector|fts`）都要继承它；没配置时 step 5 会以 `Failed to load library: ... libvector.lbug_extension` 失败。CI 需预装 Git for Windows，或改用会设置 OpenSSL 3 的镜像。
+- **门禁（2026-11-14 P1 落地）**：`pnpm verify` = `constraints`（包元数据/导出/依赖契约）→ `typecheck`（src；测试文件未纳入）→ `check:deps`（AD-33 分层与循环，例外清单在 `scripts/check-deps.mjs`，新增违规即红）→ `check:migrations`（AD-34：SCHEMA_VERSION 必须等于最大迁移号）→ `test`；CI（`.github/workflows/ci.yml`）另跑 `pnpm test:smoke` 与 `pnpm pack:smoke`（tarball 内容按 AD-35）；`node scripts/check-upstream.mjs` 每周一监测 LadybugDB 0.23（AD-12 触发器）
+- **Windows 上 native 后端的 vector/fts 扩展需要 OpenSSL 3**：LadybugDB 扩展动态链接 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`，pnpm 不随 `@ladybugdb/core` 分发，且代码不再自动探测固定目录——**必须由 PATH 环境变量提供**（例如 Git for Windows 的 `C:\Program Files\Git\mingw64\bin`）。运行测试与纯 Node 宿主的 `INSTALL/LOAD vector|fts` 都要继承它；没配置时 step 5 以 `Failed to load library: ... libvector.lbug_extension` 失败。CI 需预装 Git for Windows，或改用会设置 OpenSSL 3 的镜像。Electron 宿主不受此限（wasm 后端扩展静态编译，AD-32）。
 - `engines.dsh` 声明兼容范围（如 `">=0.2.0 <0.3.0"`），否则宿主可能拒绝加载
 
 ## Package shape
@@ -69,6 +71,7 @@ DSH 记忆插件 v1——Zettelkasten 原子记忆 + LLM Wiki + SCD-2 双时态�
 - `compaction/start` payload `{ turn: number | null }`，`null` 表示独立手动触发；未配对的 `compaction/start` 阻塞新条目（harness `subsystems/compaction.md`）
 - 注册都是 effect：`ctx.on`/`ctx.effect`/`ctx.tools.register` 自动挂 disposer；自己创建的 timers/sockets/watchers 必须用 `ctx.effect(fn)` 手动释放（harness `cordis-tutorial/02-lifecycle-and-effects.md`）
 - `.codegraph/` 目录存在但索引为空——建好索引后可用 `codegraph explore "<query>"` 替代 grep 定位代码
+- `@ladybugdb/core` 原生 addon 在 Electron 宿主下 dlopen 失败（`A dynamic link library (DLL) initialization routine failed.`），加载器只打一条 `warning: 1 entry did not activate`，插件 apply 从未执行——症状是「装了但没生效」：无 `memory/lbug.db`、无 `memory_remember` 工具、无 `/memory` 命令（修复 = AD-32 wasm 后端）
 
 ## Engineering discipline
 

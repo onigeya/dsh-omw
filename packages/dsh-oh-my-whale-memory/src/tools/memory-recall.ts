@@ -22,7 +22,7 @@ import { MemoryDbError } from '../db/errors.js'
 import { clampRecallLimit, type RecallCoreResult, type RecallResultItem } from '../recall/core.js'
 import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import type { RecallQuota } from './recall-quota.js'
-import { summarizeMemoryText } from '../summarize.js'
+import { summarizeMemoryText } from '../shared/summarize.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
 export const MEMORY_RECALL_TOOL_NAME = 'memory_recall'

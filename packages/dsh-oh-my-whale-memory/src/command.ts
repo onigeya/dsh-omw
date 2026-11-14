@@ -26,7 +26,7 @@
  * （FR-20 分类写路径，AC2——手动写路径也能产出非空 kind / 非 0 priority，含 -1）。
  */
 import { MEMORY_KINDS } from './tools/memory-remember.js'
-import { summarizeMemoryText } from './summarize.js'
+import { summarizeMemoryText } from './shared/summarize.js'
 import type { LastInjectionSummary } from './injection/state.js'
 import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 

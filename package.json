@@ -6,7 +6,14 @@
   "main": "index.js",
   "scripts": {
     "build": "pnpm -r build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:smoke": "vitest run packages/dsh-oh-my-whale-memory/test/abi-smoke.test.ts packages/dsh-oh-my-whale-memory/test/backend-wasm.test.ts packages/dsh-oh-my-whale-memory/test/entry-exports.test.ts packages/dsh-oh-my-whale-memory/test/config-schema.test.ts",
+    "typecheck": "tsc -p packages/dsh-oh-my-whale/tsconfig.json && tsc -p packages/dsh-oh-my-whale-memory/tsconfig.json",
+    "constraints": "node scripts/constraints.mjs",
+    "check:deps": "node scripts/check-deps.mjs",
+    "check:migrations": "node scripts/check-migrations.mjs",
+    "pack:smoke": "node scripts/pack-smoke.mjs",
+    "verify": "pnpm constraints && pnpm typecheck && pnpm check:deps && pnpm check:migrations && pnpm test"
   },
   "keywords": [],
   "author": "",

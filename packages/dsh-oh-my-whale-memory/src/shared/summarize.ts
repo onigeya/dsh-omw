@@ -3,6 +3,7 @@
  *
  * 纯函数、无依赖：既给命令层（不 import db 模块）用，也给工具 presenter 用，
  * 避免两处各写一份截断规则（历史：Story 1.8 的列表摘要与 Story 3.1 的召回摘要同形）。
+ * 2026-11-14 P1-R10：从 `src/summarize.ts` 下沉到 `src/shared/`，切断 tools → 根目录的目录级环。
  */
 
 /** 摘要长度上限（code point 计）：超过则截断并加 `…`。 */

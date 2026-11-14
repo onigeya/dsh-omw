@@ -10,16 +10,21 @@
  * 这是「宁可同义反复也要拦住回归」的一次例外裁决（Lead，2026-11-13），理由同 P7 的双保险：
  * 并发写者/游标交叉是数据正确性问题，不是性能问题，代价远高于一条静态断言。
  */
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { describe, expect, it } from 'vitest'
 
-const SOURCE = readFileSync(fileURLToPath(new URL('../src/index.ts', import.meta.url)), 'utf8')
+const WIRE_DIR = fileURLToPath(new URL('../src/wire', import.meta.url))
+const SOURCE = [
+  fileURLToPath(new URL('../src/index.ts', import.meta.url)),
+  ...readdirSync(WIRE_DIR).map((f) => join(WIRE_DIR, f)),
+].map((p) => readFileSync(p, 'utf8')).join('\n')
 
 /** 取 `maintenance: async () => { ... }` 的函数体（按花括号配平，避免被后续代码干扰）。 */
 function maintenanceBody(): string {
   const start = SOURCE.indexOf('maintenance: async () => {')
-  if (start < 0) throw new Error('找不到 maintenance 定义：index.ts 结构变了，请同步本守卫')
+  if (start < 0) throw new Error('找不到 maintenance 定义：index.ts/wire 结构变了，请同步本守卫')
   const open = SOURCE.indexOf('{', start)
   let depth = 0
   for (let i = open; i < SOURCE.length; i += 1) {

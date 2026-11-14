@@ -38,7 +38,7 @@ import { stat } from 'node:fs/promises'
 import type * as lbug from '@ladybugdb/core'
 import { ensureAuditTables } from './audit.js'
 import { loadStorageBackend, runPrepared, runStatement, type StorageBackend, type StorageBackendKind } from './backend.js'
-import { ensureInboxTables, ensureL2InboxTables } from '../inbox/queue.js'
+import { ensureInboxTables, ensureL2InboxTables } from './inbox-tables.js'
 import { ensureEdgeTables } from './edges.js'
 import { MemoryDbError } from './errors.js'
 import {

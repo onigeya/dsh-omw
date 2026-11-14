@@ -23,7 +23,8 @@
     }
   },
   "engines": {
-    "dsh": ">=0.2.0 <0.3.0"
+    "dsh": ">=0.2.0 <0.3.0",
+    "node": ">=24.9.0"
   },
   "scripts": {
     "build": "tsdown && tsc -p tsconfig.build.json",
