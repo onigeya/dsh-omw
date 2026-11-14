@@ -129,6 +129,15 @@ describe('硬校验（任一失败即抛错，仅阻塞本插件）', () => {
     expect(() => resolveRuntimeConfig(cfg)).toThrowError(/> 0/)
   })
 
+  it('retrievalTopK 硬校验（F-12）：0 / 负数 / 非整数 / NaN 抛错，缺省 50 合法', () => {
+    for (const bad of [0, -1, 2.5, Number.NaN]) {
+      const cfg = { ...validConfig(), retrievalTopK: bad }
+      expect(() => resolveRuntimeConfig(cfg)).toThrowError(/retrievalTopK/)
+      expect(() => resolveRuntimeConfig(cfg)).toThrowError(/≥ 1/)
+    }
+    expect(resolveRuntimeConfig(validConfig()).retrievalTopK).toBe(50)
+  })
+
   it('层权重越界抛错（第 5 行）', () => {
     for (const bad of [1.5, 0]) {
       const l2cfg = { ...validConfig(), layerWeights: { l2: bad, l1: 0.4 } }

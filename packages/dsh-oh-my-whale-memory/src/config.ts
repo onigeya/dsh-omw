@@ -185,7 +185,9 @@ export function resolveRuntimeConfig(config: {
   if (!Number.isFinite(rrfK) || rrfK <= 0) {
     throw new Error(`rrfK（期望 > 0 的数，实际 ${rrfK}）`)
   }
-  const retrievalTopK = read(config.retrievalTopK ?? 50)
+  // F-12：与相邻 rrfK 同款硬校验——生成为 NaN/0/负数会被 `Math.max(1, Math.trunc(...))`
+  // 静默变成 1（或把 NaN 绑进 $k/TOP 变成查询期失败），配错必须 fail-loud。
+  const retrievalTopK = requirePositiveInt('retrievalTopK', read(config.retrievalTopK ?? 50))
 
   const weightsRaw = read(config.layerWeights ?? {}) as { l2?: number; l1?: number }
   const l2 = requireUnitWeight('layerWeights.l2', weightsRaw.l2 ?? 0.7)
