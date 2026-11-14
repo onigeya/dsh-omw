@@ -24,6 +24,7 @@ import {
   DEFAULT_CAPTURE_POLICY,
   insertGenerationLog,
 } from '../db/audit.js'
+import { runPrepared } from '../db/backend.js'
 import { isEvidenceLayerOrder, L0_LAYER, writeEvidenceEdges, type EvidenceEdgeInput } from '../db/edges.js'
 import { collectRows } from '../db/rows.js'
 import { L0_RAW_TABLE, MEMORY_TABLE, META_KEYS, META_TABLE } from '../db/schema.js'
@@ -92,7 +93,8 @@ async function readCursor(connection: lbug.Connection): Promise<string> {
 
 async function writeCursor(connection: lbug.Connection, value: string): Promise<void> {
   const statement = await connection.prepare(MERGE_META)
-  await connection.execute(statement, { key: META_KEYS.evidenceBackfillCursor, value })
+  // 结果必须释放，否则 pin 满 buffer pool（见 ../db/backend.ts closeQueryResult）。
+  await runPrepared(connection, statement, { key: META_KEYS.evidenceBackfillCursor, value })
 }
 
 /**
