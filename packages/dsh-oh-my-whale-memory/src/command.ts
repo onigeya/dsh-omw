@@ -27,6 +27,7 @@
  */
 import { MEMORY_KINDS } from './tools/memory-remember.js'
 import { summarizeMemoryText } from './summarize.js'
+import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 
 /** 宿主命令名（小写、无前导斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
@@ -81,12 +82,11 @@ export const MEMORY_SHOW_USAGE = [
 export const MEMORY_STATUS_USAGE = '/memory status'
 
 /**
- * `recall` 子命令默认返回条数（Story 3.1）。
- *
- * 与工具 `memory_recall` 的 limit 缺省一致（FR-12：缺省 5、上限 20）——同一产品的
- * 两个召回面不出现不同缺省；常量取自 src/recall/core.ts 的夹紧实现。
+ * `recall` 子命令的缺省条数（F-10）：直接复用内核的 `RECALL_DEFAULT_LIMIT`，
+ * **不再自己写字面量**——命令面与工具面的缺省条数从此只有一个来源（此前两份 5
+ * 只能靠测试的 drift-guard 兜住，注释还谎称「取自内核」）。
  */
-export const MEMORY_RECALL_DEFAULT_LIMIT = 5
+export const MEMORY_RECALL_DEFAULT_LIMIT = RECALL_DEFAULT_LIMIT
 
 /** `recall` 子命令缺少 query 时的 usage 提示。 */
 export const MEMORY_RECALL_USAGE = [

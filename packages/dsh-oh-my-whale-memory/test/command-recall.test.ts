@@ -57,9 +57,10 @@ describe('parseMemoryCommand（recall 分支）', () => {
 
   it('常量符合契约；总用法扩到五条子命令', () => {
     expect(MEMORY_RECALL_SUBCOMMAND).toBe('recall')
-    // drift-guard：命令面缺省 limit 与内核夹紧缺省必须是同一个值（两个 5 没有关联，
-    // 否则任一侧改值会让 /memory recall 与 memory_recall 的缺省条数静默分叉）。
+    // F-10：命令面缺省 limit **直接复用内核常量**（单一来源，不再两份字面量）；
+    // 同时钉住它出现在 usage 文案里，改值不会漏改文案。
     expect(MEMORY_RECALL_DEFAULT_LIMIT).toBe(RECALL_DEFAULT_LIMIT)
+    expect(MEMORY_RECALL_USAGE).toContain(`最多 ${RECALL_DEFAULT_LIMIT} 条`)
     expect(MEMORY_RECALL_USAGE).toContain('/memory recall <query>')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory remember <内容>')
     expect(MEMORY_COMMAND_USAGE).toContain('/memory list [关键词]')
