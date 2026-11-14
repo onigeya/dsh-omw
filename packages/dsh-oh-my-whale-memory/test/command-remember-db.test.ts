@@ -121,6 +121,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'systemOne: enabled',
       'readonly: false',
       'evidence_gap: 1（EII 1 / 漂移 0）',
+      'injection: 未知（本实例尚未触发开局注入）',
     ].join('\n'))
   })
 

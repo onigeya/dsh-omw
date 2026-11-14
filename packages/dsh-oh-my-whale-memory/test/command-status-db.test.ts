@@ -135,6 +135,8 @@ function statusText(
   }
   if (relatedSkipped === null) lines.push('related_skipped: 未知（审计表缺失）')
   else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
+  // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入 ⇒ 未知）。
+  lines.push('injection: 未知（本实例尚未触发开局注入）')
   return lines.join('\n')
 }
 
@@ -387,6 +389,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'related_skipped: 未知（审计表缺失）',
         // Story 2.5 / 评审 P8：疑似失效账目同样缺审计表 ⇒ 渲染「未知」（同一约定）。
         'uncertain: 未知（审计表缺失）',
+        // Story 3.3 / B4：只读夹具未触发开局注入 ⇒ 末行「未知」（恒打印，便于断言三态）。
+        'injection: 未知（本实例尚未触发开局注入）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {

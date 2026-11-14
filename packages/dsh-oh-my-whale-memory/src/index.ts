@@ -439,6 +439,8 @@ export async function apply(
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
   // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
+  const injectionStore = createInjectionStore()
+
   const getStatus = async (): Promise<MemoryStatusSnapshot> => {
     const connection = readConnection().connection
     const counts = await countMemoriesByLayer(connection)
@@ -484,6 +486,9 @@ export async function apply(
         ? await l2InboxQueue.listRecentFailed(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
         : [],
       uncertain: await countUncertainAudits(connection),
+      // Story 3.3 / B4：开局注入可见性——进程内 lastInjection（null=未知）+ Config 开关。
+      injection: injectionStore.readLastInjection() ?? null,
+      injectionEnabled: resolved.injectOnNewSession,
     }
   }
   const commandDependencies: MemoryCommandDependencies = {
@@ -527,7 +532,6 @@ export async function apply(
   // **只读早退之前**注册——写者与只读实例都要有注入面。裸 ctx（无 `systemPrompt` 服务）
   // 整面跳过、不抛错。注册返回的是宿主 systemPrompt 作用域的 effect disposer，由 ctx
   // 生命周期自动回收，**不新增 ctx.effect**（entry-exports 的 closer 数不变）。
-  const injectionStore = createInjectionStore()
   const systemPromptHost = (ctx as unknown as { readonly systemPrompt?: InjectionPromptHost }).systemPrompt
   if (systemPromptHost !== undefined) {
     registerInjectionPrompt(systemPromptHost, injectionStore)

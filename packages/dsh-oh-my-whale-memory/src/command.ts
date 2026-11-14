@@ -27,6 +27,7 @@
  */
 import { MEMORY_KINDS } from './tools/memory-remember.js'
 import { summarizeMemoryText } from './summarize.js'
+import type { LastInjectionSummary } from './injection/state.js'
 import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 
 /** 宿主命令名（小写、无前导斜杠）。 */
@@ -276,6 +277,16 @@ export interface MemoryStatusSnapshot {
    * null = 审计表缺失、算不出来（渲染成未知）；0/缺省 ⇒ 不追加渲染。
    */
   readonly uncertain?: number | null
+  /**
+   * 最近一次开局注入的观测摘要（Story 3.3 / B4）：`null` = 本实例从未触发过开局注入
+   * （渲染成未知，不静默报 0）；缺省按 null 处理。
+   */
+  readonly injection?: LastInjectionSummary | null
+  /**
+   * Config `injectOnNewSession`（Story 3.3）：false ⇒ 渲染「已关闭注入」而不是「未知」。
+   * 缺省按 true 处理（既有夹具无需改动即向后兼容）。
+   */
+  readonly injectionEnabled?: boolean
 }
 
 /**
@@ -633,7 +644,33 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   appendFailedEntryLines(lines, 'l2_failed 最近条目:', snapshot.l2FailedEntries ?? [])
   // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
   appendFailedEntryLines(lines, 'failed 最近条目:', snapshot.failedEntries ?? [])
+  // Story 3.3 / B4：开局注入的可见性（**末尾追加**，既有行逐字不动）。恒打印一行，
+  // 让「Config 关闭」「从未注入」「已注入」三态都可断言；预算超限再追加一行（INV-2 提示）。
+  lines.push(...renderInjectionStatusLines(snapshot))
   return lines.join('\n')
+}
+
+/** 注入状态行（Story 3.3 / B4；单位标注=字符，AC:935）。 */
+function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  if (snapshot.injectionEnabled === false) {
+    return ['injection: disabled（Config injectOnNewSession=false）']
+  }
+  const injection = snapshot.injection
+  if (injection === null || injection === undefined) {
+    return ['injection: 未知（本实例尚未触发开局注入）']
+  }
+  // 单位显式标注为字符（AC:935：tokens 化归 Story 8.5，不在本 story 内转换）。
+  const marks = [
+    injection.degraded ? '，降级' : '',
+    injection.truncated ? '，已截断' : '',
+  ].join('')
+  const lines = [
+    `injection: enabled（预算单位=字符；上次注入 ${injection.items} 条 / ${injection.chars} 字符${marks}）`,
+  ]
+  if (injection.overBudget) {
+    lines.push('injection: 预算超限（不可删集合先保留）')
+  }
+  return lines
 }
 
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
