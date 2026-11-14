@@ -12,7 +12,9 @@
  * - 路径谓词**按标签显式写**：`label(x)='l0_raw'` 支判 `raw_text IS NOT NULL`；
  *   `label(x)='memory'` 支判 AD-19:175 三条件。不用隐式 NULL 语义——l0_raw 没有
  *   invalid_at/expired_at 列，`x.invalid_at IS NULL` 对缺失属性恒真（U2）。
- * - 有效性谓词**不含 recorded_at**（裁决 U7）：recorded_at 是记录时间，只用于 as-of 读。
+ * - 有效性谓词（SQL 侧）走 `src/db/snapshot.ts` 的共享四条件（Story 3.1 收敛；
+ *   原先按裁决 U7 不含 recorded_at，已在 ledger 记 U7 反转）；JS 侧 `isEffective`
+ *   保留 AD-19 三条件不动——它只服务 checkReachableToL0 的早退判定，不拼 SQL。
  * - depth 固定 4 字面量（AD-19），不随 FR-12 的 depth 参数漂移。
  *
  * ⚠️ 升版必回归：`all(x IN nodes(p) ...)` 的动态属性语义与 `label(x)` 在 0.22.3 上实测可用
@@ -21,6 +23,7 @@
 import type * as lbug from '@ladybugdb/core'
 import { MemoryDbError } from './errors.js'
 import { collectRows } from './rows.js'
+import { currentSnapshotPredicate } from './snapshot.js'
 import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
 
 /** 只读可达性原语的封闭失败枚举（2.5 据此路由到「回滚 INBOX 重试」或「判不合格」）。 */
@@ -55,13 +58,13 @@ const READ_L0_STATEMENT = [
 
 const EFFECTIVE_MEMORY_IDS = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE m.valid_at <= $now AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  'WHERE ' + currentSnapshotPredicate('m'),
   'RETURN m.id AS id',
 ].join('\n')
 
 const EFFECTIVE_MEMORY_REFS = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE m.valid_at <= $now AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  'WHERE ' + currentSnapshotPredicate('m'),
   'RETURN m.id AS id, m.source_refs AS source_refs',
 ].join('\n')
 
@@ -87,11 +90,16 @@ function sqlInstant(now: string): string {
   return "'" + now + "'"
 }
 
-/** 路径谓词（显式按标签，见文件头）：l0_raw 判非墓碑，memory 判 AD-19 三条件。 */
+/**
+ * 路径谓词（显式按标签，见文件头）：l0_raw 判非墓碑；memory 判 `src/db/snapshot.ts`
+ * 的共享四条件谓词（Story 3.1 收敛——原先按裁决 U7 只判三条件不含 recorded_at，
+ * 现升级为四条件：对真实数据零行为变化，`as-of` 读（U7）在 `valid_at <= now` 之外
+ * 还受 `recorded_at <= now` 约束，已在 ledger 记 U7 反转）。
+ */
 function pathPredicate(nowLiteral: string): string {
   return [
     '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND x.raw_text IS NOT NULL)',
-    '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND x.valid_at <= ' + nowLiteral + ' AND x.invalid_at IS NULL AND x.expired_at IS NULL)',
+    '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND ' + currentSnapshotPredicate('x', nowLiteral) + ')',
   ].join('\n')
 }
 

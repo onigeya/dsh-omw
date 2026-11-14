@@ -34,6 +34,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
       unembedded: 0,
       readonly: false,
     }),
+    recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '' }),
     ...overrides,
   }
 }

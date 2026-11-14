@@ -37,6 +37,12 @@
  * readonly/reason，配置态用闭包捕获的 `resolved.embeddingMode`。仍是同一 definition、
  * 同一 register 点，不新增 `ctx.effect`、不新增网络/LLM 调用（AC5）。
  *
+ * Story 3.1：注册模型工具 `memory_recall`（混合检索，先于建库注册、闭包 getter）与
+ * `/memory recall` 子命令（同一 definition 扩展，手动召回不计配额）；每轮召回配额
+ * `createRecallTurnQuota()` 按会话键计数，由 `session/event` 的 `turn/start` 与 `turn/end`
+ * 双点重置——两者都在只读早退之前注册，只读实例同样具备召回能力
+ * （仍不新增 `ctx.effect`，closer 计数不变）。
+ *
  * 契约说明：apply 收到的 config 是宿主根据 Config schema resolve 出的 volatile
  * 节点对象——顶层每个字段都是 `.get()` 可调用的 volatile 节点。
  * resolveRuntimeConfig 用 Getter<T> 包装读取，兼容普通值与 volatile 节点两种形态
@@ -64,11 +70,19 @@ import {
 import {
   createMemoryCommandDefinition,
   type MemoryCommandDependencies,
+  type MemoryCommandRecallResult,
   type MemoryCommandsRuntime,
   type MemoryInboxWriteOptions,
   type MemoryStatusSnapshot,
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
+import {
+  createMemoryRecallTool,
+  type MemoryRecallStore,
+} from './tools/memory-recall.js'
+import { createQuotaResetListener, createRecallTurnQuota } from './tools/recall-quota.js'
+import { runRecallCore, type RecallCoreResult } from './recall/core.js'
+import type { EmbedClient } from './embedding/client.js'
 import {
   createInboxConsumer,
   drainInboxBackgroundTasks,
@@ -200,6 +214,13 @@ export function memoryRuntimeState(): MemoryRuntimeState {
 }
 
 /**
+ * 召回查询向量的超时预算（Story 3.1）：召回是软目标 ≤500ms，网络等待必须短——
+ * 超时即降级为关键词单路（结果标 `degraded: true`，绝不静默）。
+ * embedding 客户端自身另有 10s 硬超时，这里取更短的值让降级尽快发生。
+ */
+const RECALL_EMBED_TIMEOUT_MS = 4_000
+
+/**
  * 插件激活函数。分级校验：硬校验失败抛错（仅阻塞本插件，宿主继续运行）；
  * 降级项（embedding token/model 缺失、写者锁被占用）走 warn。
  * config 类型用结构化占位——Loader 在运行时按 Config schema resolve 后传入，
@@ -268,6 +289,111 @@ export async function apply(
   const listMemories = (input: { query?: string; limit: number }) =>
     readMemories(readConnection().connection, input)
   const getMemoryById = (id: string) => readMemoryById(readConnection().connection, id)
+  /**
+   * Story 3.1：混合检索内核的调用点（命令面与工具面共用，不复制第二份参数装配）。
+   * 库内 pin 的 embedding 模型 id 取 `db.modelId`——模型不符的节点不进向量路。
+   */
+  const runRecall = async (input: {
+    readonly query: string
+    readonly queryVector: readonly number[] | null
+    readonly limit: number
+    readonly layer?: string
+    /** F-09：宿主取消信号，透传进内核在每条语句边界检查。 */
+    readonly signal?: AbortSignal
+  }): Promise<RecallCoreResult> => {
+    const database = readConnection()
+    return runRecallCore({
+      connection: database.connection,
+      query: input.query,
+      queryVector: input.queryVector,
+      embeddingModelId: database.modelId,
+      rrfK: resolved.rrfK,
+      retrievalTopK: resolved.retrievalTopK,
+      layerWeights: resolved.layerWeights,
+      priorityWeight: resolved.priorityWeight,
+      limit: input.limit,
+      layer: input.layer ?? null,
+      ...(input.signal === undefined ? {} : { signal: input.signal }),
+    })
+  }
+  /**
+   * Story 3.1：recall 的 embedding 客户端——**惰性**构造（只读实例也构造：它不写向量，
+   * 但召回需要查询向量；写者路径的 embeddingClient 在只读早退之后，这里不能依赖它）。
+   * dim 用库内实际 pin 的 `db.dim`（与节点向量同源，AD-14）。
+   */
+  let recallEmbeddingClient: EmbedClient | null | undefined
+  const getRecallEmbeddingClient = (dim: number): EmbedClient | null => {
+    if (recallEmbeddingClient !== undefined) return recallEmbeddingClient
+    recallEmbeddingClient =
+      resolved.embeddingMode === 'enabled' && resolved.embedding.endpoint
+        ? createEmbeddingClient({
+          endpoint: resolved.embedding.endpoint,
+          token: resolved.embedding.token ?? '',
+          dim,
+        })
+        : null
+    return recallEmbeddingClient
+  }
+  const recallStore: MemoryRecallStore = {
+    get embeddingEnabled() {
+      return db !== undefined && resolved.embeddingMode === 'enabled'
+    },
+    async embedQuery(query, signal) {
+      const database = db
+      if (!database) return null
+      // F-02 / AD-14：查询向量与节点向量必须同一模型。写者模式开库时会把库内 pin 改写成本次
+      // 配置的模型（database.ts），只读模式不改写——此时若配置与 pin 不一致，用配置模型取
+      // 查询向量、再对库内异模型向量算余弦，结果排序是噪声。直接跳过向量路（degraded + warn）。
+      const configuredModel = resolved.embedding.model
+      if (configuredModel !== undefined && configuredModel !== database.modelId) {
+        ctx.logger.warn(
+          `召回跳过语义向量路：配置 embedding.model=${configuredModel} 与库内 pin=${database.modelId} 不一致` +
+          '（异模型向量不可比对）；只读实例不修改库级元数据，本次仅关键词单路。',
+        )
+        return null
+      }
+      const client = getRecallEmbeddingClient(database.dim)
+      if (!client) return null
+      // F-09：宿主取消信号与本地 4s 超时任一触发即中止 embed（any 取先到者）。
+      const timeout = AbortSignal.timeout(RECALL_EMBED_TIMEOUT_MS)
+      const combinedSignal = signal === undefined ? timeout : AbortSignal.any([signal, timeout])
+      const result = await client.embed(
+        configuredModel ?? database.modelId,
+        [query],
+        combinedSignal,
+      )
+      if (!result.ok) {
+        // 降级必须可见（FR-11）：日志可见 + 结果标 degraded。
+        ctx.logger.warn(`召回查询向量失败，降级为关键词单路：${result.reason}`)
+        return null
+      }
+      return result.vectors[0] ?? null
+    },
+    async recall(input) {
+      const result = await runRecall(input)
+      // F-01：向量路查询异常已由内核降级（关键词路照常），这里把原因记一次 warn——
+      // 配置态降级（本来就没有查询向量）不重复告警，它由 embedding 配置告警覆盖。
+      if (result.degraded && input.queryVector !== null) {
+        ctx.logger.warn(
+          `召回向量路查询失败，已降级为关键词单路：${result.vectorError ?? '未知原因'}`,
+        )
+      }
+      return result
+    },
+  }
+  /**
+   * `/memory recall` 的 dep（Story 3.1）：手动召回**不计入** turn 配额（配额只在
+   * memory_recall 工具面消耗）。降级语义与工具一致：embed 失败 → 关键词单路。
+   */
+  const recallMemories = async (input: {
+    readonly query: string
+    readonly limit: number
+  }): Promise<MemoryCommandRecallResult> => {
+    const queryVector = await recallStore.embedQuery(input.query)
+    const core = await recallStore.recall({ query: input.query, queryVector, limit: input.limit })
+    // F-07：total（截断前命中数）必须透传到命令面，否则「共 N 条」只会报显示条数。
+    return { total: core.total, results: core.results, degraded: core.degraded, hint: core.hint }
+  }
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛「记忆库未就绪…」，
   // 由命令层收敛为 error 结果，绝不静默返回 0 计数。
@@ -323,6 +449,7 @@ export async function apply(
     listMemories,
     getMemoryById,
     getStatus,
+    recallMemories,
   }
   // 命令的 effect 工厂必须返回可调用 disposer——宿主 commands 服务缺失（裸 ctx）时退化为 no-op。
   ctx.effect(
@@ -333,6 +460,18 @@ export async function apply(
     'omw-memory-command',
   )
   ctx.tools.register(createMemoryRememberTool(() => db))
+  // Story 3.1：每轮召回配额（按会话键；同轮召回族工具合计 3 次，第 4 次返回 quota_exceeded）。
+  // `turn/start` 与 `turn/end` 双点重置（spec D7）。监听必须在只读早退**之前**注册——
+  // 只读实例同样提供 memory_recall。`ctx.on` 自动挂 disposer，这里**不新增 ctx.effect**
+  // （entry-exports 钉死 closer 数）。
+  const recallQuota = createRecallTurnQuota()
+  const recallSessionEvents = ctx as unknown as SessionEventHost
+  recallSessionEvents.on?.('session/event', createQuotaResetListener(recallQuota))
+  ctx.tools.register(createMemoryRecallTool({
+    // 库未就绪（无 profile / 建库未完成）⇒ undefined ⇒ db_unavailable 失败信封。
+    getRecallStore: () => (db === undefined ? undefined : recallStore),
+    quota: recallQuota,
+  }))
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
@@ -363,6 +502,8 @@ export async function apply(
       dim: embedding.dim,
       modelId: embedding.modelId,
       readOnly: lock.mode === 'readonly',
+      // F-06：只读实例的扩展装载失败由此记 warn（写者路径用不到该出口）。
+      logger: ctx.logger,
     })
   } catch (error) {
     // 开库失败就不该占着写者锁——释放引用后把原始错误抛给宿主。

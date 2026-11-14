@@ -228,6 +228,25 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     expect(await readEvidenceInEdgeIds(db.connection, 'p9-tomb')).toEqual([])
   })
 
+  it('F-04 / D10 future-valid 夹具：valid_at > now 的节点被 PAGE 谓词排除，游标前进不回补', async () => {
+    await seedL0(db, 'fv-l0', 'future 原文')
+    await exec(db, [
+      "CREATE (m:memory {id: 'fv-node', layer: 'L1', kind: '', priority: 0, text: 'fv-node',",
+      // 已记录但尚未生效：共享四条件的 `valid_at <= $now` 不成立。
+      "  valid_at: '2999-01-01T00:00:00.000Z', recorded_at: '2026-07-01T00:00:00.000Z',",
+      "  invalid_at: NULL, expired_at: NULL, source_refs: ['fv-l0']})",
+    ].join(' '))
+    await setCursor(db, '2026-06-30T00:00:00.000Z|cursor')
+    const gate = createIdleGate()
+    const backfill = createEvidenceBackfill({ connection: () => db.connection, gate })
+    expect(await backfill.runOnce()).toBe(0)
+    // 不建边（未生效节点不是当前快照）……
+    expect(await readEvidenceInEdgeIds(db.connection, 'fv-node')).toEqual([])
+    // ……且游标只进不退：本页唯一的行被谓词排除 ⇒ 空页 + 非空游标 = 落 done 哨兵，
+    // future-valid 行不会在生效后补边（spec D10 明示接受的代价，生产写路径不可达）。
+    expect(await readCursor(db)).toBe(EVIDENCE_BACKFILL_DONE)
+  })
+
   it('评审 P1（T1）：页内闸门转忙 ⇒ 不落 done、尾部行下一轮被重扫', async () => {
     // 自定义 gate：前 1 次 isIdle=true（入口），随后 false（页内第一次复查即转忙）。
     let calls = 0

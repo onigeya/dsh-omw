@@ -9,6 +9,7 @@ import { spawn } from 'node:child_process'
 import { access, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
+import { loadStorageBackend } from '../src/db/backend'
 import { openMemoryDatabase } from '../src/db/database'
 import { MemoryDbError } from '../src/db/errors'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
@@ -119,6 +120,37 @@ async function startWriterInstance(
     },
   }
 }
+
+describe('F-06：只读扩展 LOAD 的部分成功必须可辨（backend 层组合原因）', () => {
+  /** 只实现 LOAD 所需的 `query`：按扩展名制造失败。 */
+  function fakeConnection(failing: readonly string[], calls: string[]): { query(statement: string): Promise<void> } {
+    return {
+      async query(statement: string) {
+        calls.push(statement)
+        for (const extension of failing) {
+          if (statement.includes(extension)) throw new Error(extension + ' boom')
+        }
+      },
+    }
+  }
+
+  it('vector 失败而 fts 成功：只报 vector 的原因，且 fts 仍被尝试（不被挡住）', async () => {
+    const backend = loadStorageBackend()
+    const calls: string[] = []
+    const fake = fakeConnection(['vector'], calls)
+    // install: false 是只读路径（只 LOAD 不 INSTALL）。
+    await expect(backend.loadExtensions(fake as never, { install: false }))
+      .rejects.toThrow(/扩展 LOAD 失败（vector: vector boom）/)
+    expect(calls).toEqual(['LOAD vector;', 'LOAD fts;'])
+  })
+
+  it('两条都失败：原因逐项出现（不是只留最后一个）', async () => {
+    const backend = loadStorageBackend()
+    const fake = fakeConnection(['vector', 'fts'], [])
+    await expect(backend.loadExtensions(fake as never, { install: false }))
+      .rejects.toThrow(/vector: vector boom；fts: fts boom/)
+  })
+})
 
 describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
   it('写者持锁时第二实例以只读打开同一库：可读库内元数据、写入口抛 readonly_mode', async () => {

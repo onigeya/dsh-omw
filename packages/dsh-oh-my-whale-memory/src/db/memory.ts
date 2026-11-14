@@ -33,6 +33,7 @@ import {
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { collectRows, queryAll } from './rows.js'
+import { currentSnapshotPredicate } from './snapshot.js'
 import { MEMORY_TABLE, META_KEYS, META_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
 
@@ -233,8 +234,10 @@ export async function writeMemoryVersion(
  * Story 1.8 读路径：列表 / 详情。
  *
  * 与写路径共用连接与表，但**只读**：
- * - 列表过滤 `invalid_at IS NULL AND expired_at IS NULL`（当前快照语义，FR-14）；`layer`
- *   不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与其它非枚举值也照常列出；
+ * - 列表过滤走 `src/db/snapshot.ts` 的共享四条件谓词（FR-15 当前快照语义）；
+ *   Story 3.1 起从「只看失效两列」升级为四条件——真实数据 `valid_at` / `recorded_at`
+ *   恒 ≤ now，行为不变；`layer` 不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与
+ *   其它非枚举值也照常列出；
  * - 排序 `recorded_at DESC` + `$limit` 截断全在库侧完成（LadybugDB 0.22.3 已实测
  *   `ORDER BY`、参数化 `LIMIT`、`lower(...) CONTAINS lower(...)` 均可用）；
  * - 关键词是**字面包含**匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
@@ -251,13 +254,13 @@ const LIST_MEMORIES_PROJECTION = [
 
 const LIST_MEMORIES_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE ${currentSnapshotPredicate('m')}`,
   LIST_MEMORIES_PROJECTION,
 ].join(' ')
 
 const LIST_MEMORIES_WITH_KEYWORD_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.invalid_at IS NULL AND m.expired_at IS NULL AND lower(m.text) CONTAINS lower($query)',
+  `WHERE ${currentSnapshotPredicate('m')} AND lower(m.text) CONTAINS lower($query)`,
   LIST_MEMORIES_PROJECTION,
 ].join(' ')
 
@@ -322,6 +325,7 @@ export interface MemoryDetail {
 /**
  * 最近未失效的记忆（`recorded_at` 倒序、最多 `limit` 条，含 Story 1.7 存量 `'L1_INBOX'` 行）。
  * 只读：不写库、不改任何行。关键词做两侧小写化的字面包含匹配。
+ * 快照谓词的 `now` 在此计算并绑参（共享谓词的唯一时间来源）。
  */
 export async function listMemories(
   connection: MemoryConnection,
@@ -329,9 +333,10 @@ export async function listMemories(
 ): Promise<MemoryListEntry[]> {
   const limit = Math.max(0, Math.trunc(options.limit))
   const keyword = options.query?.trim()
+  const now = new Date().toISOString()
   const rows = keyword
-    ? await queryRows(connection, LIST_MEMORIES_WITH_KEYWORD_STATEMENT, { query: keyword, limit })
-    : await queryRows(connection, LIST_MEMORIES_STATEMENT, { limit })
+    ? await queryRows(connection, LIST_MEMORIES_WITH_KEYWORD_STATEMENT, { query: keyword, limit, now })
+    : await queryRows(connection, LIST_MEMORIES_STATEMENT, { limit, now })
   return rows.map((row) => ({
     id: String(row.id),
     layer: String(row.layer ?? ''),
@@ -366,16 +371,17 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
  * L1→L2 提升候选的分页语句（Story 2.5 / 评审 P1+T43）。
  *
  * 用 `(recorded_at, id)` 复合游标**升序**扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
- * - `invalid_at` / `expired_at` 非空 = 已作废，不产出综合陈述；
- * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，与 `eii.ts` 的 `isEffective` 口径对齐。
+ * - 「当前快照」走 `src/db/snapshot.ts` 的共享四条件谓词（Story 3.1 收敛）：失效 / 过期 /
+ *   尚未生效（`valid_at` 在将来）的节点都不产出综合陈述；
+ * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，原先与 `eii.ts` 的 `isEffective`
+ *   口径对齐；Story 3.1 起共享谓词同时补上 `recorded_at <= $now`（对真实数据零行为变化）。
  *   缺这条会把「生效时间在将来」的 L1 选进队列，随后判据① 判 `not-effective` ⇒ 条目终局 done
  *   且来源 L1 永久 gate-fail，而条目 id 确定性、入队前 `readStatus` 跳过 ⇒ 生效后再也不会被提升。
  *   `valid_at` 为 NULL 的行不满足该比较，同样被排除（NULL 比较不为真）。
  */
 const LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  '  WHERE m.layer = $layer AND m.invalid_at IS NULL AND m.expired_at IS NULL',
-  '    AND m.valid_at <= $now',
+  '  WHERE m.layer = $layer AND ' + currentSnapshotPredicate('m'),
   '    AND (m.recorded_at > $after_at OR (m.recorded_at = $after_at AND m.id > $after_id))',
   '  RETURN m.id AS id, m.recorded_at AS recorded_at',
   '  ORDER BY m.recorded_at ASC, m.id ASC',
@@ -530,17 +536,24 @@ export async function countMemoriesByLayer(connection: MemoryConnection): Promis
 
 /**
  * Story 2.4 / U5：`/memory status` 的「未嵌入节点数」——把路径②（向量去重）看不见的节点
- * 变成可见数字。只数**仍有效**的行（与回填目标集同一口径：embedding 为 NULL 且未失效/未过期），
- * 这样数字会随回填收敛到 0。只读。
+ * 变成可见数字。只数**当前快照**的行（与回填目标集同一口径：embedding 为 NULL 且满足
+ * `snapshot.ts` 的四条件），这样数字会随回填收敛到 0。只读。
+ *
+ * Story 3.1 / F-04：从「只看失效两列」换成共享快照谓词——future-valid（`valid_at > now`）
+ * 的节点在生效前不算当前快照，因而不进回填目标集（延后补齐，不是永久跳过）。
+ * `now` 可注入（测试钉 clock）；缺省取当前时刻。
  */
 const COUNT_UNEMBEDDED_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE m.embedding IS NULL AND ${currentSnapshotPredicate('m')}`,
   'RETURN count(m) AS total',
 ].join(' ')
 
-export async function countUnembeddedMemories(connection: MemoryConnection): Promise<number> {
-  const rows = await queryAll(connection, COUNT_UNEMBEDDED_STATEMENT)
+export async function countUnembeddedMemories(
+  connection: MemoryConnection,
+  now: string = new Date().toISOString(),
+): Promise<number> {
+  const rows = await queryRows(connection, COUNT_UNEMBEDDED_STATEMENT, { now })
   const total = Number(rows[0]?.total ?? 0)
   return Number.isFinite(total) && total > 0 ? Math.trunc(total) : 0
 }
@@ -553,12 +566,15 @@ export interface UnembeddedMemoryEntry {
 }
 
 /**
- * 取前 `limit` 条**仍有效**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
+ * 取前 `limit` 条**当前快照**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
  * 只读。回填侧对每轮的条数另有上界（U5：≤50）。
+ *
+ * Story 3.1 / F-04：谓词换成共享四条件（`$now` 绑定）——future-valid 节点在生效前不是
+ * 当前快照，延后到它生效后的那轮补齐（回填按 `recorded_at` 游标前进，不会永久跳过）。
  */
 const LIST_UNEMBEDDED_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
-  'WHERE m.embedding IS NULL AND m.invalid_at IS NULL AND m.expired_at IS NULL',
+  `WHERE m.embedding IS NULL AND ${currentSnapshotPredicate('m')}`,
   'RETURN m.id AS id, m.layer AS layer, m.text AS text',
   'ORDER BY m.recorded_at ASC, m.id ASC',
   'LIMIT $limit',
@@ -567,9 +583,11 @@ const LIST_UNEMBEDDED_STATEMENT = [
 export async function listUnembeddedMemories(
   connection: MemoryConnection,
   limit: number,
+  now: string = new Date().toISOString(),
 ): Promise<UnembeddedMemoryEntry[]> {
   const rows = await queryRows(connection, LIST_UNEMBEDDED_STATEMENT, {
     limit: Math.max(0, Math.trunc(limit)),
+    now,
   })
   return rows.map((row) => ({
     id: String(row.id),

@@ -25,7 +25,9 @@
  * 底层锁错误掩盖。Story 1.5 的写者锁需在此基础上设计（跨进程锁才是真正的第二实例判据）。
  *
  * 只读降级（Story 1.5 / AD-12）：第二实例拿不到写者锁时由调用方传 `readOnly: true`
- * 打开同一个库。只读路径**不建库文件、不建表、不写元数据、不 `INSTALL/LOAD` 扩展**；
+ * 打开同一个库。只读路径**不建库文件、不建表、不写元数据、不 `INSTALL` 扩展**；
+ * Story 3.1 起改为**尽力 `LOAD`** 已安装的扩展（见 createReadOnlyHandle），
+ * 让只读实例保留 recall 能力。
  * 库不存在直接 `db_open_failed`（不创建空库），写入口 `upsertMemory` 抛
  * `readonly_mode`（AC4）。（`apply` 会先为写者锁文件创建 `<profile>/memory/` 目录并在
  * 其中写 `<dbPath>.lock`——那是进程级锁的载体，不属于库写入。）LadybugDB 的顺序约束
@@ -81,6 +83,12 @@ export interface OpenMemoryDatabaseOptions {
    * 只读实例不建目录/建表/写元数据/装扩展，也不执行任何写语句。
    */
   readOnly?: boolean
+  /**
+   * 只读实例的扩展装载告警出口（Story 3.1 / F-06）：只读 best-effort `LOAD` 失败时
+   * 经此记 warn（vector / fts 各自的结果与首个原因）——降级不留静默路径（D8）。
+   * 写者路径不装载扩展（建库时装），此字段对它无意义。
+   */
+  logger?: { warn(message: string): void }
 }
 
 export interface MemoryDatabase {
@@ -195,7 +203,11 @@ async function waitForLibraryFile(dbPath: string): Promise<boolean> {
 /**
  * 只读句柄（Story 1.5 / AC1）：`readOnly` 是 `Database` 构造函数的第 4 个位置参数。
  * 不建目录、不建库——库文件（有界等待后仍）不存在即 fail-loud，只读实例绝不创建空库；
- * 也不 `INSTALL/LOAD` 扩展（只读打开不做任何写动作）。
+ * 也不 `INSTALL` 扩展（只读打开不做任何写动作）。
+ *
+ * Story 3.1：只读实例在 schema 校验通过后**尽力** `LOAD` 已安装的 vector / fts 扩展
+ * （`install: false`，P4 探针：native 只读连接可 `LOAD fts` 而无需 `INSTALL`）。
+ * 见 {@link tryLoadReadOnlyExtensions}——装载失败吞掉，只读开库不得回归。
  */
 async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
   if (!(await waitForLibraryFile(dbPath))) {
@@ -210,6 +222,37 @@ async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
   const handle: RawHandle = { database, connection, readonly: true, backend }
   handles.set(dbPath, handle)
   return handle
+}
+
+/**
+ * Story 3.1：只读实例的扩展装载（best-effort）。
+ *
+ * 时机必须是**库已成功打开之后**（本函数在 `initializeReadOnlyDatabase` 的 schema 校验
+ * 通过后调用）：启动竞态下（写者持锁、库文件刚出现、写者仍在跑 DDL）第一次查询会撞上
+ * `Cannot open database in read-only mode while checkpoint recovery is pending`，而
+ * 失败的首查会把整个 Database 置为不可用——之后连 `table_info`/`MATCH` 都抛同一错误。
+ * 因此绝不能把它放在 createReadOnlyHandle 里抢先于 schema 读。
+ *
+ * 装载失败记 warn 而不抛（只读开库不得回归），但**必须可见**（D8 / F-06）：warn 里带
+ * 逐项原因（vector / fts 各自的结果由 backend 组合），运维才能区分
+ * 「扩展没装 / 缺 OpenSSL 3 / 真故障」，也才能看出是不是部分成功。
+ * wasm 后端下扩展静态编译，`loadExtensions` 是 no-op。
+ */
+async function tryLoadReadOnlyExtensions(
+  backend: StorageBackend,
+  connection: MemoryConnection,
+  dbPath: string,
+  logger?: { warn(message: string): void },
+): Promise<void> {
+  try {
+    await backend.loadExtensions(connection, { install: false })
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    logger?.warn(
+      `只读实例装载 vector/fts 扩展失败（${dbPath}）：${reason}；` +
+      '相关检索路可能不可用——召回会以 degraded 或失败信封显式暴露，不静默。',
+    )
+  }
 }
 
 export async function openMemoryDatabase(options: OpenMemoryDatabaseOptions): Promise<MemoryDatabase> {
@@ -368,6 +411,8 @@ async function initializeReadOnlyDatabase(
         `只读模式打开失败：等待 ${READONLY_SCHEMA_WAIT_MS}ms 后库内仍没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
       )
     }
+    // Story 3.1：schema 校验通过（库已成功打开）后再尽力装载扩展，让只读实例保留 recall。
+    await tryLoadReadOnlyExtensions(handle.backend, connection, dbPath, options.logger)
 
     const store: MemoryDatabase = {
       dbPath,

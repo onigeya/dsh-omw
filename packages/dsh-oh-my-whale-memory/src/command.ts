@@ -1,18 +1,22 @@
 /**
- * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show` / Story 1.9 `status`）。
+ * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show` / Story 1.9 `status`
+ * / Story 3.1 `recall`）。
  *
  * 命令定义是可脱离宿主单测的纯工厂：解析与错误收敛不依赖 ctx。handler 只读
  * `invocation.rawInput`，把任何读/写库异常收敛为 `{ kind: 'error', text }`——命令
  * 永不抛出（宿主契约：thrown handler 会以 `kind: 'error'` 收尾，见 commands.md:172）。
  *
- * 四个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
+ * 五个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
  * - `remember [--kind=..] [--priority=..] <内容>`：写入 L1（Story 1.7 + 1.11 层收敛）；
  * - `list [关键词]`：最近的记忆（文本包含匹配、`recorded_at` 倒序、默认 20 条）；
  * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）；
- * - `status`：层计数 + failed + embedding 降级 + 只读降级（Story 1.9，无参、纯读、无 LLM/网络）。
+ * - `status`：层计数 + failed + embedding 降级 + 只读降级（Story 1.9，无参、纯读、无 LLM/网络）；
+ * - `recall <query>`：混合检索（向量 + 关键词 RRF 融合，Story 3.1；**不计入** turn 配额，
+ *   用户手动触发；渲染同 memory_recall 工具摘要）。
  *
  * `list [关键词]` 是**字面包含匹配**（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
- * 过滤、排序、截断都由 db 层在库侧完成，命令层只做渲染。
+ * 语义检索走 `recall`（db 侧 src/recall/core.ts）。过滤、排序、截断都由 db 层在库侧完成，
+ * 命令层只做渲染。
  *
  * `@deepseek-ai/dsh-commands` 在本工作区不可解析，故这里只用本地结构化类型描述
  * 命令定义 / 调用 / 结果——运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
@@ -22,6 +26,8 @@
  * （FR-20 分类写路径，AC2——手动写路径也能产出非空 kind / 非 0 priority，含 -1）。
  */
 import { MEMORY_KINDS } from './tools/memory-remember.js'
+import { summarizeMemoryText } from './summarize.js'
+import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 
 /** 宿主命令名（小写、无前导斜杠）。 */
 export const MEMORY_COMMAND_NAME = 'memory'
@@ -33,6 +39,8 @@ export const MEMORY_LIST_SUBCOMMAND = 'list'
 export const MEMORY_SHOW_SUBCOMMAND = 'show'
 /** `status` 子命令：记忆规模与运行态（Story 1.9）。 */
 export const MEMORY_STATUS_SUBCOMMAND = 'status'
+/** `recall` 子命令：混合检索（Story 3.1）。 */
+export const MEMORY_RECALL_SUBCOMMAND = 'recall'
 
 /**
  * `list` 默认返回条数。
@@ -66,15 +74,29 @@ export const MEMORY_SHOW_USAGE = [
   '查看一条记忆的完整字段（含已失效记忆）。id 取自 /memory list 的输出。',
 ].join('\n')
 
-/**
- * `status` 子命令的 usage（spec 钉死值：`/memory status`）。
+/** `status` 子命令的 usage（spec 钉死值：`/memory status`）。
  *
  * `status` 无参数：解析到多余 payload 时返回本常量作为错误正文（不静默忽略输入），
  * 但**不回显**用户输入的 payload——错误正文恒为命令形态本身。
  */
 export const MEMORY_STATUS_USAGE = '/memory status'
 
-/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status 四条）。 */
+/**
+ * `recall` 子命令的缺省条数（F-10）：直接复用内核的 `RECALL_DEFAULT_LIMIT`，
+ * **不再自己写字面量**——命令面与工具面的缺省条数从此只有一个来源（此前两份 5
+ * 只能靠测试的 drift-guard 兜住，注释还谎称「取自内核」）。
+ */
+export const MEMORY_RECALL_DEFAULT_LIMIT = RECALL_DEFAULT_LIMIT
+
+/** `recall` 子命令缺少 query 时的 usage 提示。 */
+export const MEMORY_RECALL_USAGE = [
+  '用法：/memory recall <query>',
+  '',
+  '混合检索记忆（语义向量路 + 关键词路，RRF 融合排序，最多 ' + MEMORY_RECALL_DEFAULT_LIMIT + ' 条）。',
+  '示例：/memory recall RRF 融合',
+].join('\n')
+
+/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall 五条）。 */
 export const MEMORY_COMMAND_USAGE = [
   '用法：/memory <子命令>',
   '',
@@ -85,6 +107,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_SHOW_USAGE,
   '',
   MEMORY_STATUS_USAGE,
+  '',
+  MEMORY_RECALL_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -117,6 +141,25 @@ export interface MemoryCommandListEntry {
   readonly id: string
   readonly layer: string
   readonly text: string
+}
+
+/** 召回命中项（命令层镜像 src/recall/core.ts 的 `RecallResultItem`；不 import db 模块）。 */
+export interface MemoryCommandRecallEntry {
+  readonly id: string
+  readonly layer: string
+  readonly kind: string
+  readonly priority: number
+  readonly text: string
+  readonly truncated?: boolean
+  readonly evidence?: readonly string[]
+}
+
+/** 召回结果（与 memory_recall 工具成功值同形：results + degraded + hint；total = limit 截断前命中数）。 */
+export interface MemoryCommandRecallResult {
+  readonly total: number
+  readonly results: readonly MemoryCommandRecallEntry[]
+  readonly degraded: boolean
+  readonly hint: string
 }
 
 /** 单条记忆详情（db 层 `getMemoryById` 的返回形状；字段与 show 渲染顺序一致）。 */
@@ -248,14 +291,20 @@ export interface MemoryCommandDependencies {
   getMemoryById(id: string): Promise<MemoryCommandDetail | null>
   /** 读层计数与运行态（Story 1.9）；抛错由 handler 收敛为 error 结果。 */
   getStatus(): Promise<MemoryStatusSnapshot>
+  /**
+   * 混合检索（Story 3.1；渲染层只消费结果）。手动 `recall` **不计入** turn 配额——
+   * 配额在 memory_recall 工具面消耗；抛错由 handler 收敛为 error 结果。
+   */
+  recallMemories(input: { readonly query: string; readonly limit: number }): Promise<MemoryCommandRecallResult>
 }
 
-/** 解析结果：四个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
+/** 解析结果：五个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
 export type MemoryCommandParseResult =
   | { kind: 'remember', text: string, classification?: MemoryInboxWriteOptions }
   | { kind: 'list', query?: string }
   | { kind: 'show', id: string }
   | { kind: 'status' }
+  | { kind: 'recall', query: string }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -315,6 +364,7 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
  * - `list` → 其余 trim 后为可选关键词（可为空，表示不过滤）；
  * - `show` → 其余 trim 后为 id；为空给 `MEMORY_SHOW_USAGE`；
  * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
+ * - `recall` → 其余 trim 后为检索 query；为空给 `MEMORY_RECALL_USAGE`（Story 3.1）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
@@ -333,27 +383,22 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return payload ? { kind: 'show', id: payload } : { kind: 'invalid', usage: MEMORY_SHOW_USAGE }
     case MEMORY_STATUS_SUBCOMMAND:
       return payload ? { kind: 'invalid', usage: MEMORY_STATUS_USAGE } : { kind: 'status' }
+    case MEMORY_RECALL_SUBCOMMAND:
+      return payload ? { kind: 'recall', query: payload } : { kind: 'invalid', usage: MEMORY_RECALL_USAGE }
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
 }
 
-/** 异常转可读文本：Error 取 message，其它取字符串。绝不携带凭据（只含用法/字段名）。 */
+/**
+ * 异常转可读文本：Error 取 message，其它取字符串。绝不携带凭据（只含用法/字段名）。
+ */
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** 列表摘要长度上限：超过则截断并加省略号（spec 钉死的输出格式）。 */
-const MEMORY_LIST_SUMMARY_LIMIT = 60
-
-/** 列表摘要：空白折叠为单空格并 trim，超 60 个 code point 截断加 `…`。 */
-function summarizeMemoryText(text: string): string {
-  const collapsed = text.replace(/\s+/g, ' ').trim()
-  const codePoints = [...collapsed]
-  return codePoints.length > MEMORY_LIST_SUMMARY_LIMIT
-    ? `${codePoints.slice(0, MEMORY_LIST_SUMMARY_LIMIT).join('')}…`
-    : collapsed
-}
+// 列表/召回共用的文本摘要（60 code point 截断）已抽到 ./summarize.ts（Story 3.1：
+// memory_recall 工具 presenter 也要同一规则，命令层不 import db 模块故单独成模块）。
 
 /** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，绝不出现 `undefined`。 */
 function renderValue(value: unknown): string {
@@ -389,6 +434,23 @@ function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: str
     `记忆列表（共 ${entries.length} 条，最近优先）：`,
     ...entries.map((entry) => `- ${entry.id} [${entry.layer}] ${summarizeMemoryText(entry.text)}`),
   ].join('\n')
+}
+
+/**
+ * 召回渲染（Story 3.1）：与 memory_recall 工具的 presenter 同形摘要——
+ * 首行 `记忆召回（共 <total> 条，显示 <N> 条，按 RRF 排序）：`（**total 是 limit 截断前**
+ * 的融合命中数，D6：用户据此看到「还有多少没显示」），其后每行 `- <id> [<layer>] <text摘要>`；
+ * 末行展示内核 `hint`（降级/无命中的说明**只有 hint 一个来源**，两个渲染面不再各拼文案）。
+ * 无命中是**正常成功值**，直接返回 hint（`无匹配记忆。` / 降级版），不是错误。
+ */
+function renderMemoryRecall(result: MemoryCommandRecallResult): string {
+  if (result.results.length === 0) return result.hint
+  const lines = [
+    `记忆召回（共 ${result.total} 条，显示 ${result.results.length} 条，按 RRF 排序）：`,
+    ...result.results.map((entry) => `- ${entry.id} [${entry.layer}] ${summarizeMemoryText(entry.text)}`),
+  ]
+  if (result.hint !== '') lines.push(result.hint)
+  return lines.join('\n')
 }
 
 /**
@@ -496,8 +558,10 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
 export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '记录与浏览长期记忆（remember / list / show / status）',
-    input: { hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status' },
+    description: '记录与浏览长期记忆（remember / list / show / status / recall）',
+    input: {
+      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query>',
+    },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
         const parsed = parseMemoryCommand(invocation.rawInput)
@@ -521,6 +585,12 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
           case 'status': {
             const snapshot = await deps.getStatus()
             return { kind: 'success', text: renderMemoryStatus(snapshot) }
+          }
+          case 'recall': {
+            // 手动召回不计入 turn 配额（配额只作用于 memory_recall 工具面）；
+            // 库未就绪/查询失败由 deps 抛错，下面的 catch 收敛为 error 结果。
+            const result = await deps.recallMemories({ query: parsed.query, limit: MEMORY_RECALL_DEFAULT_LIMIT })
+            return { kind: 'success', text: renderMemoryRecall(result) }
           }
         }
       } catch (error) {

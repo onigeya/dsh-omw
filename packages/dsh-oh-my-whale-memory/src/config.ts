@@ -58,6 +58,8 @@ export const Config = Schema.object({
   rrfK: Schema.number().default(60).volatile(),
   retrievalTopK: Schema.number().default(50).volatile(),
   layerWeights: LayerWeightsSchema,
+  // priority 二次加权系数（Story 3.1 / FR-16）：排序分再乘 `1 + priorityWeight × priority/100`。
+  priorityWeight: Schema.number().default(0.5).volatile(),
   llmProvider: Schema.string().volatile(),
   llmModel: Schema.string().volatile(),
   systemOne: SystemOneSchema,
@@ -77,6 +79,8 @@ export interface RuntimeConfig {
   rrfK: number
   retrievalTopK: number
   layerWeights: { l2: number; l1: number }
+  /** priority 二次加权系数（≥0；0 = 关闭 priority 对排序的影响，Story 3.1 / FR-16）。 */
+  priorityWeight: number
   llmProvider?: string
   llmModel?: string
   systemOne: { enabled: boolean; endpoint?: string; model?: string; token?: string }
@@ -122,6 +126,17 @@ function requireUnitWeight(field: string, value: number): number {
 }
 
 /**
+ * priority 二次加权系数硬校验（Story 3.1 / FR-16）：必须有限且 ≥ 0。
+ * 0 是合法值（显式关闭 priority 对排序的影响），负数会让高优先级节点反被压低。
+ */
+function requireNonNegativeWeight(field: string, value: number): number {
+  if (!Number.isFinite(value) || value < 0) {
+    throw new Error(`${field}（期望有限且 ≥ 0 的数，实际 ${value}）`)
+  }
+  return value
+}
+
+/**
  * 分级校验入口。
  * 硬校验失败即抛 Error（仅阻塞本插件，宿主继续运行）；
  * Embedding token/model 缺失走降级（warn + embeddingMode='disabled'，FR-18）。
@@ -135,6 +150,7 @@ export function resolveRuntimeConfig(config: {
   rrfK?: Getter<number>
   retrievalTopK?: Getter<number>
   layerWeights?: Getter<{ l2?: number; l1?: number }>
+  priorityWeight?: Getter<number>
   llmProvider?: Getter<string | undefined>
   llmModel?: Getter<string | undefined>
   systemOne?: Getter<{ enabled?: boolean; endpoint?: string; model?: string; token?: string }>
@@ -169,11 +185,14 @@ export function resolveRuntimeConfig(config: {
   if (!Number.isFinite(rrfK) || rrfK <= 0) {
     throw new Error(`rrfK（期望 > 0 的数，实际 ${rrfK}）`)
   }
-  const retrievalTopK = read(config.retrievalTopK ?? 50)
+  // F-12：与相邻 rrfK 同款硬校验——生成为 NaN/0/负数会被 `Math.max(1, Math.trunc(...))`
+  // 静默变成 1（或把 NaN 绑进 $k/TOP 变成查询期失败），配错必须 fail-loud。
+  const retrievalTopK = requirePositiveInt('retrievalTopK', read(config.retrievalTopK ?? 50))
 
   const weightsRaw = read(config.layerWeights ?? {}) as { l2?: number; l1?: number }
   const l2 = requireUnitWeight('layerWeights.l2', weightsRaw.l2 ?? 0.7)
   const l1 = requireUnitWeight('layerWeights.l1', weightsRaw.l1 ?? 0.4)
+  const priorityWeight = requireNonNegativeWeight('priorityWeight', read(config.priorityWeight ?? 0.5))
 
   const systemOneRaw = read(config.systemOne ?? {}) as {
     enabled?: boolean
@@ -204,6 +223,7 @@ export function resolveRuntimeConfig(config: {
     rrfK,
     retrievalTopK,
     layerWeights: { l2, l1 },
+    priorityWeight,
     llmProvider: llmProvider || undefined,
     llmModel: llmModel || undefined,
     systemOne: {
@@ -229,6 +249,7 @@ export interface ConfigShape {
   rrfK: Volatile<number>
   retrievalTopK: Volatile<number>
   layerWeights: Volatile<{ l2: number; l1: number }>
+  priorityWeight: Volatile<number>
   llmProvider: Volatile<string | undefined>
   llmModel: Volatile<string | undefined>
   systemOne: Volatile<{ enabled: boolean }>

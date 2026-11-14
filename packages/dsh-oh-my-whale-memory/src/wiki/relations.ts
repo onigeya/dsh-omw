@@ -33,6 +33,7 @@ import {
 import { readPinnedEmbeddingDim } from '../db/dedup.js'
 import { writeRelatedEdges, type RelatedEdgeInput } from '../db/edges.js'
 import { collectRows } from '../db/rows.js'
+import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { GENERATION_LOG_TABLE, MEMORY_TABLE, META_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import { foldStream } from '../distill/stream-fold.js'
@@ -90,8 +91,7 @@ const RECALL_STATEMENT = [
   "CALL QUERY_VECTOR_INDEX('" + MEMORY_TABLE + "', '" + VECTOR_INDEX_NAME + "', $q, $k)",
   'WITH node, distance',
   'MATCH (node)',
-  'WHERE node.valid_at <= $now AND node.recorded_at <= $now',
-  '  AND node.invalid_at IS NULL AND node.expired_at IS NULL',
+  'WHERE ' + currentSnapshotPredicate('node'),
   // 评审 P19b（T24）：自身排除**下推**到查询（与 dedup.ts:117 同一形态）。
   // 原先在 JS 里 continue 过滤会让自身白占一个 top-K 名额（k=8 实际最多 7 条）。
   "  AND node.id <> $self_id",
