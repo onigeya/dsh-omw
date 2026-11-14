@@ -10,14 +10,24 @@
  * （AGENTS.md「不假设 hoisting」）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { collectResultRows } from './backend.js'
+import { closeQueryResult, collectResultRows } from './backend.js'
 
-/** 取第一条结果集的全部行（多语句时 query() 返回结果集数组）。 */
+/**
+ * 取第一条结果集的全部行（多语句时 query() 返回结果集数组），并**释放结果对象**。
+ *
+ * 取行与释放必须成对：结果对象存活即 pin 住 buffer pool 的页，泄漏会在若干次查询后把池
+ * 塞满并让同连接的一切查询/写入失败（实测见 backend.ts 的 closeQueryResult）。
+ * 释放放在 finally：取行抛错同样要回收，否则错误路径也在泄漏。
+ */
 export async function collectRows(
   result: lbug.QueryResult | lbug.QueryResult[],
 ): Promise<Record<string, unknown>[]> {
-  // 取行方式按结果对象自身能力分派（native getAll / wasm getAllObjects），见 backend.ts。
-  return collectResultRows(result)
+  try {
+    // 取行方式按结果对象自身能力分派（native getAll / wasm getAllObjects），见 backend.ts。
+    return await collectResultRows(result)
+  } finally {
+    await closeQueryResult(result)
+  }
 }
 
 /** 无参查询取全部行。 */

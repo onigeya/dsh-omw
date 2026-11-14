@@ -95,8 +95,9 @@ function nativeBackend(module: LoadedModule): StorageBackend {
     },
     async loadExtensions(connection) {
       // 扩展是每进程装载（失败含 Windows 缺 OpenSSL 3），必须冒泡。
-      await connection.query('INSTALL vector; LOAD vector;')
-      await connection.query('INSTALL fts; LOAD fts;')
+      // 多语句 query() 返回 Array[2]：必须走 runStatement 逐个释放，否则首开就泄漏 4 个结果。
+      await runStatement(connection, 'INSTALL vector; LOAD vector;')
+      await runStatement(connection, 'INSTALL fts; LOAD fts;')
     },
     async close(database, connection) {
       try {
@@ -175,6 +176,57 @@ export async function collectResultRows(
     'db_backend_unavailable',
     '查询结果对象既没有 getAll() 也没有 getAllObjects()：不认识的 lbug 结果形态',
   )
+}
+
+/**
+ * 释放查询结果（best-effort，绝不抛错）。
+ *
+ * **每个 QueryResult 都必须释放**：0.22.3 的结果对象在存活期间持有 native 结果对象
+ * （wasm 后端是 worker `objectsStore` 里的强引用），不释放会持续 pin 住 buffer pool 的页。
+ * 实测（2026-11-14，同 0.22.3）：64MB 池下不释放的查询第 195 次即以
+ * 「Buffer manager exception: Unable to allocate memory! The buffer pool is full and no
+ * memory could be freed!」失败；wasm 默认池下第 1632 次失败；每次 close 的两组对照
+ * 各 2 万/1 万次通过。失败症状是**全局**的：池满后同连接所有查询与写入都抛该异常，
+ * 上层 catch 会把它吞成「静默失败 / 数据丢失」。
+ *
+ * 多语句 `query()` 返回 QueryResult[]，**每一项都要释放**（实测 `INSTALL fts; LOAD fts;`
+ * 返回 Array[2]）。两后端都有 `close()`（native 同步、wasm 异步），故不按后端分派。
+ *
+ * 关闭失败只吞掉：这是回收路径，不该把已成功的查询/写入翻成失败。
+ */
+export async function closeQueryResult(
+  result: lbug.QueryResult | lbug.QueryResult[] | null | undefined,
+): Promise<void> {
+  if (result === null || result === undefined) return
+  const list: readonly unknown[] = Array.isArray(result) ? result : [result]
+  for (const item of list) {
+    try {
+      await (item as { close?: () => void | Promise<void> }).close?.()
+    } catch {
+      /* 尽力回收 */
+    }
+  }
+}
+
+/**
+ * 执行一条**不取行**的语句（DDL / 写语句）并释放结果。
+ *
+ * 存在的理由：`await connection.query(...)` 的返回值若不释放就是一次 buffer pool pin 泄漏。
+ * 只取行的路径一律走 rows.ts 的 collectRows/queryAll（它们内部也会释放），不要在这里取行。
+ */
+export async function runStatement(connection: lbug.Connection, statement: string): Promise<void> {
+  await closeQueryResult(await connection.query(statement))
+}
+
+/**
+ * 执行一条 prepared 语句（写路径）并释放结果。取行请改用 rows.ts 的 collectRows。
+ */
+export async function runPrepared(
+  connection: lbug.Connection,
+  statement: lbug.PreparedStatement,
+  params: Record<string, lbug.LbugValue> = {},
+): Promise<void> {
+  await closeQueryResult(await connection.execute(statement, params))
 }
 
 const backends = new Map<StorageBackendKind, StorageBackend>()

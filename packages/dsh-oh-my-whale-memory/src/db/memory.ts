@@ -30,6 +30,7 @@ import {
   insertGenerationLog,
   type MemoryActor,
 } from './audit.js'
+import { runPrepared } from './backend.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { collectRows, queryAll } from './rows.js'
@@ -459,7 +460,8 @@ export async function writeL2PromotionCursor(
   value: string,
 ): Promise<void> {
   const prepared = await connection.prepare(MERGE_META_STATEMENT)
-  await connection.execute(prepared, { key: META_KEYS.l2PromotionCursor, value })
+  // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+  await runPrepared(connection, prepared, { key: META_KEYS.l2PromotionCursor, value })
 }
 
 /**

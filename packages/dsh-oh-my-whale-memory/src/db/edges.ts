@@ -14,6 +14,7 @@
  *   这样 EVIDENCE 能与节点写入同事务（AD-10 置序）。
  */
 import type * as lbug from '@ladybugdb/core'
+import { runStatement } from './backend.js'
 import { collectRows } from './rows.js'
 import { createEvidenceTableStatement, createRelatedTableStatement, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
@@ -97,8 +98,9 @@ const DIRECT_IN_EDGE_IDS = [
  *  （brief §2.3 N14）。只读实例走 initializeReadOnlyDatabase，不经本函数（AD-12）。 */
 export async function ensureEdgeTables(connection: lbug.Connection): Promise<void> {
   await runInTransaction(connection, async () => {
-    await connection.query(createEvidenceTableStatement())
-    await connection.query(createRelatedTableStatement())
+    // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+    await runStatement(connection, createEvidenceTableStatement())
+    await runStatement(connection, createRelatedTableStatement())
   })
 }
 
