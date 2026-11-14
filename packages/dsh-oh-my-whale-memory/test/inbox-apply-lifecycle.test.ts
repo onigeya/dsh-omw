@@ -172,7 +172,8 @@ describe('③：消费者与 session/event 监听器共享同一 gate 实例（V
 
     expect(registeredDefs).toHaveLength(1)
     // Story 3.1：召回配额重置 + 闸门/采集 两个监听器（事件派发见 replay helper）。
-    expect(listeners).toHaveLength(2)
+    // Story 3.3 / F-05：注入面的 `session/disposed` 清理监听（第三个 session/event 监听器）。
+    expect(listeners).toHaveLength(3)
     expect(info.mock.calls.flat().join('\n')).toContain('记忆库就绪')
 
     const gate = captured.options?.gate
@@ -224,7 +225,8 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
 
     expect(plugin.inject).toContain('sessions')
     // Story 3.1：召回配额重置 + 三钩子采集 两个监听器。
-    expect(listeners).toHaveLength(2)
+    // Story 3.3 / F-05：注入面的 `session/disposed` 清理监听（第三个 session/event 监听器）。
+    expect(listeners).toHaveLength(3)
 
     const session = { id: 'apply-capture', deriveMessages: () => [{ role: 'user', content: '轮末原文' }] }
     replay({ listeners }, session, { type: 'turn/end', seq: 9, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
