@@ -97,6 +97,18 @@ describe('createQuotaResetListener（turn/start 与 turn/end 双点重置）', (
     expect(quota.used(S2)).toBe(1)
   })
 
+  it("turn 边界带真实 session 时也清 'unknown' 桶（F-08 混合路径）", () => {
+    const quota = createRecallTurnQuota()
+    const listener = createQuotaResetListener(quota)
+    for (let i = 0; i < RECALL_TURN_QUOTA; i += 1) quota.consume('unknown')
+    expect(quota.consume('unknown')).toBe(false)
+
+    listener({ id: S1 }, { type: 'turn/start' })
+
+    expect(quota.used('unknown')).toBe(0)
+    expect(quota.consume('unknown')).toBe(true)
+  })
+
   it('其它事件 / 缺 type / 缺 session：不重置；缺 session 归 unknown 桶', () => {
     const quota = createRecallTurnQuota()
     const listener = createQuotaResetListener(quota)

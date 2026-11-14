@@ -54,11 +54,18 @@ export function createRecallTurnQuota(limit: number = RECALL_TURN_QUOTA): Recall
  * `session/event` 监听器：`turn/start` 与 `turn/end` **双点**重置该会话的配额（spec D7）。
  * 其它事件（`step/end`、`compaction/start`、未知/缺 `type`）一律忽略。
  * 裸 ctx 下 `on` 不存在时由调用方降级为不监听（与 index.ts 既有 session 监听同款）。
+ *
+ * F-08：**turn 边界同时清 `'unknown'` 桶**——工具侧 owner 取 `exec.agent.session`，某些宿主
+ * 路径缺它时归 `'unknown'`；若只清事件里的真实 session 键，混合场景（工具调用缺 owner、
+ * turn 事件带 session）下该桶进程内用满 3 次后永不恢复。turn 边界是全局事件，
+ * 「跨 turn 重置」对未认领会话的桶同样成立。
  */
 export function createQuotaResetListener(quota: RecallQuota): (session: unknown, event: unknown) => void {
   return (session, event) => {
     const type = (event as { readonly type?: unknown } | null | undefined)?.type
     if (type !== 'turn/start' && type !== 'turn/end') return
-    quota.reset(inboxSessionKey(session))
+    const owner = inboxSessionKey(session)
+    quota.reset(owner)
+    if (owner !== 'unknown') quota.reset('unknown')
   }
 }
