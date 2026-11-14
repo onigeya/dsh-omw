@@ -51,6 +51,8 @@ describe('memory 插件入口导出形态', () => {
     // Story 2.3：INBOX 精炼走宿主单通道 ctx.llm（AD-5），路由回退链读 session（AC:567）。
     expect(plugin.inject).toContain('llm')
     expect(plugin.inject).toContain('sessions')
+    // Story 3.3：新会话开局注入的静态 section + 动态 context 需要 ctx.systemPrompt（AC:921）。
+    expect(plugin.inject).toContain('systemPrompt')
   })
 
   it('apply 走分级校验 wiring：降级时 ctx.logger.warn 收到消息，合法配置无降级 warn', async () => {

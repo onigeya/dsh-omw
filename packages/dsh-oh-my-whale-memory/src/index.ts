@@ -78,6 +78,8 @@ import {
 } from './command.js'
 import { createMemoryRememberTool, MEMORY_REMEMBER_LAYER } from './tools/memory-remember.js'
 import { createMemoryRelatedTool } from './tools/memory-related.js'
+import { createInjectionStore } from './injection/state.js'
+import { registerInjectionPrompt, type InjectionPromptHost } from './injection/prompt.js'
 import {
   createMemoryRecallTool,
   type MemoryRecallStore,
@@ -197,8 +199,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * `'tools'`：工具注册表——memory_remember 经 `ctx.tools.register` 注册（Story 1.6）。
  * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
  * `'llm'`：INBOX 精炼的宿主单通道 `ctx.llm`（Story 2.3 / AD-5，显式 provider+model）。
+ * `'systemPrompt'`：新会话开局注入的 section + 动态 context（Story 3.3 / FR-9 / AD-23）。
  */
-export const inject = ['commands', 'settings', 'tools', 'sessions', 'llm'] as const
+export const inject = ['commands', 'settings', 'tools', 'sessions', 'llm', 'systemPrompt'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -514,6 +517,16 @@ export async function apply(
     getRelatedStore: () => (db === undefined ? undefined : relatedStore),
     quota: recallQuota,
   }))
+
+  // Story 3.3 / B1：注入面（静态 section `omw-memory` + 动态 context provider）必须在
+  // **只读早退之前**注册——写者与只读实例都要有注入面。裸 ctx（无 `systemPrompt` 服务）
+  // 整面跳过、不抛错。注册返回的是宿主 systemPrompt 作用域的 effect disposer，由 ctx
+  // 生命周期自动回收，**不新增 ctx.effect**（entry-exports 的 closer 数不变）。
+  const injectionStore = createInjectionStore()
+  const systemPromptHost = (ctx as unknown as { readonly systemPrompt?: InjectionPromptHost }).systemPrompt
+  if (systemPromptHost !== undefined) {
+    registerInjectionPrompt(systemPromptHost, injectionStore)
+  }
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。
   // 无 profileContext（单测/裸 Context）时跳过建库，不猜测路径。
