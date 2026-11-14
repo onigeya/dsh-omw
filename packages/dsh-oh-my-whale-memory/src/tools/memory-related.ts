@@ -21,7 +21,7 @@ import {
   type RelatedTraversalResult,
 } from '../db/edges.js'
 import { MemoryDbError } from '../db/errors.js'
-import { summarizeMemoryText } from '../summarize.js'
+import { summarizeMemoryText } from '../shared/summarize.js'
 import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import { toRelatedSuccessView, type RelatedViewEntry } from './related-shared.js'
 import type { RecallQuota } from './recall-quota.js'

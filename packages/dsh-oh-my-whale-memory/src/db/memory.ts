@@ -46,7 +46,7 @@ export type MemoryConnection = lbug.Connection
 /**
  * kind / priority 的**单一缺省常量**（Story 2.3 / N10）：这两列的语义归 db 层，
  * 写路径（本文件）与精炼路径（src/distill/*）都必须引用它们，不得再写字面量。
- * kind 缺省空串、priority 缺省 0；合法 kind 值域见 src/tools/memory-remember.ts 的 MEMORY_KINDS。
+ * kind 缺省空串、priority 缺省 0；合法 kind 值域见 src/shared/memory-vocab.ts 的 MEMORY_KINDS。
  */
 export const DEFAULT_MEMORY_KIND = ''
 export const DEFAULT_MEMORY_PRIORITY = 0

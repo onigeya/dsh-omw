@@ -26,7 +26,7 @@ import type * as lbug from '@ladybugdb/core'
 import { collectRows } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { FTS_INDEX_NAME, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
-import { estimateTokens, splitToBudget } from '../distill/llm-refine.js'
+import { estimateTokens, splitToBudget } from '../shared/text-budget.js'
 
 /** BM25 查询期参数（FR-11：K=1.2 / B=0.75；建索引时用官方默认，见 schema.ts）。 */
 export const BM25_K = 1.2
@@ -45,8 +45,8 @@ export const RECALL_MIN_LIMIT = 1
 export const RECALL_TEXT_TOKEN_BUDGET = 256
 
 /**
- * 召回侧真截断（spec Always 第 6 条）：复用精炼侧同一 token 估算与切分器
- * （`estimateTokens` / `splitToBudget`，distill/llm-refine.ts:133/150），取**首段**并追加
+ * 召回侧真截断（spec Always 第 6 条）：复用与精炼侧同一套 token 估算与切分器
+ * （`estimateTokens` / `splitToBudget`，src/shared/text-budget.ts），取**首段**并追加
  * `…`。只改返回的 text，**不改节点集合**：命中不丢，需要全文时按 id 另查（`/memory show`）。
  */
 export function truncateRecallText(text: string): { readonly text: string; readonly truncated: boolean } {

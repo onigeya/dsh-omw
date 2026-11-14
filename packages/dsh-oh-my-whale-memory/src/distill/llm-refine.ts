@@ -9,7 +9,8 @@
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
-import { MEMORY_KINDS } from '../tools/memory-remember.js'
+import { MEMORY_KINDS } from '../shared/memory-vocab.js'
+import { estimateTokens, splitToBudget as splitTextToBudget } from '../shared/text-budget.js'
 import { foldStream, type FoldedStream } from './stream-fold.js'
 
 /** sentinel preamble（§14 / AC:573）：字段说明永远不是合法值。 */
@@ -19,7 +20,7 @@ export const REFINE_SENTINEL_PREAMBLE = 'Field descriptions are never valid valu
 export const REFINE_PROMPT_VERSION = '2'
 
 /**
- * 七类标识符的枚举串（单一来源 = memory-remember.ts 的 MEMORY_KINDS）。
+ * 七类标识符的枚举串（单一来源 = src/shared/memory-vocab.ts 的 MEMORY_KINDS）。
  * 评审 T2：模型拿不到标识符清单 ⇒ kind 恒判非法 ⇒ 全部收敛为空、七类分类实际失效。
  */
 const KIND_ENUM = MEMORY_KINDS.join(' / ')
@@ -122,57 +123,18 @@ export interface RefineInput {
   readonly maxTokens?: number
 }
 
-const CJK_PATTERN = /[\u2E80-\u303F\u3040-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/u
-const SENTENCE_END_PATTERN = /[。！？!?；;\n]/u
-
 /**
- * 极简 token 估算：CJK 每字符算 1 token，其余按空白切词、每词再按字符长度折算
- * （约 4 字符 1 token，评审 T15：URL/hash/base64/压缩 JSON 这类无空白长串原先只算 1 token，
- * 会让「每条 ≤150 token」在它们身上失效）。只用于本地收敛，不做计费。
+ * 极简 token 估算：实现在 src/shared/text-budget.ts（精炼与召回共用同一套规则）。
+ * 这里 re-export 保持既有 import 路径与调用点不变。
  */
-export function estimateTokens(text: string): number {
-  let cjk = 0
-  let rest = ''
-  for (const ch of text) {
-    if (CJK_PATTERN.test(ch)) cjk += 1
-    else rest += ch
-  }
-  const words = rest.split(/\s+/u).filter((word) => word.length > 0)
-  const restChars = words.reduce((total, word) => total + word.length, 0)
-  // 下限取词数（短词至少 1 token），上限按字符数/4（长 URL/hash 不会只算 1 token）。
-  return cjk + Math.max(words.length, Math.ceil(restChars / 4))
-}
+export { estimateTokens }
 
 /**
- * 把一段超预算文本切成 ≤budget token 的连续片段：优先在句末切，单句超预算则按字符硬切。
- * 各片段**分别 trim 后按原顺序拼接**（不等于原文逐字，首尾空白会被吃掉，评审 T16）。
+ * 精炼侧切分：缺省预算 = 单条原子卡片上限 {@link MAX_REFINE_FACT_TOKENS}；
+ * 实现在 src/shared/text-budget.ts（budget 必填，缺省值属于各调用方的业务常量）。
  */
 export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOKENS): string[] {
-  const trimmed = text.trim()
-  if (trimmed.length === 0) return []
-  if (estimateTokens(trimmed) <= budget) return [trimmed]
-  const pieces: string[] = []
-  let start = 0
-  let lastBreak = 0
-  let cursor = 0
-  for (const ch of trimmed) {
-    const before = cursor
-    cursor += ch.length
-    if (SENTENCE_END_PATTERN.test(ch)) lastBreak = cursor
-    if (estimateTokens(trimmed.slice(start, cursor)) <= budget) continue
-    // lastBreak === cursor 表示「当前字符恰是句末符」：切在它之前，否则这一片会多含该符号
-    // （评审 T14：'甲'.repeat(150) + '。' 会切出 151 token 的片段）。
-    const cut = lastBreak > start && lastBreak < cursor
-      ? lastBreak
-      : before > start ? before : cursor
-    const piece = trimmed.slice(start, cut).trim()
-    if (piece.length > 0) pieces.push(piece)
-    start = cut
-    lastBreak = start
-  }
-  const tail = trimmed.slice(start).trim()
-  if (tail.length > 0) pieces.push(tail)
-  return pieces
+  return splitTextToBudget(text, budget)
 }
 
 /**

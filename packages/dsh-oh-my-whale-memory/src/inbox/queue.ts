@@ -20,9 +20,9 @@
  */
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
-import { runStatement } from '../db/backend.js'
+import { ensureInboxTable } from '../db/inbox-tables.js'
 import { collectRows } from '../db/rows.js'
-import { L1_INBOX_TABLE, L2_INBOX_TABLE, createInboxTableStatement } from '../db/schema.js'
+import { L1_INBOX_TABLE, L2_INBOX_TABLE } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 
 export type InboxConnection = lbug.Connection
@@ -399,10 +399,8 @@ export function createInboxQueue(table: string): InboxQueue {
   return {
     table,
     async ensureTables(connection) {
-      await runInTransaction(connection, async () => {
-        // 结果必须释放，否则 pin 满 buffer pool（见 ../db/backend.ts closeQueryResult）。
-        await runStatement(connection, createInboxTableStatement(table))
-      })
+      // 建表实现在 db 层（schema 归属），这里只做转调：DDL 与事务边界都只有一份。
+      await ensureInboxTable(connection, table)
     },
     writeItem,
     async enqueue(connection, input) {
@@ -557,17 +555,10 @@ export function inboxErrorText(error: unknown): string {
 }
 
 /**
- * 建 INBOX 队列表（唯一迁移点由 src/db/database.ts 调用；范式同 audit.ts 的 ensureAuditTables：
- * DDL 在事务内执行，失败即整体回滚）。
+ * 建表实现归 src/db/inbox-tables.ts（db 拥有 schema，避免 db↔inbox 目录级环 / AD-33）；
+ * 这里 re-export 保持既有 import 路径兼容。
  */
-export async function ensureInboxTables(connection: InboxConnection): Promise<void> {
-  await l1InboxQueue.ensureTables(connection)
-}
-
-/** 建 L2 提升队列表（Story 2.5 / U1）：与 l1_inbox 同列同状态机。 */
-export async function ensureL2InboxTables(connection: InboxConnection): Promise<void> {
-  await l2InboxQueue.ensureTables(connection)
-}
+export { ensureInboxTables, ensureL2InboxTables } from '../db/inbox-tables.js'
 
 /**
  * 在**调用方已开启的事务**内入队一条条目，返回其 id（Story 2.1 抽出）。
