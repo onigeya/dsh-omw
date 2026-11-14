@@ -36,6 +36,7 @@ export const MEMORY_RECALL_TOOL_DESCRIPTION = [
   '只返回当前快照节点（已生效、未失效、未过期），每条含 id/layer/kind/priority/text；单条超 256 token 时截断为首段并标 truncated=true（节点不丢，可按 id 另查全文）。',
   'limit 可选（缺省 5，上限 20）；layer 可选（L1/L2，省略时 L2 优先于 L1）。',
   '同一回合内召回族工具合计最多 3 次，超出返回 quota_exceeded；embedding 不可用时自动降级为关键词单路并标 degraded。',
+  '空白 query 直接返回 invalid_query（参数错误，不消耗配额、不检索）。',
 ].join('\n')
 
 /**
@@ -155,7 +156,7 @@ const OUTPUT_SCHEMA = {
           required: true,
           additionalProperties: false,
           properties: {
-            code: { type: 'string', required: true, description: '封闭错误码：quota_exceeded、db_read_failed、db_unavailable 或其它 db 层码' },
+            code: { type: 'string', required: true, description: '封闭错误码：invalid_query、quota_exceeded、db_read_failed、db_unavailable 或其它 db 层码' },
             message: { type: 'string', required: true, description: '诊断信息，不含凭据' },
             retryable: { type: 'boolean', required: true, description: '是否值得重试' },
           },
@@ -223,6 +224,14 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
       },
     },
     async execute(args, exec) {
+      // 0) F-13：空白 query 是**参数错误**，不是「无匹配」——向量路会拿空白文本取向量
+      //    并返回任意近邻，且照常吃掉配额。先拒：不耗配额、不检索、不 embed。
+      if (args.query.trim() === '') {
+        return failed(
+          'invalid_query',
+          'query 不能为空白：请给出要检索的内容（空白查询会让向量路返回任意近邻，不是「无匹配」）。',
+        )
+      }
       // 1) 库未就绪先判：db_unavailable 不消耗配额（探测性调用不该吃掉整轮配额，
       //    也避免配额耗尽把根因盖成 quota_exceeded）。
       const store = options.getRecallStore()

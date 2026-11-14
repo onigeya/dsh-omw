@@ -163,6 +163,21 @@ describe('memory_recall execute（假 store）', () => {
     expect(value.action).toBeUndefined()
   })
 
+  it('空白 query → invalid_query（F-13）：不耗配额、不检索，配额留满', async () => {
+    const quota = createRecallTurnQuota()
+    const store = makeStore()
+    const tool = makeTool(store, quota)
+    const exec = execOf('session-blank')
+    for (const blank of ['', '   ', '\n\t ']) {
+      const value = await tool.execute({ query: blank }, exec)
+      expect(value).toMatchObject({ action: 'failed', error: { code: 'invalid_query', retryable: false } })
+    }
+    expect(store.recall).not.toHaveBeenCalled()
+    expect(quota.used('session-blank')).toBe(0)
+    // 配额没被空白调用吃掉：随后仍可正常用满 3 次。
+    for (let i = 0; i < 3; i += 1) expect((await tool.execute({ query: 'q' }, exec)).total).toBe(1)
+  })
+
   it('embeddingEnabled=false ⇒ 只走关键词单路（queryVector=null 传给内核）', async () => {
     const recall = vi.fn(async () => ({ total: 0, results: [], degraded: true, hint: '降级检索。' }))
     const store = makeStore({ embeddingEnabled: false, recall })
