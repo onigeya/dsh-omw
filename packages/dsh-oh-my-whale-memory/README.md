@@ -60,6 +60,37 @@ Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
 | `llmModel` | string | — | 可选；LLM 显式 model（AD-5） |
 | `systemOne.enabled` | boolean | true | System One 判定开关 |
 
+### 推荐服务配置（Q-5，2026-11-14 关闭，AD-14）
+
+`embedding.endpoint` 填 OpenAI 兼容 base URL（客户端在其后拼 `/embeddings`，**必须带 `/v1`**）。三种可直接复制：
+
+```yaml
+# 主选：硅基流动（bge-m3 免费；1024 维 / 8192 输入 token）
+embedding:
+  endpoint: https://api.siliconflow.com/v1
+  token: <SILICONFLOW_API_KEY>
+  model: BAAI/bge-m3
+  dim: 1024
+
+# 本地备选：Ollama（先 `ollama pull bge-m3`；8K context）
+embedding:
+  endpoint: http://localhost:11434/v1
+  token: ollama            # 本地默认不校验鉴权，占位即可
+  model: bge-m3
+  dim: 1024
+
+# 付费备选：OpenAI（1536 维；换模型必须重建库，AD-14）
+embedding:
+  endpoint: https://api.openai.com/v1
+  token: <OPENAI_API_KEY>
+  model: text-embedding-3-small
+  dim: 1536
+```
+
+- `dim` 必须与建库时 pin 的维度一致；不一致会 **fail-loud 拒绝启动**并提示全量重嵌入（AD-14）。
+- `rerank.*` 仍是 **v2 预留**（v1 不消费）；v1.1 启用时形状为硅基流动 `https://api.siliconflow.com/v1` + `BAAI/bge-reranker-v2-m3`，`documents` 必须是 `string[]`（对象数组报 20015）。
+- 经验上中文语料的 token 数约为字符数的 1–1.5 倍（以 `ctx.tokenMeter.measure()` 实测为准）；预算一律实测，不做字符换算。
+
 嵌套对象（`embedding` / `rerank` / `layerWeights` / `systemOne`）**整体**标 `.volatile()`，子字段保持 plain——
 schemastery 的 `validateVolatileSchema` 硬约束禁止 volatile 嵌套 volatile，违反即启动抛
 `volatile fields require a fixed object path without an enclosing volatile field`。
