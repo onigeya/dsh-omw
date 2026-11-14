@@ -58,8 +58,6 @@ export interface InjectionBudgetResult {
   readonly overBudget: boolean
   /** 实际保留的不可删集合成员数。 */
   readonly keptInviolable: number
-  /** 是否发生了 L2→L1 降级以外的降级（供观测；预算本身不改降级语义）。 */
-  readonly degraded: boolean
 }
 
 /** INV-2 判据：全局强规则或指令类记忆不可删。 */
@@ -178,6 +176,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
     for (const item of keptDeletable) lines.push(renderLine(item))
   }
 
+  // items = 最终注入的条目（不含摘要句本身；chars 含摘要正文）。
   const items = [...keptInviolableItems, ...keptDeletable.filter((item) => item.id !== 'summary')]
   // 零注入：既无摘要也无任何条目 ⇒ 空文本（宿主对空文本不产消息；调用方据此跳过）。
   if (summaryItem === undefined && items.length === 0) {
@@ -188,7 +187,6 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
       truncated,
       overBudget: false,
       keptInviolable: 0,
-      degraded: true,
     }
   }
   return {
@@ -198,6 +196,5 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
     truncated,
     overBudget,
     keptInviolable: keptInviolableItems.length,
-    degraded: summaryItem === undefined && keptInviolableItems.length === 0 ? true : summaryItem === undefined,
   }
 }

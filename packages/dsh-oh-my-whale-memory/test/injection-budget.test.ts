@@ -156,9 +156,8 @@ describe('applyInjectionBudget：渲染顺序（原则开头 / 证据跟随）',
     expect(result.chars).toBe('用户偏好 ESM。'.length + '原则陈述'.length + '证据原文'.length + '全局规则'.length)
   })
 
-  it('无摘要（L1-only 降级）⇒ 「相关记忆（开局注入）」头，degraded=true', () => {
+  it('无摘要（L1-only 降级）⇒ 「相关记忆（开局注入）」头', () => {
     const result = applyInjectionBudget({ ...EMPTY, l1: [item('l1-1', '证据原文')] })
     expect(result.text.startsWith('相关记忆（开局注入）：')).toBe(true)
-    expect(result.degraded).toBe(true)
   })
 })
