@@ -188,6 +188,10 @@ export async function readEvidenceInEdgeIds(connection: lbug.Connection, id: str
 // ---------------------------------------------------------------------------
 // 图遍历原语（Story 3.2 / FR-12 / AC:872-889）
 //
+// ⚠️ **升版必回归**（与 eii.ts:20-21 同款）：本模块依赖多处 0.22.3 未文档化行为——
+// `relationships(p)` 的序列化形状（`reason`/`_label`）、`length(p)`、`all()` 内动态属性
+// 语义、REL TABLE GROUP 上的无向变长路径。LadybugDB 升级（AD-3 四条件）时必须回归本模块。
+//
 // 形态由 2026-11-14 探针钉死（probe-3-2b.md）：
 // - `type()` / `last()` / `head()` 在 0.22.3 **不存在**（Catalog exception），故 edge_type
 //   只能由**语句常量**给出 ⇒ EVIDENCE、RELATED 各一条无向变长语句（spec D1 方案）。

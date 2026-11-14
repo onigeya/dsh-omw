@@ -14,8 +14,7 @@
  * - 超时后 depth=1 重试成功 ⇒ `partial:true` + `hint:'partial'`（AC:891-893）；
  * - 起点自身失效但仍有有效邻居 ⇒ hint 追加「起点已失效」（spec D5 ②，起点不参与证据链判定）。
  */
-import { defineTool } from '@deepseek-ai/dsh-tools'
-import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import { defineTool, type ParameterSchemaSpec, type ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import {
   clampRelatedDepth,
   RelatedTraversalTimeoutError,
@@ -23,7 +22,7 @@ import {
 } from '../db/edges.js'
 import { MemoryDbError } from '../db/errors.js'
 import { summarizeMemoryText } from '../summarize.js'
-import { failedEnvelope, quotaOwnerOf, type ToolFailure } from './recall-shared.js'
+import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import { toRelatedSuccessView, type RelatedViewEntry } from './related-shared.js'
 import type { RecallQuota } from './recall-quota.js'
 
@@ -31,7 +30,7 @@ import type { RecallQuota } from './recall-quota.js'
 export const MEMORY_RELATED_TOOL_NAME = 'memory_related'
 
 /**
- * 单次遍历预算（spec D8：300ms 观测口径，非硬 SLA）。
+ * 单次遍历预算（spec D8 / NFR6：300ms 为**软目标**观测口径，非硬 SLA）。
  * depth=1 重试使用**独立预算**（同一 timeoutMs）⇒ 最坏总预算 ≤ 2×本值。
  */
 export const RELATED_TRAVERSAL_TIMEOUT_MS = 300
@@ -136,7 +135,7 @@ const OUTPUT_SCHEMA = {
               truncated: { type: 'boolean', description: 'true = 原文超 256 token，已截断（按 id 可另查全文）' },
               invalid: { type: 'boolean', description: 'true = 该邻居自身已失效（invalid_at/expired_at 非空）' },
               invalid_at: { type: 'string', description: '失效时间（仅 invalid=true 时出现）' },
-              expired_at: { type: 'string', description: '过期时间（仅 expired=true 时出现）' },
+              expired_at: { type: 'string', description: '过期时间（仅当节点已过期、该列非空时出现）' },
             },
           },
         },
@@ -245,12 +244,17 @@ export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
       if (id === '') {
         return failedEnvelope('invalid_query', 'id 不能为空白：请给出要展开的起点记忆 id。')
       }
-      // 2) 库未就绪先判：db_unavailable 不消耗配额。
+      // 2) 调用前已取消（用户中断 / turn 终止）⇒ 直接失败信封：不遍历、不耗配额
+      //    （F-03：与 memory_recall 同口径）。
+      if (toolSignalOf(exec)?.aborted === true) {
+        return failedEnvelope('db_read_failed', '关联遍历已取消（调用前收到中止信号），未执行遍历。')
+      }
+      // 3) 库未就绪先判：db_unavailable 不消耗配额。
       const store = options.getRelatedStore()
       if (!store) {
         return failedEnvelope('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未遍历。')
       }
-      // 3) 配额（与 memory_recall 同一实例/同一桶；命令面不计）。
+      // 4) 配额（与 memory_recall 同一实例/同一桶；命令面不计）。
       if (!options.quota.consume(quotaOwnerOf(exec))) {
         return failedEnvelope(
           'quota_exceeded',

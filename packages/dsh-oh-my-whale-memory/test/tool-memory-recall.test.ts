@@ -167,6 +167,21 @@ describe('memory_recall execute（假 store）', () => {
     expect(value.action).toBeUndefined()
   })
 
+  it('F-03：调用前已取消 ⇒ 失败信封 db_read_failed（不 embed、不检索、不耗配额）', async () => {
+    const quota = createRecallTurnQuota()
+    const store = makeStore()
+    const tool = makeTool(store, quota)
+    const value = await tool.execute(
+      { query: 'RRF' },
+      { agent: { session: { id: 's-cancel' } }, signal: AbortSignal.abort() },
+    )
+    expect(value.action).toBe('failed')
+    expect(value.error?.code).toBe('db_read_failed')
+    expect(String(value.error?.message)).toContain('已取消')
+    expect(store.recall).not.toHaveBeenCalled()
+    expect(quota.used('s-cancel')).toBe(0)
+  })
+
   it('空白 query → invalid_query（F-13）：不耗配额、不检索，配额留满', async () => {
     const quota = createRecallTurnQuota()
     const store = makeStore()

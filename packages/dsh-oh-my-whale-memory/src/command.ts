@@ -408,28 +408,10 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
  * - `show` → 其余 trim 后为 id；为空给 `MEMORY_SHOW_USAGE`；
  * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
  * - `recall` → 其余 trim 后为检索 query；为空给 `MEMORY_RECALL_USAGE`（Story 3.1）；
+ * - `related` → 其余 trim 后为 `<id> [depth]`（Story 3.2，depth 非正整数 → usage）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
-/**
- * 解析 `related` 的 payload：`<id> [depth]`。
- * - 缺 id → usage；超过两个 token → usage（不静默忽略多余输入）；
- * - depth 必须是**正整数**（非整数/0/负数 → usage；>3 由遍历层夹紧到 3，与工具面同口径）。
- */
-function parseRelatedPayload(payload: string): MemoryCommandParseResult {
-  if (!payload) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
-  const tokens = payload.split(/\s+/)
-  if (tokens.length > 2) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
-  const id = tokens[0]!
-  if (id === '') return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
-  if (tokens.length === 1) return { kind: 'related', id }
-  const depthToken = tokens[1]!
-  if (!/^\d+$/.test(depthToken)) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
-  const depth = Number(depthToken)
-  if (!Number.isSafeInteger(depth) || depth < 1) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
-  return { kind: 'related', id, depth }
-}
-
 export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
   const trimmedStart = rawInput.trimStart()
   if (!trimmedStart) return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
@@ -463,6 +445,24 @@ function errorText(error: unknown): string {
 
 // 列表/召回共用的文本摘要（60 code point 截断）已抽到 ./summarize.ts（Story 3.1：
 // memory_recall 工具 presenter 也要同一规则，命令层不 import db 模块故单独成模块）。
+
+/**
+ * 解析 `related` 的 payload：`<id> [depth]`（Story 3.2）。
+ * - 缺 id → usage；超过两个 token → usage（不静默忽略多余输入）；
+ * - depth 必须是**正整数**（非整数/0/负数 → usage；>3 由遍历层夹紧到 3，与工具面同口径）。
+ */
+function parseRelatedPayload(payload: string): MemoryCommandParseResult {
+  if (!payload) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const tokens = payload.split(/\s+/)
+  if (tokens.length > 2) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const id = tokens[0]!
+  if (tokens.length === 1) return { kind: 'related', id }
+  const depthToken = tokens[1]!
+  if (!/^\d+$/.test(depthToken)) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  const depth = Number(depthToken)
+  if (!Number.isSafeInteger(depth) || depth < 1) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
+  return { kind: 'related', id, depth }
+}
 
 /** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，绝不出现 `undefined`。 */
 function renderValue(value: unknown): string {

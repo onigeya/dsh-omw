@@ -20,7 +20,7 @@ import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import { MemoryDbError } from '../db/errors.js'
 import { clampRecallLimit, type RecallCoreResult, type RecallResultItem } from '../recall/core.js'
-import { failedEnvelope, quotaOwnerOf, type ToolFailure } from './recall-shared.js'
+import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import type { RecallQuota } from './recall-quota.js'
 import { summarizeMemoryText } from '../summarize.js'
 
@@ -210,24 +210,29 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           'query 不能为空白：请给出要检索的内容（空白查询会让向量路返回任意近邻，不是「无匹配」）。',
         )
       }
-      // 1) 库未就绪先判：db_unavailable 不消耗配额（探测性调用不该吃掉整轮配额，
+      // 1) 调用前已取消（用户中断 / turn 终止）⇒ 直接失败信封：不 embed、不检索、不耗配额
+      //    （F-03：与 memory_related 同口径；signal 本体仍透传给 embed/内核做中途取消）。
+      if (toolSignalOf(exec)?.aborted === true) {
+        return failedEnvelope('db_read_failed', '召回已取消（调用前收到中止信号），未执行检索。')
+      }
+      // 2) 库未就绪先判：db_unavailable 不消耗配额（探测性调用不该吃掉整轮配额，
       //    也避免配额耗尽把根因盖成 quota_exceeded）。
       const store = options.getRecallStore()
       if (!store) {
         return failedEnvelope('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未检索')
       }
-      // 2) 配额消耗（按会话键计数；同轮召回族工具共享，本工具 + 后续 memory_related/expand）。
+      // 3) 配额消耗（按会话键计数；同轮召回族工具共享，本工具 + 后续 memory_related/expand）。
       if (!options.quota.consume(quotaOwnerOf(exec))) {
         return failedEnvelope(
           'quota_exceeded',
           '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；回合边界（turn/start、turn/end）后自动恢复，或改用 /memory recall 手动检索。',
         )
       }
-      // F-09：宿主 ToolExecutionInput.signal 是必填取消信号（用户中断 / turn 终止）；
-      // 结构窄化读取（本包不引 dsh-tools 的运行时类型，与 quotaOwnerOf 同款），透传给
-      // embed 与内核——中断后不再白等 embed 超时、也不再继续跑查询。
-      const signal = (exec as { readonly signal?: AbortSignal } | null | undefined)?.signal
-      // 3) 查询向量：配置齐全才 embed；失败/异常一律降级为关键词单路（degraded: true），
+      // F-09/F-03：宿主 ToolExecutionInput.signal 是必填取消信号（用户中断 / turn 终止），
+      // 统一经共享件 `toolSignalOf` 读取后透传给 embed 与内核——中断后不再白等 embed 超时、
+      // 也不再继续跑查询。
+      const signal = toolSignalOf(exec)
+      // 4) 查询向量：配置齐全才 embed；失败/异常一律降级为关键词单路（degraded: true），
       //    绝不因网络错误让整次检索失败（spec I/O 矩阵「召回查询 embed 失败」行）。
       const limit = clampRecallLimit(args.limit)
       let queryVector: readonly number[] | null = null
@@ -238,7 +243,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           queryVector = null
         }
       }
-      // 4) 调内核；检索错误收敛为失败信封（绝不 throw）。signal 只在有值时入参，
+      // 5) 调内核；检索错误收敛为失败信封（绝不 throw）。signal 只在有值时入参，
       //    保持既有调用形态（无 exec 的单测）逐字不变。
       try {
         const core = await store.recall({

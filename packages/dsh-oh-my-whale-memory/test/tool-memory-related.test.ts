@@ -290,6 +290,21 @@ describe('memory_related execute（假 store）', () => {
     expect(blocked.error).toMatchObject({ code: 'quota_exceeded', retryable: false })
   })
 
+  it('F-03：调用前已取消 ⇒ 失败信封 db_read_failed（不遍历、不耗配额）', async () => {
+    const quota = createRecallTurnQuota()
+    const store = makeStore()
+    const tool = makeTool(store, quota)
+    const value = await tool.execute(
+      { id: 'A' },
+      { agent: { session: { id: 's-cancel' } }, signal: AbortSignal.abort() },
+    )
+    expect(value.action).toBe('failed')
+    expect(value.error?.code).toBe('db_read_failed')
+    expect(String(value.error?.message)).toContain('已取消')
+    expect(store.traverse).not.toHaveBeenCalled()
+    expect(quota.used('s-cancel')).toBe(0)
+  })
+
   it('空白 id ⇒ invalid_query（不耗配额、不遍历）', async () => {
     const quota = createRecallTurnQuota()
     const store = makeStore()

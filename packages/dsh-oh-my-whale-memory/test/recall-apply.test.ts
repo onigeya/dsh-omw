@@ -188,7 +188,8 @@ function buildReadonlyStatements(dim: number): string[] {
   ]
 }
 
-async function startWriterInstance(dbPath: string, statements: string[]): Promise<{ stop(): Promise<void> }> {  await ensureMemoryDbDirectory(dbPath)
+async function startWriterInstance(dbPath: string, statements: string[]): Promise<{ stop(): Promise<void> }> {
+  await ensureMemoryDbDirectory(dbPath)
   const child = spawn(process.execPath, [FIXTURE, dbPath], { stdio: 'pipe' })
   const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()))
 

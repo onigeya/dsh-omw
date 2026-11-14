@@ -90,7 +90,6 @@ import { toRelatedSuccessView } from './tools/related-shared.js'
 import { traverseRelated } from './db/edges.js'
 import { createQuotaResetListener, createRecallTurnQuota } from './tools/recall-quota.js'
 import { runRecallCore, type RecallCoreResult } from './recall/core.js'
-import type { EmbedClient } from './embedding/client.js'
 import {
   createInboxConsumer,
   drainInboxBackgroundTasks,
@@ -104,7 +103,7 @@ import { createCaptureRecorder } from './capture/recorder.js'
 import { createEmbeddingBackfill } from './embedding/backfill.js'
 import { createEvidenceBackfill } from './wiki/evidence-backfill.js'
 import { countRelatedSkips, createRelationRunner } from './wiki/relations.js'
-import { createEmbeddingClient } from './embedding/client.js'
+import { createEmbeddingClient, type EmbedClient } from './embedding/client.js'
 import { createInboxProcessor } from './distill/processor.js'
 import { routeFromSession } from './distill/session-route.js'
 import type { LlmPort, RefineRoute } from './distill/llm-refine.js'
