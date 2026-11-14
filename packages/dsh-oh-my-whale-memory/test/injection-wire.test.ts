@@ -210,6 +210,52 @@ describe('wireInjection / agent/pre-step waterfall（F-01）', () => {
     expect(store.read('unknown')).toBeUndefined()
   })
 
+  it('F-06（known-safe）：section/context disposer 归还宿主作用域——dispose 后再次 wire 不因重名抛错', () => {
+    // strict host 复刻宿主 system-prompt 语义：同 layer 重名抛错；注册返回 effect disposer（调用即移除）。
+    const sections = new Map<string, unknown>()
+    const contexts = new Map<string, unknown>()
+    const disposers: Array<() => void> = []
+    const strictHost = {
+      logger: { warn: vi.fn(), info: vi.fn() },
+      llm: { stream: () => (async function* empty() {})() },
+      on: () => () => {},
+      systemPrompt: {
+        section: (section: { name: string }) => {
+          if (sections.has(section.name)) throw new Error(`prompt section "${section.name}" is already registered in this scope`)
+          sections.set(section.name, section)
+          const dispose = (): void => {
+            sections.delete(section.name)
+          }
+          disposers.push(dispose)
+          return dispose
+        },
+        context: (context: { name: string }) => {
+          if (contexts.has(context.name)) throw new Error(`prompt context "${context.name}" is already registered in this scope`)
+          contexts.set(context.name, context)
+          const dispose = (): void => {
+            contexts.delete(context.name)
+          }
+          disposers.push(dispose)
+          return dispose
+        },
+      },
+    } as unknown as Context
+    const wiringOptions: InjectionWiringOptions = { store: createInjectionStore(), recallStore: makeRecall(), resolved: RESOLVED }
+
+    wireInjection(strictHost, wiringOptions)
+    expect(sections.has('omw-memory')).toBe(true)
+    expect(contexts.has('omw-memory:recall')).toBe(true)
+
+    // 模拟宿主释放插件 ctx：执行 systemPrompt 注册返回的 effect disposer（真实宿主由 ctx 作用域自动完成）。
+    for (const dispose of disposers.splice(0)) dispose()
+    expect(sections.size).toBe(0)
+    expect(contexts.size).toBe(0)
+
+    // 二次 apply（新作用域）不得因 section/context 重名抛错。
+    expect(() => wireInjection(strictHost, wiringOptions)).not.toThrow()
+    expect(sections.has('omw-memory')).toBe(true)
+  })
+
   it('prompt 面缺失（裸 ctx）时只注册监听，不抛错', async () => {
     const host = makeHost({ withSystemPrompt: false })
     wireInjection(host.ctx, { store: createInjectionStore(), recallStore: makeRecall(), resolved: RESOLVED })
