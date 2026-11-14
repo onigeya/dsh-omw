@@ -284,6 +284,45 @@ describe('createOpenstartGenerator：每会话一次与隔离', () => {
   })
 })
 
+describe('createOpenstartGenerator：预算与 lastInjection（B3）', () => {
+  it('超长证据被预算裁剪：text ≤8000 字符、lastInjection.truncated=true、unit=chars', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const longL1 = Array.from({ length: 10 }, (_, index) => ({
+      id: `long-${index}`,
+      layer: 'L1',
+      kind: 'work_fact',
+      priority: 0,
+      text: 'y'.repeat(1000),
+    }))
+    const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, ...longL1] })
+
+    await generate(payload('s-budget'))
+
+    const last = store.readLastInjection()
+    expect(last).toMatchObject({ unit: 'chars', truncated: true, overBudget: false, degraded: false })
+    expect(last?.chars).toBeLessThanOrEqual(8000)
+    expect(last?.chars).toBeGreaterThan(0)
+    expect(last?.items).toBeGreaterThan(0)
+    expect(last?.elapsedMs).toBeGreaterThanOrEqual(0)
+    expect(typeof last?.at).toBe('string')
+  })
+
+  it('不可删集合成员完整出现在 text 中；超预算 ⇒ lastInjection.overBudget=true 且 keptInviolable 计数', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const pinned = { id: 'pin-rule', layer: 'L1', kind: 'work_fact', priority: -1, text: 'P'.repeat(9000) }
+    const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, L1_ITEM, pinned] })
+
+    await generate(payload('s-over-budget'))
+
+    const text = store.textFor('s-over-budget')
+    expect(text).toContain('[L1] pin-rule')
+    expect(text).toContain('P'.repeat(9000))
+    const last = store.readLastInjection()
+    expect(last).toMatchObject({ overBudget: true, keptInviolable: 1, unit: 'chars' })
+    expect(last?.chars).toBeGreaterThan(8000)
+  })
+})
+
 describe('prompt 与 schema 同文件（§14）', () => {
   it('buildOpenstartMessages：sentinel preamble 在首行、含 schema、query 与候选', () => {
     const messages = buildOpenstartMessages('我偏好 ESM', [L2_ITEM, L1_ITEM])

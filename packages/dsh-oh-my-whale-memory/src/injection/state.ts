@@ -20,6 +20,32 @@ export interface InjectionRecord {
   readonly text: string
 }
 
+/**
+ * 最近一次注入的**观测摘要**（进程内、不持久化；Story 3.3 / B3 → B4 的 `/memory status` 读取）。
+ * 只放计数与标记，不含任何记忆原文/凭据（NFR9）。
+ */
+export interface LastInjectionSummary {
+  readonly sessionKey: string
+  /** 注入条目数（不含被预算丢弃的）。 */
+  readonly items: number
+  /** 计入预算的正文总字符数（摘要 + 引用证据；标题不计）。 */
+  readonly chars: number
+  /** true = 摘要降级（仅 L1 原文）或零摘要注入。 */
+  readonly degraded: boolean
+  /** true = 发生过截断/丢弃。 */
+  readonly truncated: boolean
+  /** true = 不可删集合导致（或最终文本）超 8000 字符预算。 */
+  readonly overBudget: boolean
+  /** 保留的不可删集合成员数（INV-2）。 */
+  readonly keptInviolable: number
+  /** 预算单位：本 story 按绝对字符实现（AC:935），tokens 化归 Story 8.5。 */
+  readonly unit: 'chars'
+  /** 本次生成耗时（ms；观测用）。 */
+  readonly elapsedMs: number
+  /** 记录时刻（UTC ISO-8601）。 */
+  readonly at: string
+}
+
 /** 每会话注入状态存储（B2 的生成器写入、`prompt.ts` 的 provider 读取）。 */
 export interface InjectionStore {
   /** 读记录；未识别过的会话返回 undefined。 */
@@ -34,11 +60,16 @@ export interface InjectionStore {
   textFor(sessionKey: string): string
   /** 清理会话（`session/disposed` 时调用，有界内存；B1 只提供原语）。 */
   reset(sessionKey: string): void
+  /** 记录最近一次注入的观测摘要（B4 的 `/memory status` 读取）。 */
+  setLastInjection(summary: LastInjectionSummary): void
+  /** 最近一次注入摘要；从未注入过返回 undefined（status 渲染「未知」而不是 0）。 */
+  readLastInjection(): LastInjectionSummary | undefined
 }
 
 /** 构造每会话注入状态存储（进程内 Map；键数受活跃/历史会话数约束）。 */
 export function createInjectionStore(): InjectionStore {
   const records = new Map<string, InjectionRecord>()
+  let last: LastInjectionSummary | undefined
   return {
     read(sessionKey) {
       return records.get(sessionKey)
@@ -60,6 +91,12 @@ export function createInjectionStore(): InjectionStore {
     },
     reset(sessionKey) {
       records.delete(sessionKey)
+    },
+    setLastInjection(summary) {
+      last = summary
+    },
+    readLastInjection() {
+      return last
     },
   }
 }

@@ -15,7 +15,13 @@ import { routeFromSession } from '../distill/session-route.js'
 import { foldStream } from '../distill/stream-fold.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import type { RecallCoreResult, RecallResultItem } from '../recall/core.js'
-import type { InjectionStore } from './state.js'
+import {
+  applyInjectionBudget,
+  isInviolableItem,
+  type InjectionBudgetResult,
+  type InjectionDraft,
+} from './budget.js'
+import type { InjectionStore, LastInjectionSummary } from './state.js'
 
 /** 摘要输入的召回条数（AC:915：输入为 recall(top-K=8)）。 */
 export const OPENSTART_RECALL_TOP_K = 8
@@ -100,6 +106,8 @@ export interface OpenstartGeneratorOptions {
   /** 覆盖默认超时/条数（测试注入）。 */
   readonly timeoutMs?: number
   readonly topK?: number
+  /** 时钟（观测用：`at` / `elapsedMs`；测试注入固定时间）。 */
+  readonly now?: () => Date
 }
 
 /** 摘要输出解析结果。 */
@@ -162,26 +170,24 @@ export function parseOpenstartOutput(text: string, allowedIds: ReadonlySet<strin
   return { summary, evidenceIds }
 }
 
-/** 摘要成功时的注入文本（B3 负责预算裁剪；此处只做结构化渲染）。 */
-export function renderSummaryInjection(summary: string, results: readonly RecallResultItem[], evidenceIds: readonly string[]): string {
-  const lines = ['记忆摘要（开局注入）：', summary]
-  const byId = new Map(results.map((item) => [item.id, item]))
-  const evidence = evidenceIds
-    .map((id) => byId.get(id))
-    .filter((item): item is RecallResultItem => item !== undefined)
-  const evidenceLines = evidence.length > 0 ? evidence : results.filter((item) => item.layer === 'L1')
-  if (evidenceLines.length > 0) {
-    lines.push('', '相关证据：')
-    for (const item of evidenceLines) lines.push(`- [${item.layer}] ${item.id}: ${item.text}`)
+/**
+ * 结构化注入草稿（B3：先产出结构，再由 `budget.ts` 唯一裁剪并渲染）。
+ * - `inviolable`（INV-2）：`priority === -1` 或 `kind === 'instruction'`，不受任何预算裁剪；
+ * - `evidence`：非不可删的 L2（原则/综合陈述）；
+ * - `l1`：非不可删的 L1（证据原文）。
+ */
+export function buildInjectionDraft(args: {
+  readonly results: readonly RecallResultItem[]
+  readonly summary?: string
+}): InjectionDraft {
+  const inviolable = args.results.filter(isInviolableItem)
+  const rest = args.results.filter((item) => !isInviolableItem(item))
+  return {
+    ...(args.summary === undefined ? {} : { summary: args.summary }),
+    evidence: rest.filter((item) => item.layer === 'L2'),
+    l1: rest.filter((item) => item.layer === 'L1'),
+    inviolable,
   }
-  return lines.join('\n')
-}
-
-/** 降级文本：仅注入已召回 L1 原文（AC:937-939 / D2）。 */
-export function renderL1OnlyInjection(l1: readonly RecallResultItem[]): string {
-  const lines = ['相关记忆（开局注入）：']
-  for (const item of l1) lines.push(`- [${item.layer}] ${item.id}: ${item.text}`)
-  return lines.join('\n')
 }
 
 /** 单次摘要 LLM 调用；任何失败（超时/异常/不可解析）返回 null（不重试）。 */
@@ -216,6 +222,33 @@ export function createOpenstartGenerator(
 ): (payload: OpenstartPreStepPayload) => Promise<void> {
   const timeoutMs = Math.max(1, Math.trunc(options.timeoutMs ?? OPENSTART_LLM_TIMEOUT_MS))
   const topK = Math.max(1, Math.trunc(options.topK ?? OPENSTART_RECALL_TOP_K))
+  const now = options.now ?? (() => new Date())
+
+  /**
+   * 收尾：预算裁剪（唯一裁剪点 `budget.ts`）→ 写 ready → 记录 `lastInjection` 观测摘要
+   * （进程内、不持久化；B4 的 `/memory status` 读取）。文本为空 ⇒ 视为零注入 skipped。
+   */
+  const finalize = (key: string, draft: InjectionDraft, degraded: boolean, startedAt: Date): void => {
+    const budget: InjectionBudgetResult = applyInjectionBudget(draft)
+    if (budget.text === '') {
+      options.store.markSkipped(key)
+      return
+    }
+    options.store.markReady(key, budget.text)
+    const finishedAt = now()
+    options.store.setLastInjection({
+      sessionKey: key,
+      items: budget.items.length,
+      chars: budget.chars,
+      degraded,
+      truncated: budget.truncated,
+      overBudget: budget.overBudget,
+      keptInviolable: budget.keptInviolable,
+      unit: 'chars',
+      elapsedMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
+      at: finishedAt.toISOString(),
+    })
+  }
 
   return async (payload) => {
     const messages = payload.messages ?? []
@@ -227,6 +260,7 @@ export function createOpenstartGenerator(
     // 每会话一次：pending（生成中）/ready/skipped 一律短路（AC:916）。
     if (options.store.read(key) !== undefined) return
     options.store.markPending(key)
+    const startedAt = now()
 
     // Config 关闭 ⇒ 零 recall、零 LLM（AC:945-947）。
     if (!options.enabled()) {
@@ -275,11 +309,12 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
+    const draft = buildInjectionDraft({ results })
     const l1 = results.filter((item) => item.layer === 'L1')
     const hasL2 = results.some((item) => item.layer === 'L2')
     if (!hasL2) {
-      // 无 L2 命中 ⇒ 降级仅 L1（AC:924-926）；不调 LLM。
-      options.store.markReady(key, renderL1OnlyInjection(l1))
+      // 无 L2 命中 ⇒ 降级仅 L1（AC:924-926）；不调 LLM（预算仍走唯一裁剪点）。
+      finalize(key, { ...draft, evidence: [] }, true, startedAt)
       return
     }
 
@@ -291,7 +326,7 @@ export function createOpenstartGenerator(
       timeoutMs,
     })
     if (summary !== null) {
-      options.store.markReady(key, renderSummaryInjection(summary.summary, results, summary.evidenceIds))
+      finalize(key, buildInjectionDraft({ results, summary: summary.summary }), false, startedAt)
       return
     }
     // 摘要失败/超时/不可解析 ⇒ 阶梯降级：仅 L1 原文；L1 也为空 ⇒ 无注入（AC:937-939）。
@@ -300,6 +335,6 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
-    options.store.markReady(key, renderL1OnlyInjection(l1))
+    finalize(key, { ...buildInjectionDraft({ results }), evidence: [] }, true, startedAt)
   }
 }
