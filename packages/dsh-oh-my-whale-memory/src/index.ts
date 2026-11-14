@@ -34,6 +34,8 @@ import { createMemoryAccess } from './wire/access.js'
 import { createRetrievalWiring } from './wire/retrieval.js'
 import { wireMemoryCommand } from './wire/commands.js'
 import { wireMemoryTools } from './wire/tools.js'
+import { wireInjection } from './wire/injection.js'
+import { createInjectionStore } from './injection/state.js'
 import { wireMemoryLifecycle } from './wire/lifecycle.js'
 import { wireCapture } from './wire/capture.js'
 import { createDistillWiring } from './wire/distill.js'
@@ -102,8 +104,9 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * `'tools'`：工具注册表——memory_remember / memory_recall / memory_related（Story 1.6/3.1/3.2）。
  * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
  * `'llm'`：INBOX 精炼的宿主单通道 `ctx.llm`（Story 2.3 / AD-5，显式 provider+model）。
+ * `'systemPrompt'`：新会话开局注入的 section + 动态 context（Story 3.3 / FR-9 / AD-23）。
  */
-export const inject = ['commands', 'settings', 'tools', 'sessions', 'llm'] as const
+export const inject = ['commands', 'settings', 'tools', 'sessions', 'llm', 'systemPrompt'] as const
 
 /**
  * 记忆库运行态（Story 1.5 / AC2）：只读实例必须能被后续 story 的采集钩子、
@@ -145,6 +148,8 @@ export async function apply(
   // 「未就绪」。绝不放模块级——同进程第二次 apply 会覆盖前一个实例的运行态（评审 P19）。
   const slots = createMemoryRuntimeSlots()
   const getDb = (): MemoryDatabase | undefined => slots.db
+  // Story 3.3：每 apply 一份注入状态（prompt provider / 生成编排 / status 共用；进程内、不持久化）。
+  const injectionStore = createInjectionStore()
   const instance: { readonly: boolean; reason: string | undefined } = { readonly: false, reason: undefined }
 
   // 单元隔离：一个 wire 失败只告警（与项目既有日志同口径），不拖垮其它单元。
@@ -166,6 +171,8 @@ export async function apply(
     resolved,
     readonlyState: () => instance,
     getSystemOneClient: () => slots.systemOneClient,
+    // Story 3.3：status 读注入观测摘要（进程内，null=本实例尚未触发注入）。
+    injectionStore,
   })
   const retrieval = createRetrievalWiring({
     ctx,
@@ -193,6 +200,15 @@ export async function apply(
     recallStore: retrieval.recallStore,
     relatedStore: retrieval.relatedStore,
     quota: retrieval.quota,
+  }))
+  // Story 3.3：注入面（section + context）与生成入口（`agent/pre-step`）同样在只读早退之
+  // **前**注册——写者与只读实例都要有注入面（纯读 + 可选 LLM）。裸 ctx 时整面/监听跳过，
+  // 不抛错；注册走宿主 systemPrompt 作用域与 `ctx.on` 的自动 disposer，**不新增 ctx.effect**
+  //（entry-exports 钉死 closer 数 3/4/6）。
+  await wireStep('injection', () => wireInjection(ctx, {
+    store: injectionStore,
+    recallStore: retrieval.recallStore,
+    resolved,
   }))
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。

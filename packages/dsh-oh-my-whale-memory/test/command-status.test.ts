@@ -93,6 +93,8 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'embedding: enabled',
       'systemOne: enabled',
       'readonly: false',
+      // Story 3.3 / B4：注入状态恒打印一行（夹具未注入 ⇒ 未知）。
+      'injection: 未知（本实例尚未触发开局注入）',
     ].join('\n'))
   })
 
@@ -203,7 +205,51 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'embedding: disabled（降级检索）',
       'systemOne: enabled',
       "readonly: true, reason: 'another instance owns the writer lock'",
+      'injection: 未知（本实例尚未触发开局注入）',
     ])
+  })
+})
+
+describe('renderMemoryStatus：开局注入两行（Story 3.3 / B4）', () => {
+  const INJECTION = {
+    sessionKey: 'session-1',
+    items: 3,
+    chars: 1200,
+    degraded: false,
+    truncated: false,
+    overBudget: false,
+    keptInviolable: 0,
+    unit: 'chars' as const,
+    elapsedMs: 12,
+    at: '2026-11-14T00:00:00.000Z',
+  }
+
+  it('已注入：显式标注「预算单位=字符」+ 条数/字符；无降级/截断后缀', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, injection: INJECTION, injectionEnabled: true })
+    expect(text).toContain('injection: enabled（预算单位=字符；上次注入 3 条 / 1200 字符）')
+    expect(text).not.toContain('injection: 预算超限')
+  })
+
+  it('降级+截断后缀；overBudget 追加「预算超限（不可删集合先保留）」末行', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      injection: { ...INJECTION, degraded: true, truncated: true, overBudget: true, keptInviolable: 1 },
+      injectionEnabled: true,
+    })
+    expect(text).toContain('injection: enabled（预算单位=字符；上次注入 3 条 / 1200 字符，降级，已截断）')
+    expect(text.split('\n').at(-1)).toBe('injection: 预算超限（不可删集合先保留）')
+  })
+
+  it('Config 关闭：打印 disabled 行（即使有 lastInjection 也不显示 enabled）', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, injection: INJECTION, injectionEnabled: false })
+    expect(text).toContain('injection: disabled（Config injectOnNewSession=false）')
+    expect(text).not.toContain('injection: enabled')
+  })
+
+  it('从未注入：null 与缺省都渲染「未知」（不静默报 0）', () => {
+    expect(renderMemoryStatus({ ...STATUS_BASE, injection: null, injectionEnabled: true }))
+      .toContain('injection: 未知（本实例尚未触发开局注入）')
+    expect(renderMemoryStatus(STATUS_BASE)).toContain('injection: 未知（本实例尚未触发开局注入）')
   })
 })
 

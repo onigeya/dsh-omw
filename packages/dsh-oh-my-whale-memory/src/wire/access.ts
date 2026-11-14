@@ -24,6 +24,7 @@ import { MEMORY_REMEMBER_LAYER } from '../tools/memory-remember.js'
 import { countRelatedSkips } from '../wiki/relations.js'
 import type { MemoryCommandDependencies, MemoryInboxWriteOptions } from '../command.js'
 import type { RuntimeConfig } from '../config.js'
+import type { InjectionStore } from '../injection/state.js'
 import type { SystemOneClient } from '../distill/system-one.js'
 
 export interface MemoryAccessOptions {
@@ -34,6 +35,8 @@ export interface MemoryAccessOptions {
   /** 本实例自身的只读态（模块级 runtimeState 可能属于另一次 apply，不能读它）。 */
   readonly readonlyState: () => { readonly readonly: boolean; readonly reason?: string }
   readonly getSystemOneClient: () => SystemOneClient | null
+  /** Story 3.3：注入观测摘要（进程内；`readLastInjection()` 为 null=未知）。 */
+  readonly injectionStore: InjectionStore
 }
 
 export interface MemoryAccess {
@@ -126,6 +129,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       l2FailedEntries: l2InboxCounts.failed > 0
         ? await l2InboxQueue.listRecentFailed(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
         : [],
+      // Story 3.3 / B4：注入可见性——进程内 lastInjection（null=未知）+ Config 开关。
+      injection: options.injectionStore.readLastInjection() ?? null,
+      injectionEnabled: options.resolved.injectOnNewSession,
       uncertain: await countUncertainAudits(connection),
     }
   }

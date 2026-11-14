@@ -54,6 +54,7 @@ const BASE_LINES = [
   'embedding: enabled',
   'systemOne: enabled',
   'readonly: false',
+  'injection: 未知（本实例尚未触发开局注入）',
 ]
 
 describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
@@ -105,7 +106,7 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
     expect(lines[12]).toBe(
       '- i-fresh kind=persona attempts=4 updated_at=2026-11-11T00:00:00.000Z error=(空)',
     )
-    expect(lines).toHaveLength(13)
+    expect(lines).toHaveLength(14) // 10 基准 + failed 头 + 2 条明细 + Story 3.3 注入行
   })
 
   it('P5：id/kind 内的换行也被单行化，不伪造额外行', () => {
@@ -125,7 +126,8 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
     })
     const lines = text.split('\n')
     // 10 行基准 + 「failed 最近条目:」+ 1 行条目：id/kind 里的换行不得裂成更多行。
-    expect(lines).toHaveLength(12)
+    // Story 3.3：末行注入状态行 ⇒ 12 → 13。
+    expect(lines).toHaveLength(13)
     expect(lines[11]).toContain('i-1')
     expect(lines[11]).toContain('kind=work_fact')
     expect(lines[11]).toContain('attempts=4')
@@ -195,7 +197,9 @@ describe('AC4 集成：真库死信进入 status', () => {
 
     await plugin.apply(makeCtx(dir, registeredDefs, onEvents), EMBEDDING_CONFIG)
     // Story 3.1：召回配额重置监听（只读早退之前注册）+ 写者模式的闸门/采集监听。
-    expect(onEvents).toEqual(['session/event', 'session/event'])
+    // Story 3.3：开局注入的 `agent/pre-step` 监听（在只读早退前注册）。
+    // Story 3.3 / F-05：`session/disposed` 清理监听 + 写者模式的闸门/采集监听。
+    expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event', 'session/event'])
     expect(registeredDefs).toHaveLength(1)
 
     const result = await registeredDefs[0]!.handler({ rawInput: ' status' })

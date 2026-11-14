@@ -208,6 +208,7 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
       'embedding: enabled',
       'systemOne: enabled',
       'readonly: false',
+      'injection: 未知（本实例尚未触发开局注入）',
     ].join('\n'))
   })
 
