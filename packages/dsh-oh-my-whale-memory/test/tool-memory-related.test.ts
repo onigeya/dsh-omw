@@ -8,14 +8,16 @@
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryDbError } from '../src/db/errors'
 import {
-  RELATED_HINT_EVIDENCE_EXPIRED,
-  RELATED_HINT_PARTIAL,
-  RELATED_HINT_START_INVALID,
-  RELATED_HINT_START_MISSING,
   MEMORY_RELATED_TOOL_NAME,
   createMemoryRelatedTool,
   type MemoryRelatedStore,
 } from '../src/tools/memory-related'
+import {
+  RELATED_HINT_EVIDENCE_EXPIRED,
+  RELATED_HINT_PARTIAL,
+  RELATED_HINT_START_INVALID,
+  RELATED_HINT_START_MISSING,
+} from '../src/tools/related-shared'
 import { createRecallTurnQuota } from '../src/tools/recall-quota'
 
 interface CapturedEntry { id: string; layer: string; hops: number; edge_type: string; reason?: string; text: string; truncated?: boolean; invalid?: boolean; invalid_at?: string }
@@ -66,6 +68,7 @@ function makeStore(overrides: Partial<MemoryRelatedStore> = {}): MemoryRelatedSt
       startFound: true,
       start: START_OK,
       total: 1,
+      anyValidPath: true,
       results: [VALID_ITEM],
     })),
     ...overrides,
@@ -142,7 +145,7 @@ describe('memory_related execute（假 store）', () => {
 
   it('起点不存在 ⇒ 成功值空结果 + 未找到 hint（AC:882-884）', async () => {
     const store = makeStore({
-      traverse: async () => ({ id: 'absent', depth: 2, startFound: false, start: START_OK, total: 0, results: [] }),
+      traverse: async () => ({ id: 'absent', depth: 2, startFound: false, start: START_OK, total: 0, anyValidPath: false, results: [] }),
     })
     const value = await makeTool(store).execute({ id: 'absent' }, execOf('s-missing'))
     expect(value).toMatchObject({ total: 0, results: [], hint: RELATED_HINT_START_MISSING })
@@ -157,6 +160,7 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: START_OK,
         total: 1,
+        anyValidPath: false,
         results: [{ ...VALID_ITEM, invalid: true, invalidAt: '2026-03-01T00:00:00.000Z', pathValid: false }],
       }),
     })
@@ -172,6 +176,7 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: { invalid: true, invalidAt: '2026-03-01T00:00:00.000Z', expiredAt: null },
         total: 1,
+        anyValidPath: true,
         results: [VALID_ITEM],
       }),
     })
@@ -180,7 +185,7 @@ describe('memory_related execute（假 store）', () => {
     expect(value.hint).toContain(RELATED_HINT_START_INVALID)
   })
 
-  it('B4 裁定：起点失效时不判 evidence expired（否则 D5② 永不可达）——邻居 pathValid=false 仍返回', async () => {
+  it('F-04 边界：起点失效 + 全部邻居均无有效路径 ⇒ evidence expired 空结果（不是 D5② 的返回邻居）', async () => {
     const store = makeStore({
       traverse: async () => ({
         id: 'A',
@@ -188,13 +193,37 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: { invalid: true, invalidAt: '2026-03-01T00:00:00.000Z', expiredAt: null },
         total: 1,
-        // 路径含失效起点 ⇒ pathValid 恒 false；但结果必须可见 + hint 起点已失效。
+        anyValidPath: false,
         results: [{ ...VALID_ITEM, pathValid: false }],
       }),
     })
     const value = await makeTool(store).execute({ id: 'A' }, execOf('s-start-invalid-expired'))
-    expect(value.results).toHaveLength(1)
-    expect(value.hint).toContain(RELATED_HINT_START_INVALID)
+    expect(value).toMatchObject({ total: 0, results: [], hint: RELATED_HINT_EVIDENCE_EXPIRED })
+  })
+
+  it('F-02：evidence expired 用截断前 anyValidPath —— >20 命中且有效路径被截断时不误报', async () => {
+    const truncatedInvalid = Array.from({ length: 20 }, (_, index) => ({
+      ...VALID_ITEM,
+      id: `inv-${String(index).padStart(2, '0')}`,
+      pathValid: false,
+      invalid: true,
+    }))
+    const store = makeStore({
+      traverse: async () => ({
+        id: 'A',
+        depth: 3,
+        startFound: true,
+        start: START_OK,
+        total: 25,
+        anyValidPath: true,
+        results: truncatedInvalid,
+      }),
+    })
+    const value = await makeTool(store).execute({ id: 'A' }, execOf('s-truncated'))
+    expect(value.action).toBeUndefined()
+    expect(value.total).toBe(25)
+    expect(value.results).toHaveLength(20)
+    expect(value.hint).toBeUndefined()
   })
 
   it('超时 ⇒ depth=1 重试成功给 partial + hint:partial（AC:891-893，独立预算）', async () => {
@@ -206,6 +235,7 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: START_OK,
         total: 1,
+        anyValidPath: true,
         results: [{ ...VALID_ITEM, hops: 1 }],
       })
     // 注意：只有 RelatedTraversalTimeoutError 触发重试，故用真实错误类替换首个 rejection。
@@ -219,6 +249,7 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: START_OK,
         total: 1,
+        anyValidPath: true,
         results: [{ ...VALID_ITEM, hops: 1 }],
       })
     const value = await makeTool(makeStore({ traverse })).execute({ id: 'A', depth: 3 }, execOf('s-partial'))
@@ -232,7 +263,7 @@ describe('memory_related execute（假 store）', () => {
     const { RelatedTraversalTimeoutError } = await import('../src/db/edges')
     const traverse = vi.fn()
       .mockRejectedValueOnce(new RelatedTraversalTimeoutError(300))
-      .mockResolvedValueOnce({ id: 'A', depth: 1, startFound: true, start: START_OK, total: 0, results: [] })
+      .mockResolvedValueOnce({ id: 'A', depth: 1, startFound: true, start: START_OK, total: 0, anyValidPath: false, results: [] })
     const value = await makeTool(makeStore({ traverse })).execute({ id: 'A' }, execOf('s-timeout'))
     expect(value.action).toBe('failed')
     expect(value.error?.code).toBe('db_read_failed')
@@ -277,6 +308,7 @@ describe('memory_related execute（假 store）', () => {
         startFound: true,
         start: START_OK,
         total: 1,
+        anyValidPath: true,
         results: [{ ...VALID_ITEM, text: 'x'.repeat(1200) }],
       }),
     })

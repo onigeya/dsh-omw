@@ -121,6 +121,33 @@ beforeAll(async () => {
   await seedMemory('s0', 'L1', '2026-03-09T00:00:00.000Z')
   await seedMemory('s1', 'L1')
   await relate('s0', ['s1'], 'rel-s0')
+
+  // ⑦ F-02：同一邻居「短失效路径 + 长有效路径」——t1 → tin(失效) → tn（2 跳、含失效中间节点）；
+  //    t1 → tb → tc → tn（3 跳、全有效）。depth=3 时 tn 必须按**跨路径 OR** 判为有效。
+  await seedMemory('t1', 'L1')
+  await seedMemory('tin', 'L1', '2026-03-10T00:00:00.000Z')
+  await seedMemory('tn', 'L1')
+  await seedMemory('tb', 'L1')
+  await seedMemory('tc', 'L1')
+  await relate('t1', ['tin'], 'rel-t1')
+  await relate('tin', ['tn'], 'rel-tin')
+  await relate('t1', ['tb'], 'rel-t1b')
+  await relate('tb', ['tc'], 'rel-tb')
+  await relate('tc', ['tn'], 'rel-tc')
+
+  // ⑧ F-02：>20 命中且有效路径来自截断外——u0 有 20 个失效 RELATED 邻居（1 跳）占满 top-20；
+  //    另有一条经 l0_raw 的 EVIDENCE 桥：u0 ← un-l0 → un（2 跳、邻居侧全有效）。
+  //    un 排在第 21 名被截断，但 anyValidPath（截断前聚合）必须为 true。
+  await seedMemory('u0', 'L1')
+  const uiIds = Array.from({ length: 20 }, (_, index) => `ui${String(index + 1).padStart(2, '0')}`)
+  for (const id of uiIds) await seedMemory(id, 'L1', '2026-03-11T00:00:00.000Z')
+  await relate('u0', uiIds, 'rel-u0')
+  await seedMemory('un', 'L1')
+  await seedL0('un-l0', '桥梁原始观测')
+  await writeEvidenceEdges(store.connection, [
+    { fromId: 'un-l0', fromLayer: 'L0', toId: 'u0', toLayer: 'L1', reason: 'ev-bridge-u0' },
+    { fromId: 'un-l0', fromLayer: 'L0', toId: 'un', toLayer: 'L1', reason: 'ev-bridge-un' },
+  ])
 })
 
 afterAll(async () => {
@@ -226,6 +253,30 @@ describe('失效节点分组（AC:886/888/889 / spec D3/D4）', () => {
 
     const qt = result.results.find((item) => item.id === 'qt')
     expect(qt).toMatchObject({ hops: 2, invalid: false, pathValid: false })
+  })
+
+  it('F-02：短失效路径 + 长有效路径并存 ⇒ pathValid 是跨路径 OR（不能只看 min-hops 那条）', async () => {
+    const result = await traverseRelated(store.connection, { id: 't1', depth: 3 })
+
+    // 展示仍取 min hops（2 跳、经失效中间节点），但有效性按「存在至少一条全有效路径」判 true。
+    const tn = result.results.find((item) => item.id === 'tn')
+    expect(tn).toMatchObject({ hops: 2, invalid: false, pathValid: true })
+    expect(result.anyValidPath).toBe(true)
+  })
+
+  it('F-02：命中 >20 时 anyValidPath 按截断前聚合（有效路径邻居不被 20 条截断丢弃）', async () => {
+    const result = await traverseRelated(store.connection, { id: 'u0', depth: 2 })
+
+    // 20 个失效邻居（1 跳）+ 经 l0_raw 桥的有效邻居 un（2 跳）= 21 命中。
+    // AC:888 的「有效优先入选」保证有效路径邻居不会被 20 条上限丢弃；anyValidPath 仍按
+    // **截断前全量**聚合（不依赖 results），故不会因截断误报 evidence expired。
+    expect(result.total).toBe(21)
+    expect(result.results).toHaveLength(RELATED_MAX_RESULTS)
+    expect(result.anyValidPath).toBe(true)
+    const un = result.results.find((item) => item.id === 'un')
+    expect(un).toMatchObject({ hops: 2, invalid: false, pathValid: true })
+    // top-20 名额：1 个有效邻居 + 19 个失效邻居（失效优先补位的那 19 个仍在 hop1 上）。
+    expect(result.results.filter((item) => item.invalid)).toHaveLength(RELATED_MAX_RESULTS - 1)
   })
 })
 
