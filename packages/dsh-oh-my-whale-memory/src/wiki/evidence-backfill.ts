@@ -24,10 +24,10 @@ import {
   DEFAULT_CAPTURE_POLICY,
   insertGenerationLog,
 } from '../db/audit.js'
-import { runPrepared } from '../db/backend.js'
+import { readMetaValue, writeMetaValue } from '../db/meta.js'
 import { isEvidenceLayerOrder, L0_LAYER, writeEvidenceEdges, type EvidenceEdgeInput } from '../db/edges.js'
 import { collectRows, queryRows, toStringArray } from '../db/rows.js'
-import { L0_RAW_TABLE, MEMORY_TABLE, META_KEYS, META_TABLE } from '../db/schema.js'
+import { L0_RAW_TABLE, MEMORY_TABLE, META_KEYS } from '../db/schema.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { IdleGate } from '../inbox/idle-gate.js'
@@ -56,8 +56,6 @@ const PAGE_STATEMENT = [
 
 const L0_PROBE = 'MATCH (l:' + L0_RAW_TABLE + ' {id: $id}) RETURN l.id AS id'
 const MEMORY_LAYER_PROBE = 'MATCH (m:' + MEMORY_TABLE + ' {id: $id}) RETURN m.layer AS layer'
-const READ_META = 'MATCH (m:' + META_TABLE + ' {key: $key}) RETURN m.value AS value'
-const MERGE_META = 'MERGE (m:' + META_TABLE + ' {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value'
 
 export interface EvidenceBackfillOptions {
   /** 惰性取连接（apply 期间建库完成后才可用；未就绪 → 本轮不做事）。 */
@@ -73,9 +71,8 @@ export interface EvidenceBackfill {
 }
 
 async function writeCursor(connection: lbug.Connection, value: string): Promise<void> {
-  const statement = await connection.prepare(MERGE_META)
-  // 结果必须释放，否则 pin 满 buffer pool（见 ../db/backend.ts closeQueryResult）。
-  await runPrepared(connection, statement, { key: META_KEYS.evidenceBackfillCursor, value })
+  // Story 5.4 / AC:1307-1309：`omw_meta` 的唯一写入口在 db/meta.ts（本文件不再拼语句）。
+  await writeMetaValue(connection, META_KEYS.evidenceBackfillCursor, value)
 }
 
 /**
@@ -86,9 +83,8 @@ async function writeCursor(connection: lbug.Connection, value: string): Promise<
  * recorded_at ASC）可能还没跑到它，此时把候选 done + 来源 gate-fail 是不可恢复的损失。
  */
 export async function readEvidenceBackfillCursor(connection: lbug.Connection): Promise<string | null> {
-  const rows = await queryRows(connection, READ_META, { key: META_KEYS.evidenceBackfillCursor })
-  const value = rows[0]?.value
-  return value === undefined || value === null ? null : String(value)
+  // `null` = 从未跑过（库里还没有这个键）：它与游标的缺省值（空串）语义不同，故本函数不走 readCursor。
+  return readMetaValue(connection, META_KEYS.evidenceBackfillCursor)
 }
 
 export function createEvidenceBackfill(options: EvidenceBackfillOptions): EvidenceBackfill {

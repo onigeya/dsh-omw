@@ -59,6 +59,7 @@ import {
   createMetaTableStatement,
   createVectorIndexStatement,
 } from './schema.js'
+import { readMetaMap, writeMetaValue } from './meta.js'
 import { ensureMemoryDbDirectory } from './paths.js'
 import { READONLY_REASON } from './writer-lock.js'
 import {
@@ -302,7 +303,7 @@ async function applyFacadeOptions(
   // 只读实例不写库级元数据，AC2 要求它不执行任何写语句。
   if (readOnly) return store
   if (store.modelId !== modelId) {
-    await mergeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
+    await writeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
     store.modelId = modelId
   }
   return store
@@ -357,14 +358,14 @@ async function initializeDatabase(
 
   if (actualDim === null) {
     // schema_version 由 migrateDatabase 统一写（bootstrap 与升级同一条路径），这里只补库级 pin。
-    await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
-    await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
-    await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
+    await writeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
+    await writeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
+    await writeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
   } else {
-    if (metaDim === undefined) await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
-    if (!meta.has(META_KEYS.createdAt)) await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
+    if (metaDim === undefined) await writeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
+    if (!meta.has(META_KEYS.createdAt)) await writeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
     if (meta.get(META_KEYS.embeddingModelId) !== options.modelId) {
-      await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
+      await writeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
     }
   }
 
@@ -621,16 +622,13 @@ async function readTableColumns(connection: MemoryConnection, table: string): Pr
   }
 }
 
-async function readMetaMap(connection: MemoryConnection): Promise<Map<string, string>> {
-  try {
-    const rows = await queryAll(connection, `MATCH (m:${META_TABLE}) RETURN m.key AS key, m.value AS value`)
-    return new Map(rows.map((row) => [String(row.key), String(row.value)]))
-  } catch (error) {
-    if (isMissingTableError(error)) return new Map()
-    throw error
-  }
-}
+/**
+ * 库级元数据的读写已收敛到 `db/meta.ts`（Story 5.4 / AC:1307-1309）：此前 `database.ts` 的
+ * `readMetaMap` / `mergeMetaValue`、`memory.ts` 的游标语句、`wiki/evidence-backfill.ts` 的游标语句
+ * 是三套同形实现。本文件只保留调用，不再拼语句。
+ */
 
+/** 以下三个 helper 与 `db/meta.ts` 的收敛无关（列/维度/索引），保持原位语义；Story 5.4 只删本地元数据读写实现。 */
 function readMetaDim(meta: Map<string, string>, dbPath: string): number | undefined {
   const raw = meta.get(META_KEYS.embeddingDim)
   if (raw === undefined) return undefined
@@ -661,11 +659,4 @@ async function ensureIndexes(connection: MemoryConnection): Promise<void> {
   const names = new Set(rows.map((row) => String(row.index_name)))
   if (!names.has(VECTOR_INDEX_NAME)) await runStatement(connection, createVectorIndexStatement())
   if (!names.has(FTS_INDEX_NAME)) await runStatement(connection, createFtsIndexStatement())
-}
-
-async function mergeMetaValue(connection: MemoryConnection, key: string, value: string): Promise<void> {
-  const statement = await connection.prepare(
-    `MERGE (m:${META_TABLE} {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value`,
-  )
-  await runPrepared(connection, statement, { key, value })
 }

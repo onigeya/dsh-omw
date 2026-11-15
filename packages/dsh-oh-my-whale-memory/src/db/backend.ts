@@ -90,12 +90,24 @@ function loadModule(kind: StorageBackendKind): LoadedModule {
   }
 }
 
+
+/**
+ * 显式 `maxDBSize`（Story 5.4 / AC:1315-1317 的**真正**修法）。
+ *
+ * 实测（2026-11-16）：抛 `VirtualAlloc for size 8796093022208`（= 8 TiB = `2^43`）的是
+ * **`maxDBSize` 的默认值**，不是 `bufferManagerSize` —— node 绑定的构造签名是
+ * `(path, bufferManagerSize?, enableCompression?, readOnly?, maxDBSize?, …)`
+ * （`node_modules/@ladybugdb/core/lbug.d.ts`），第 5 位才是它。v1 的库是 MB 级，4 GiB 是
+ * 数量级上的余量，同时让 16 个实例合计 64 GiB 虚拟地址（远低于 x64 单进程上限）。
+ */
+export const NATIVE_MAX_DB_SIZE = 4 * 1024 * 1024 * 1024
+
 function nativeBackend(module: LoadedModule): StorageBackend {
   return {
     kind: 'native',
     createDatabase(dbPath, readOnly) {
       // native 签名：(databasePath, bufferManagerSize?, enableCompression?, readOnly?)
-      return new module.Database(dbPath, undefined, undefined, readOnly)
+      return new module.Database(dbPath, undefined, undefined, readOnly, NATIVE_MAX_DB_SIZE)
     },
     async createConnection(database) {
       return new module.Connection(database)
