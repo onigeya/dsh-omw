@@ -115,6 +115,24 @@ export const GATE_FAIL_ACTION = 'gate_fail'
 /** 质量门策略标识（generation_log.policy），capture 路径的 last-writer-wins 不适用。 */
 export const L2_PROMOTION_POLICY = 'eii-l1-l2-v1'
 
+/**
+ * 用户遗忘写路径的 action 取值（Story 4.1 / FR-14）。目标与其级联受害者共用同一个 action：
+ * 一次 forget 在账本里是一件事，受害者靠 `cascade_depth` / `trigger_id` 区分。
+ */
+export const FORGET_ACTION = 'forget'
+
+/**
+ * 遗忘级联的 kind 取值（Story 4.1 / AD-19、AD-21 的 cascade 档）。
+ * 复用既有 15 列，不新增表；`cascade_depth=0` 即目标自身。
+ */
+export const FORGET_CASCADE_KIND = 'cascade'
+
+/**
+ * 遗忘裁决的 policy 标识（generation_log.policy / keyed_decision.policy）。
+ * 与 capture 的 last-writer-wins 区分开：forget 是用户显式裁决，不是自动择优。
+ */
+export const FORGET_POLICY = 'user-forget'
+
 /** 一条溯源 / 级联 / 核实记账行。缺省值一律落 null，不落空串。 */
 export interface GenerationLogEntry {
   /** 缺省由本层生成 UUIDv4。崩溃重放要幂等时由调用方给确定性 id。 */

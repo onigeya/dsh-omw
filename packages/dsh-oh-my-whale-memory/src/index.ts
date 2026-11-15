@@ -53,6 +53,8 @@ export type { MemoryWriterLock } from './db/writer-lock.js'
 export {
   MEMORY_COMMAND_NAME,
   MEMORY_COMMAND_USAGE,
+  MEMORY_FORGET_SUBCOMMAND,
+  MEMORY_FORGET_USAGE,
   MEMORY_LIST_DEFAULT_LIMIT,
   MEMORY_LIST_SUBCOMMAND,
   MEMORY_LIST_USAGE,
@@ -69,12 +71,26 @@ export type {
   MemoryCommandDefinition,
   MemoryCommandDetail,
   MemoryCommandDependencies,
+  MemoryCommandForgetEntry,
+  MemoryCommandForgetResult,
   MemoryCommandInvocation,
   MemoryCommandListEntry,
   MemoryCommandParseResult,
   MemoryCommandResult,
   MemoryStatusSnapshot,
 } from './command.js'
+export {
+  MEMORY_FORGET_CONFIRMATION_HINT,
+  MEMORY_FORGET_TOOL_DESCRIPTION,
+  MEMORY_FORGET_TOOL_NAME,
+} from './tools/memory-forget.js'
+export type {
+  MemoryForgetConfirmation,
+  MemoryForgetFailed,
+  MemoryForgetPreview,
+  MemoryForgetStore,
+  MemoryForgetValue,
+} from './tools/memory-forget.js'
 export {
   MEMORY_KINDS,
   MEMORY_REMEMBER_LAYER,
@@ -97,7 +113,8 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * 本插件向宿主注入的能力清单。
  * `'commands'`：`/memory` 宿主命令（Story 1.7）。
  * `'settings'`：/settings 表单投影与 `/memory status` 的设置读取通道（AD-11）。
- * `'tools'`：工具注册表，memory_remember / memory_recall / memory_related（Story 1.6/3.1/3.2）。
+ * `'tools'`：工具注册表，memory_remember / memory_recall / memory_related / memory_forget
+ * （Story 1.6/3.1/3.2/4.1）。
  * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
  * `'llm'`：INBOX 精炼的宿主单通道 `ctx.llm`（Story 2.3 / AD-5，显式 provider+model）。
  * `'systemPrompt'`：新会话开局注入的 section + 动态 context（Story 3.3 / FR-9 / AD-23）。
@@ -187,6 +204,8 @@ export async function apply(
     getStatus: access.getStatus,
     recallMemories: retrieval.recallMemories,
     relatedMemories: retrieval.relatedMemories,
+    // Story 4.1：遗忘（写路径；只读实例在 access 里先拒）。
+    forgetMemory: access.forgetMemory,
   }))
   // Story 3.1：每轮召回配额的双点重置（只读实例也提供召回，故在只读早退之前注册）；
   // `ctx.on` 自动挂 disposer，不新增 ctx.effect（entry-exports 钉死 closer 数）。

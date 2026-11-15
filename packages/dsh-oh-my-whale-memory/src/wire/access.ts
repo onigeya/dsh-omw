@@ -6,8 +6,10 @@
  * 本单元不做任何注册，只把读/写依赖与 status 快照组装成纯函数对象。
  */
 import type { MemoryDatabase } from '../db/database.js'
+import { createReadonlyModeError } from '../db/database.js'
 import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
+import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
 import {
   countMemoriesByLayer,
   countUnembeddedMemories,
@@ -46,6 +48,8 @@ export interface MemoryAccess {
   readonly listMemories: MemoryCommandDependencies['listMemories']
   readonly getMemoryById: MemoryCommandDependencies['getMemoryById']
   readonly getStatus: MemoryCommandDependencies['getStatus']
+  /** Story 4.1：软删除 + EII 定序级联（写路径，只读实例必须先拒）。 */
+  readonly forgetMemory: MemoryCommandDependencies['forgetMemory']
 }
 
 /** 库未就绪的统一文案：写入与读取各一句，逐字保留命令层既有输出。 */
@@ -81,6 +85,15 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     readMemories(readConnection().connection, input)
   const getMemoryById: MemoryAccess['getMemoryById'] = (id) =>
     readMemoryById(readConnection().connection, id)
+
+  // Story 4.1：忘却是写路径。库未就绪与 `writeInbox` 同一句文案；只读实例的拒绝复用 facade
+  // 的 `readonly_mode` 错误（同一句话，不新造），命令层 catch 后收敛成 error 结果。
+  const forgetMemory: MemoryAccess['forgetMemory'] = async (id) => {
+    const database = options.getDb()
+    if (!database) throw new Error(DB_NOT_READY_WRITE)
+    if (database.readonly) throw createReadonlyModeError(database.dbPath)
+    return forgetMemoryInDb(database.connection, id)
+  }
 
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
   // embeddingMode）。纯读、无 LLM / 网络；库未就绪经 readConnection() 抛错，由命令层收敛。
@@ -136,5 +149,5 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     }
   }
 
-  return { readConnection, writeInbox, listMemories, getMemoryById, getStatus }
+  return { readConnection, writeInbox, listMemories, getMemoryById, getStatus, forgetMemory }
 }

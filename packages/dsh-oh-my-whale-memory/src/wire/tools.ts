@@ -1,15 +1,17 @@
 /**
- * 模型工具注册（Story 1.6 / 3.1 / 3.2）。
+ * 模型工具注册（Story 1.6 / 3.1 / 3.2 / 4.1）。
  *
- * 三个工具都在建库之前注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
+ * 四个工具都在建库之前注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
  * `db_unavailable`，因此工具可用性不受 profile/建库问题牵连。
- * 注册顺序被 `test/entry-exports.test.ts` 钉死：remember → recall → related。
+ * 注册顺序被 `test/entry-exports.test.ts` 钉死：remember → recall → related → forget。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { MemoryDatabase } from '../db/database.js'
+import { getMemoryById } from '../db/memory.js'
 import { createMemoryRememberTool } from '../tools/memory-remember.js'
 import { createMemoryRecallTool, type MemoryRecallStore } from '../tools/memory-recall.js'
 import { createMemoryRelatedTool, type MemoryRelatedStore } from '../tools/memory-related.js'
+import { createMemoryForgetTool } from '../tools/memory-forget.js'
 import type { RecallQuota } from '../tools/recall-quota.js'
 
 export interface MemoryToolsOptions {
@@ -32,5 +34,20 @@ export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void
     // 只读实例的遍历是纯读路径，照样可用；库未就绪时同样返回 db_unavailable。
     getRelatedStore: () => (getDb() === undefined ? undefined : options.relatedStore),
     quota: options.quota,
+  }))
+  ctx.tools.register(createMemoryForgetTool({
+    // 遗忘工具不写库：它只把 id 解析成预览并请求用户确认（执行通道不存在，Story 4.1）。
+    // 只读态由 facade 的运行态直接给出，工具层据此在查库之前拒掉。
+    getForgetStore: () => {
+      const database = getDb()
+      if (database === undefined) return undefined
+      return {
+        readonly: database.readonly,
+        preview: async (id) => {
+          const detail = await getMemoryById(database.connection, id)
+          return detail === null ? null : { id: detail.id, layer: detail.layer, text: detail.text }
+        },
+      }
+    },
   }))
 }
