@@ -1,4 +1,4 @@
-// AD-35 发布形态冒烟：pnpm pack 两包 → 断言 tarball 内容。P1-R12。
+// AD-35 发布形态冒烟：pnpm pack 两包，再断言 tarball 内容。P1-R12。
 import { execSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -16,8 +16,7 @@ const packages = [
 ]
 for (const [dir, label, required] of packages) {
   try {
-    const outText = run('pnpm pack --pack-destination "' + out + '"', join(root, dir))
-    const name = /Tarball contents|package:\s*([^\s]+\.tgz)/.exec(outText)
+    run('pnpm pack --pack-destination "' + out + '"', join(root, dir))
     const tars = readdirSync(out).filter((f) => f.endsWith('.tgz'))
     const pkgName = label === 'bundle' ? 'dsh-oh-my-whale' : 'dsh-oh-my-whale-memory'
     const mine = tars.find((f) => f.startsWith(pkgName + '-') && (label === 'memory' ? f.includes('-memory-') : !f.includes('-memory-')))

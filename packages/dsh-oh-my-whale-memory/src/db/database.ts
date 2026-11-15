@@ -6,33 +6,33 @@
  * 1. 解析绝对路径并创建 `<profile>/memory/`；
  * 2. 打开 Database + Connection，`INSTALL/LOAD` vector 与 fts（扩展是每进程装载，
  *    索引本身持久化在库内）；
- * 3. 若 `memory` 表已存在，从 `table_info` 读实际 `FLOAT[n]` 维度并与配置比对——
+ * 3. 若 `memory` 表已存在，从 `table_info` 读实际 `FLOAT[n]` 维度并与配置比对，
  *    不符即抛 `embedding_dim_mismatch`（fail-loud，不静默降级、不重建库，AD-14）；
  * 4. 缺表则建表（`IF NOT EXISTS`），首建时把 dim/model/schema_version/created_at 写入
  *    `omw_meta`（库级元数据，AC2）；
- * 5. 用 `show_indexes()` 判断索引是否存在，缺哪个建哪个——0.22.3 上重复调用
+ * 5. 用 `show_indexes()` 判断索引是否存在，缺哪个建哪个，0.22.3 上重复调用
  *    `CREATE_VECTOR_INDEX`/`CREATE_FTS_INDEX` 会抛 Binder exception。
  *
  * Windows 约束（2026-11-09 实测，@ladybugdb/core 0.22.3）：
- * `close()`/`closeSync()` 之后**同进程**再打开同一库文件必失败——
+ * `close()`/`closeSync()` 之后同进程再打开同一库文件必失败，
  * `IO exception: Could not set lock on file ... (Error: 33)`，且不会自行恢复（GC 也救不回，
  * 文件锁在进程级）。跨进程则正常（子进程退出后父进程可打开）。`open` 后在测试文件里
  * 追加第二条断言即可复现。
  *
- * 因此本模块的句柄生命周期是**进程级**：同一绝对路径只在第一次 open 时真正建连，
+ * 因此本模块的句柄生命周期是进程级：同一绝对路径只在第一次 open 时真正建连，
  * 之后永远复用；`close()` 只回收 facade 供宿主 dispose 语义使用，不断开连接。
  * 这也让"维度不符被拒后再次尝试"能稳定复现 `embedding_dim_mismatch`，而不是被
  * 底层锁错误掩盖。Story 1.5 的写者锁需在此基础上设计（跨进程锁才是真正的第二实例判据）。
  *
  * 只读降级（Story 1.5 / AD-12）：第二实例拿不到写者锁时由调用方传 `readOnly: true`
- * 打开同一个库。只读路径**不建库文件、不建表、不写元数据、不 `INSTALL` 扩展**；
- * Story 3.1 起改为**尽力 `LOAD`** 已安装的扩展（见 createReadOnlyHandle），
+ * 打开同一个库。只读路径不建库文件、不建表、不写元数据、不 `INSTALL` 扩展；
+ * Story 3.1 起改为尽力 `LOAD` 已安装的扩展（见 createReadOnlyHandle），
  * 让只读实例保留 recall 能力。
  * 库不存在直接 `db_open_failed`（不创建空库），写入口 `upsertMemory` 抛
  * `readonly_mode`（AC4）。（`apply` 会先为写者锁文件创建 `<profile>/memory/` 目录并在
- * 其中写 `<dbPath>.lock`——那是进程级锁的载体，不属于库写入。）LadybugDB 的顺序约束
+ * 其中写 `<dbPath>.lock`，那是进程级锁的载体，不属于库写入。）LadybugDB 的顺序约束
  * （实测）：只要有只读句柄存在，之后同文件的读写打开必失败 `Error: 33`，所以
- * **必须先定角色（先拿锁）再打开库**——该顺序由 index.ts 的 apply 保证。
+ * 必须先定角色（先拿锁）再打开库，该顺序由 index.ts 的 apply 保证。
  */
 import { stat } from 'node:fs/promises'
 import type * as lbug from '@ladybugdb/core'
@@ -40,7 +40,7 @@ import { ensureAuditTables } from './audit.js'
 import { loadStorageBackend, runPrepared, runStatement, type StorageBackend, type StorageBackendKind } from './backend.js'
 import { ensureInboxTables, ensureL2InboxTables } from './inbox-tables.js'
 import { ensureEdgeTables } from './edges.js'
-import { MemoryDbError } from './errors.js'
+import { MemoryDbError, isMissingTableError } from './errors.js'
 import {
   META_KEYS,
   MEMORY_TABLE,
@@ -85,7 +85,7 @@ export interface OpenMemoryDatabaseOptions {
   readOnly?: boolean
   /**
    * 只读实例的扩展装载告警出口（Story 3.1 / F-06）：只读 best-effort `LOAD` 失败时
-   * 经此记 warn（vector / fts 各自的结果与首个原因）——降级不留静默路径（D8）。
+   * 经此记 warn（vector / fts 各自的结果与首个原因），降级不留静默路径（D8）。
    * 写者路径不装载扩展（建库时装），此字段对它无意义。
    */
   logger?: { warn(message: string): void }
@@ -122,7 +122,7 @@ const facades = new Map<string, MemoryDatabase>()
 /**
  * 同路径正在打开中的 facade：并发 open 共用同一次完整初始化。
  *
- * 只去重底层句柄是不够的——建表之后的 ensureIndexes 不幂等，
+ * 只去重底层句柄是不够的，建表之后的 ensureIndexes 不幂等，
  * CREATE_VECTOR_INDEX / CREATE_FTS_INDEX 重复执行会抛
  * "Binder exception: Index memory_embedding_hnsw already exists in table memory."，
  * 所以去重必须覆盖建表 + 元数据 + 建索引全过程。
@@ -175,7 +175,7 @@ async function createHandle(dbPath: string): Promise<RawHandle> {
  *
  * 只读模式蕴含"另一个存活实例持有写者锁"，而 `new lbug.Database()` 是惰性打开：
  * 写者拿到锁之后、首次查询（`INSTALL/LOAD` 扩展）之前，库文件还没落盘。两个窗口
- * 几乎同时启动时，第二实例正好落在这个窗口里——此时立刻抛 `db_open_failed` 会让它
+ * 几乎同时启动时，第二实例正好落在这个窗口里，此时立刻抛 `db_open_failed` 会让它
  * 连降级只读的机会都没有。等待是有界的、安全的：只有"别人持锁"才会走到这里。
  */
 const READONLY_DB_WAIT_MS = 2_000
@@ -201,13 +201,14 @@ async function waitForLibraryFile(dbPath: string): Promise<boolean> {
 }
 
 /**
- * 只读句柄（Story 1.5 / AC1）：`readOnly` 是 `Database` 构造函数的第 4 个位置参数。
- * 不建目录、不建库——库文件（有界等待后仍）不存在即 fail-loud，只读实例绝不创建空库；
+ * 只读句柄（Story 1.5 / AC1）：`readOnly` 由 backend 层映射到各后端的构造位置参数
+ * （native 第 4 位、wasm 第 5 位，见 backend.ts 的 createDatabase），本文件不构造 Database。
+ * 不建目录、不建库，库文件（有界等待后仍）不存在即 fail-loud，只读实例绝不创建空库；
  * 也不 `INSTALL` 扩展（只读打开不做任何写动作）。
  *
- * Story 3.1：只读实例在 schema 校验通过后**尽力** `LOAD` 已安装的 vector / fts 扩展
+ * Story 3.1：只读实例在 schema 校验通过后尽力 `LOAD` 已安装的 vector / fts 扩展
  * （`install: false`，P4 探针：native 只读连接可 `LOAD fts` 而无需 `INSTALL`）。
- * 见 {@link tryLoadReadOnlyExtensions}——装载失败吞掉，只读开库不得回归。
+ * 见 {@link tryLoadReadOnlyExtensions}，装载失败吞掉，只读开库不得回归。
  */
 async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
   if (!(await waitForLibraryFile(dbPath))) {
@@ -227,13 +228,13 @@ async function createReadOnlyHandle(dbPath: string): Promise<RawHandle> {
 /**
  * Story 3.1：只读实例的扩展装载（best-effort）。
  *
- * 时机必须是**库已成功打开之后**（本函数在 `initializeReadOnlyDatabase` 的 schema 校验
+ * 时机必须是库已成功打开之后（本函数在 `initializeReadOnlyDatabase` 的 schema 校验
  * 通过后调用）：启动竞态下（写者持锁、库文件刚出现、写者仍在跑 DDL）第一次查询会撞上
  * `Cannot open database in read-only mode while checkpoint recovery is pending`，而
- * 失败的首查会把整个 Database 置为不可用——之后连 `table_info`/`MATCH` 都抛同一错误。
+ * 失败的首查会把整个 Database 置为不可用，之后连 `table_info`/`MATCH` 都抛同一错误。
  * 因此绝不能把它放在 createReadOnlyHandle 里抢先于 schema 读。
  *
- * 装载失败记 warn 而不抛（只读开库不得回归），但**必须可见**（D8 / F-06）：warn 里带
+ * 装载失败记 warn 而不抛（只读开库不得回归），但必须可见（D8 / F-06）：warn 里带
  * 逐项原因（vector / fts 各自的结果由 backend 组合），运维才能区分
  * 「扩展没装 / 缺 OpenSSL 3 / 真故障」，也才能看出是不是部分成功。
  * wasm 后端下扩展静态编译，`loadExtensions` 是 no-op。
@@ -294,7 +295,7 @@ async function applyFacadeOptions(
 ): Promise<MemoryDatabase> {
   if (store.readonly !== readOnly) throw createModeMismatchError(dbPath, readOnly, store.readonly)
   if (store.dim !== dim) throw createDimMismatchError(store.dim, dim, dbPath)
-  // 只读实例不写库级元数据——AC2 要求它不执行任何写语句。
+  // 只读实例不写库级元数据，AC2 要求它不执行任何写语句。
   if (readOnly) return store
   if (store.modelId !== modelId) {
     await mergeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
@@ -321,8 +322,8 @@ async function initializeDatabase(
   await runStatement(connection, createMemoryTableStatement(dim))
   // Story 2.4（U1）：memory.parent_id 的旧库补列。新库由上面的 CREATE 直接带上；
   // 旧库的 CREATE ... IF NOT EXISTS 是 no-op（实测不会加列），故用幂等 ALTER 补。
-  // `columns` 是建表**之前**读的列清单：新库为 null（跳过），旧库缺列才 ALTER。
-  // 只读实例走 initializeReadOnlyDatabase，不经过本函数——绝不执行任何写语句（AC2）。
+  // `columns` 是建表之前读的列清单：新库为 null（跳过），旧库缺列才 ALTER。
+  // 只读实例走 initializeReadOnlyDatabase，不经过本函数，绝不执行任何写语句（AC2）。
   if (columns !== null && !columns.has(PARENT_ID_COLUMN)) {
     await runStatement(connection, alterMemoryAddParentIdStatement())
   }
@@ -338,7 +339,7 @@ async function initializeDatabase(
   // Story 2.5 / U1：L2 提升队列（l2_inbox）同列同状态机，同样在唯一迁移点建（幂等）。
   await ensureL2InboxTables(connection)
   // Story 2.6：类型化边表（EVIDENCE GROUP + RELATED）。必须排在 memory / l0_raw 节点表之后
-  // ——0.22.3 对端点不存在的 GROUP DDL 直接 Binder 报错（brief §2.3 N14）；IF NOT EXISTS 幂等。
+  // 0.22.3 对端点不存在的 GROUP DDL 直接 Binder 报错（brief §2.3 N14）；IF NOT EXISTS 幂等。
   // 只读实例走 initializeReadOnlyDatabase，不经本函数（AC6 / AD-12）。
   await ensureEdgeTables(connection)
 
@@ -395,7 +396,7 @@ async function initializeDatabase(
 
 /**
  * 只读 facade（Story 1.5 / AC1、AC2、AC4）：复用与写者路径完全相同的库结构校验
- * （同一维度/元数据优先级），但**不建表、不写元数据、不建索引**，写入口一律抛
+ * （同一维度/元数据优先级），但不建表、不写元数据、不建索引，写入口一律抛
  * `readonly_mode`。校验失败时回收句柄，不留下半可用的 facade。
  */
 async function initializeReadOnlyDatabase(
@@ -439,7 +440,7 @@ async function initializeReadOnlyDatabase(
 }
 
 /**
- * 只读实例读取已有库的结构（Story 1.5 / AC1）：库文件落盘 ≠ schema 就绪——写者建完库
+ * 只读实例读取已有库的结构（Story 1.5 / AC1）：库文件落盘 ≠ schema 就绪，写者建完库
  * 文件之后还要建表、写元数据，两个实例几乎同时启动时只读方会读到"表还没建"的中间态，
  * 此时该等而不是报错。只在"memory 表尚不存在"这一种中间态上有界重试，其余不一致
  * （维度不符、元数据矛盾）立刻 fail-loud。
@@ -524,17 +525,17 @@ async function closeHandle(handle: RawHandle): Promise<void> {
 /**
  * 关闭并驱逐某路径的进程内句柄（插件禁用/卸载时的资源回收入口，Story 1.5 / AD-12 的句柄缓存出口）。
  *
- * 为什么需要：facade 的 `close()` 只删 `facades` 表——`handles` 里的 Database/Connection 会留到
+ * 为什么需要：facade 的 `close()` 只删 `facades` 表，`handles` 里的 Database/Connection 会留到
  * 进程退出，buffer pool、文件句柄与 wasm worker 侧的结果对象都白占着。本函数把句柄真正关掉
  * 并从两张表里驱逐，使下一次 apply 重新建连（而不是复用旧句柄）。
  *
  * 后端差异（2026-11-14 实测，0.22.3；两后端各自 close→同进程重开→真实读写）：
- * - **wasm**（Electron 宿主 / `ELECTRON_RUN_AS_NODE` 的生产路径）：close 后同进程重开立即成功，
+ * - wasm（Electron 宿主 / `ELECTRON_RUN_AS_NODE` 的生产路径）：close 后同进程重开立即成功，
  *   3/3 轮 open→close→open 全部通过且计数递增 ⇒ 关闭是安全的，回收后仍可重新 apply；
- * - **native**（纯 Node 宿主）：close 后同进程重开在 2s 内必失败
+ * - native（纯 Node 宿主）：close 后同进程重开在 2s 内必失败
  *   `IO exception: Could not set lock on file ... (Error: 33)`（多次重试不稳定恢复）⇒ 关闭会把
- *   「禁用→启用」打死。本函数不做后端判断：**是否调用由调用方按 {@link memoryDatabaseBackendKind}
- *   决定**（index.ts 的 dispose 只在 wasm 下真关）。
+ *   「禁用→启用」打死。本函数不做后端判断：是否调用由调用方按 {@link memoryDatabaseBackendKind}
+ *   决定（index.ts 的 dispose 只在 wasm 下真关）。
  *
  * 幂等：句柄不存在时只清 facade，是 no-op；关闭失败由 backend 吞掉（回收路径不该抛）。
  */
@@ -548,7 +549,7 @@ export async function closeMemoryDatabase(dbPath: string): Promise<void> {
 
 /**
  * 该路径句柄所属后端；无句柄（未打开/已被 {@link closeMemoryDatabase} 驱逐）时按当前运行时判定。
- * 调用方据此决定「关闭句柄」是否安全——见 {@link closeMemoryDatabase} 的两后端实测差异。
+ * 调用方据此决定「关闭句柄」是否安全，见 {@link closeMemoryDatabase} 的两后端实测差异。
  */
 export function memoryDatabaseBackendKind(dbPath: string): StorageBackendKind {
   return handles.get(dbPath)?.backend.kind ?? loadStorageBackend().kind
@@ -572,7 +573,7 @@ async function readTableColumns(connection: MemoryConnection, table: string): Pr
     const rows = await queryAll(connection, `CALL table_info('${escapeSqlString(table)}') RETURN name, type`)
     return new Map(rows.map((row) => [String(row.name), String(row.type)]))
   } catch (error) {
-    if (isMissingCatalogEntry(error)) return null
+    if (isMissingTableError(error)) return null
     throw error
   }
 }
@@ -582,7 +583,7 @@ async function readMetaMap(connection: MemoryConnection): Promise<Map<string, st
     const rows = await queryAll(connection, `MATCH (m:${META_TABLE}) RETURN m.key AS key, m.value AS value`)
     return new Map(rows.map((row) => [String(row.key), String(row.value)]))
   } catch (error) {
-    if (isMissingCatalogEntry(error)) return new Map()
+    if (isMissingTableError(error)) return new Map()
     throw error
   }
 }
@@ -610,17 +611,6 @@ function readEmbeddingColumnDim(columns: Map<string, string>, dbPath: string): n
     )
   }
   return Number(match[1])
-}
-
-/**
- * 0.22.3 上"表不存在"有两种措辞，都要认：
- * - `CALL table_info('x')` → "Catalog exception: x does not exist in catalog."
- * - `MATCH (m:x)` → "Binder exception: Table x does not exist."
- * 其余错误继续冒泡。
- */
-function isMissingCatalogEntry(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error)
-  return /does not exist/i.test(message)
 }
 
 async function ensureIndexes(connection: MemoryConnection): Promise<void> {

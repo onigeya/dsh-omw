@@ -42,7 +42,7 @@ export const META_KEYS = {
   l2PromotionCursor: 'l2_promotion_cursor',
 } as const
 
-/** 维度必须是 ≥1 的整数——直接拼进 DDL，越界即拒绝（不信任外部配置）。 */
+/** 维度必须是 ≥1 的整数，直接拼进 DDL，越界即拒绝（不信任外部配置）。 */
 export function assertEmbeddingDim(dim: number): number {
   if (!Number.isInteger(dim) || dim < 1 || dim > 65536) {
     throw new MemoryDbError('invalid_embedding_dim', `embedding 维度（期望 1..65536 的整数，实际 ${dim}）`)
@@ -79,7 +79,7 @@ export const PARENT_ID_COLUMN = 'parent_id'
 
 /**
  * 旧库补 parent_id 列（Story 2.4 / U1）。LadybugDB 0.22.3 实测可用；
- * 幂等性由调用方保证（先 readTableColumns 判列，缺列才执行）——重复执行会抛
+ * 幂等性由调用方保证（先 readTableColumns 判列，缺列才执行），重复执行会抛
  * "Binder exception: Property parent_id already exists"，故不做 IF NOT EXISTS。
  */
 export function alterMemoryAddParentIdStatement(): string {
@@ -90,7 +90,7 @@ export function alterMemoryAddParentIdStatement(): string {
 export const SUPPORT_COLUMN = 'support'
 
 /**
- * 旧库补 support 列（Story 2.5 / U16）。幂等性由调用方保证（先 readTableColumns 判列）——
+ * 旧库补 support 列（Story 2.5 / U16）。幂等性由调用方保证（先 readTableColumns 判列），
  * 重复执行会抛 "Binder exception: Property support already exists"，故不做 IF NOT EXISTS。
  */
 export function alterMemoryAddSupportStatement(): string {
@@ -104,14 +104,14 @@ export function createL0RawTableStatement(): string {
 /**
  * INBOX 队列表（Story 2.2 / AD-6、NFR7）：采集到的条目 FIFO 排队，lease 状态机自愈。
  *
- * 表名 `l1_inbox` 与既有五张表同一 snake_case 约定（epic 原文的 "L1_INBOX" 指的是**队列**
+ * 表名 `l1_inbox` 与既有五张表同一 snake_case 约定（epic 原文的 "L1_INBOX" 指的是队列
  * 这个逻辑名；`memory.layer` 的历史取值 'L1_INBOX' 是另一回事，不同表不冲突）。
  * 列语义见 src/inbox/queue.ts（状态机与 lease 的唯一实现处）。
  */
 export const L1_INBOX_TABLE = 'l1_inbox'
 
 /**
- * Story 2.5 / U1：L2 提升队列（与 l1_inbox **同列、同状态机**，只有表名不同）。
+ * Story 2.5 / U1：L2 提升队列（与 l1_inbox 同列、同状态机，只有表名不同）。
  * 泛化的语句生成在 src/inbox/queue.ts 的 createInboxQueue(table)；
  * 表名只能是本文件导出的常量，绝不接受外部输入（不把用户数据拼进 DDL）。
  */
@@ -152,7 +152,7 @@ export function createMetaTableStatement(): string {
 /**
  * 审计账本：generation_log（Story 1.10 / AD-10、AD-21）。
  *
- * 一次迁移与 keyed_decision **同时**建（见 src/db/audit.ts 的 ensureAuditTables），
+ * 一次迁移与 keyed_decision 同时建（见 src/db/audit.ts 的 ensureAuditTables），
  * 此后不得再分叉。只 append、永不改写；redact 的墓碑保留 id + recorded_at。
  *
  * - actor / kind / action / policy：动作用语 capture|refine|verify|cascade|redact
@@ -218,21 +218,21 @@ export function createKeyedDecisionTableStatement(): string {
 
 /** HNSW cosine 向量索引：CREATE_VECTOR_INDEX 不幂等，调用前必须查 show_indexes()。 */
 export function createVectorIndexStatement(): string {
-  return `CALL CREATE_VECTOR_INDEX('memory', 'memory_embedding_hnsw', 'embedding', metric := 'cosine', mu := 30, ml := 60, pu := 0.05, efc := 200)`
+  return `CALL CREATE_VECTOR_INDEX('${MEMORY_TABLE}', '${VECTOR_INDEX_NAME}', 'embedding', metric := 'cosine', mu := 30, ml := 60, pu := 0.05, efc := 200)`
 }
 
 /** BM25 FTS 索引：同样不幂等；stopwords/stemmer 用官方默认（stopwords 是文件路径 STRING，非数组）。 */
 export function createFtsIndexStatement(): string {
-  return "CALL CREATE_FTS_INDEX('memory', 'memory_text_fts', ['text'])"
+  return `CALL CREATE_FTS_INDEX('${MEMORY_TABLE}', '${FTS_INDEX_NAME}', ['text'])`
 }
 
 /**
  * 类型化边表（Story 2.6 / AD-4、AD-19、AD-21）。
  *
- * EVIDENCE 必须是 **REL TABLE GROUP**：单条 `*1..4` 变长递归要能跨
+ * EVIDENCE 必须是 REL TABLE GROUP：单条 `*1..4` 变长递归要能跨
  * `l0_raw→memory` 与 `memory→memory` 两段走完「L2→L1→L0」；拆成两张单对边表时
  * 跨表递归不可用，相关子查询会给出错判（brief-2-6-readiness.md §2.3 N1 实测）。
- * GROUP 的两对表**共享属性集**（`CALL table_info('EVIDENCE')` 只返回 reason），
+ * GROUP 的两对表共享属性集（`CALL table_info('EVIDENCE')` 只返回 reason），
  * 故边上只留 `reason`，不加时间列（brief §5.1 U6，Lead 已批准）。
  *
  * RELATED 是普通 REL TABLE：同层语义关联，由关系识别 LLM 提议、应用层校验后写入。

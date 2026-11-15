@@ -1,5 +1,5 @@
 /**
- * 混合检索内核（Story 3.1 / FR-11、FR-12 —— 全仓唯一检索实现）。
+ * 混合检索内核（Story 3.1 / FR-11、FR-12 · 全仓唯一检索实现）。
  *
  * 两路各取 `retrievalTopK` 条（Config，缺省 50）：
  * - 语义向量路：`QUERY_VECTOR_INDEX`，余弦距离升序（lower = better）；
@@ -7,8 +7,8 @@
  * - 关键词路：`QUERY_FTS_INDEX`（BM25，K=1.2 / B=0.75），score 降序。
  *
  * 合流（探针锁定，见 spec Design Notes）：
- * - RRF `1/(rrfK + rank)`，rank 从 1 计，**只按 rank 参与**——语义距离与 BM25 分
- *   不可比，绝不把两路分数放在同一数轴上；
+ * - RRF `1/(rrfK + rank)`，rank 从 1 计，只按 rank 参与：语义距离与 BM25 分
+ *   不可比，不把两路分数放在同一数轴上；
  * - 层权重是排序分数的乘法系数（L2 / L1，未知层 1），再乘 priority 系数
  *   `1 + priorityWeight × priority/100`（priorityWeight 由 Config 提供，缺省 0.5，spec D4）；
  * - 排序键：`priority === -1` 恒置顶 → score 降序 → recorded_at 降序 → id 升序
@@ -17,13 +17,13 @@
  *
  * 只读：本模块不写库、不触发写路径、不建索引（索引由 database.ts 建库时创建）。
  *
- * 安全（P2 复测 + F-03）：FTS 查询串经 `$q` **参数绑定**送进语句（prepare+execute，
- * 绝不内联）——2026-11-14 双后端复测证明 0.22.3 上绑定可用（见 ledger-3-1.tsv 的
+ * 安全（P2 复测 + F-03）：FTS 查询串经 `$q` 参数绑定送进语句（prepare+execute，
+ * 不内联），2026-11-14 双后端复测证明 0.22.3 上绑定可用（见 ledger-3-1.tsv 的
  * P2 复测行）；入参仍先经 `sanitizeFtsQuery` 剥离 C0 控制字符并限长 256 code points。
  * 快照过滤在 Cypher 内完成（`WITH node, score MATCH (node) WHERE <共享谓词>`，探针 P1）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { collectRows } from '../db/rows.js'
+import { queryRows, toStringArray } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { FTS_INDEX_NAME, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { estimateTokens, splitToBudget } from '../shared/text-budget.js'
@@ -39,15 +39,15 @@ export const RECALL_MIN_LIMIT = 1
 
 /**
  * 单条召回文本的 token 预算（spec Always 第 6 条）：超过即截断到首段 + `…`。
- * 与精炼侧「每条 ≤150 token」是不同口径——召回给的是**摘要预览**，256 让 Agent 一眼读懂
+ * 与精炼侧「每条 ≤150 token」是不同口径：召回给的是摘要预览，256 让 Agent 一眼读懂
  * 一条记忆的主干，又不至于把一次召回塞满上下文。
  */
 export const RECALL_TEXT_TOKEN_BUDGET = 256
 
 /**
  * 召回侧真截断（spec Always 第 6 条）：复用与精炼侧同一套 token 估算与切分器
- * （`estimateTokens` / `splitToBudget`，src/shared/text-budget.ts），取**首段**并追加
- * `…`。只改返回的 text，**不改节点集合**：命中不丢，需要全文时按 id 另查（`/memory show`）。
+ * （`estimateTokens` / `splitToBudget`，src/shared/text-budget.ts），取首段并追加
+ * `…`。只改返回的 text，不改节点集合：命中不丢，需要全文时按 id 另查（`/memory show`）。
  */
 export function truncateRecallText(text: string): { readonly text: string; readonly truncated: boolean } {
   if (estimateTokens(text) <= RECALL_TEXT_TOKEN_BUDGET) return { text, truncated: false }
@@ -58,18 +58,18 @@ export function truncateRecallText(text: string): { readonly text: string; reado
 
 /**
  * priority 二次加权乘法系数（spec D4 / FR-16）：
- * `1 + weight × priority/100` —— 线性、单调、可解释；`weight` 由 Config `priorityWeight`
+ * `1 + weight × priority/100`，线性、单调、可解释；`weight` 由 Config `priorityWeight`
  * 提供（缺省 0.5 ⇒ priority=100 得 ×1.5），层权重之后再乘一次，排序仍以 RRF 融合分为主。
  *
- * `priority === -1`（全局强规则）**不进本公式**：它的恒置顶由排序阶段的独立分组承载
- * （见 {@link runRecallCore} 的排序键），函数本身不做特判——把 -1 代入只会得到 1 - weight/100，
+ * `priority === -1`（全局强规则）不进本公式：它的恒置顶由排序阶段的独立分组承载
+ * （见 {@link runRecallCore} 的排序键），函数本身不做特判：把 -1 代入只会得到 1 - weight/100，
  * 与「恒置顶」无关。
  */
 function priorityFactor(priority: number, weight: number): number {
   return 1 + weight * priority / 100
 }
 
-/** `limit` 夹紧的唯一实现（工具面与命令面共用，绝不各写一份）。 */
+/** `limit` 夹紧的唯一实现（工具面与命令面共用，不各写一份）。 */
 export function clampRecallLimit(limit: number | undefined): number {
   if (limit === undefined || !Number.isFinite(limit)) return RECALL_DEFAULT_LIMIT
   return Math.min(RECALL_MAX_LIMIT, Math.max(RECALL_MIN_LIMIT, Math.trunc(limit)))
@@ -82,14 +82,14 @@ export function clampRecallLimit(limit: number | undefined): number {
 export const RECALL_FTS_QUERY_MAX_CODE_POINTS = 256
 
 /**
- * FTS 查询串净化（F-03）：剥离 C0 控制字符（含 NUL——它们会让 FTS 引擎的查询解析
+ * FTS 查询串净化（F-03）：剥离 C0 控制字符（含 NUL，它们会让 FTS 引擎的查询解析
  * 出错，叠加向量路异常时会连关键词路一起丢）、连续空白归一为单空格、trim，并按
  * {@link RECALL_FTS_QUERY_MAX_CODE_POINTS} 截断 code points。
  *
- * 净化后的串经 `$q` **参数绑定**送进语句（prepare+execute，绝不内联）——注入片段
+ * 净化后的串经 `$q` 参数绑定送进语句（prepare+execute，不内联）：注入片段
  * 天然被当数据。探针 P2 复测（2026-11-14，@ladybugdb/core 0.22.3，native 与 wasm
  * 双后端实测，见 ledger-3-1.tsv）：`$q` 绑定在完整语句形态下均可正常命中，缺参抛
- * `Parameter q not found.`——实现期「绑定静默返回空、必须内联」的结论不可复现。
+ * `Parameter q not found.`，实现期「绑定静默返回空、必须内联」的结论不可复现。
  */
 export function sanitizeFtsQuery(query: string): string {
   const singleLine = query.replace(/[\u0000-\u001F\u007F]/gu, ' ').replace(/\s+/gu, ' ').trim()
@@ -130,8 +130,8 @@ export interface RecallCoreInput {
   readonly now?: string
   /**
    * 调用方的取消信号（F-09：宿主 `ToolExecutionInput.signal` 透传）。
-   * LadybugDB 0.22.3 无查询取消 API，故这里只在**每条语句前后**检查：已取消则不再发下一条、
-   * 原样抛出取消原因（由工具面收敛为失败信封），绝不让中断后的召回继续跑完整流程。
+   * LadybugDB 0.22.3 无查询取消 API，故这里只在每条语句前后检查：已取消则不再发下一条、
+   * 原样抛出取消原因（由工具面收敛为失败信封），不让中断后的召回继续跑完整流程。
    */
   readonly signal?: AbortSignal
 }
@@ -155,7 +155,7 @@ export interface RecallCoreResult {
   readonly degraded: boolean
   readonly hint: string
   /**
-   * 向量路查询异常的原因（仅诊断用，最多给 `ctx.logger.warn`；**不外发**到工具/命令输出）。
+   * 向量路查询异常的原因（仅诊断用，最多给 `ctx.logger.warn`；不外发到工具/命令输出）。
    * 缺省 = 向量路没有失败（含「本来就没有查询向量」的配置态降级）。
    */
   readonly vectorError?: string
@@ -178,7 +178,7 @@ const VECTOR_PATH_STATEMENT = [
   'ORDER BY distance, id ASC',
 ].join('\n')
 
-/** 关键词路（探针 P1）：查询串经 `$q` **绑定**（绝不内联，spec Never 条），入参先过
+/** 关键词路（探针 P1）：查询串经 `$q` 绑定（不内联，spec Never 条），入参先过
  * {@link sanitizeFtsQuery}；K/B/TOP 同样经参数绑定。
  * 次级键 `id ASC` 钉住同分并列时的次序（否则 rank 分配不稳定 ⇒ RRF 跨进程漂移）。 */
 const KEYWORD_PATH_STATEMENT = [
@@ -191,15 +191,6 @@ const KEYWORD_PATH_STATEMENT = [
   'ORDER BY score DESC, id ASC',
 ].join('\n')
 
-async function queryRows(
-  connection: lbug.Connection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
-}
-
 /** 融合前的候选（携带两路累计的 RRF 分）。 */
 interface RecallCandidate {
   readonly id: string
@@ -210,10 +201,6 @@ interface RecallCandidate {
   readonly recordedAt: string
   readonly sourceRefs: string[]
   rrf: number
-}
-
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String) : []
 }
 
 /** 把一路的命中行按 rank 累计进候选表（同 id 在两路都命中时 RRF 相加）。 */
@@ -249,9 +236,9 @@ function addRankedRows(
  * 排序（-1 恒置顶 → score 降序 → recorded_at 降序 → id 升序）→ 层过滤 → 截断。
  *
  * 降级阶梯（spec I/O 矩阵「向量路异常」行）：向量路查询异常（扩展未装 / 索引缺失 /
- * `QUERY_VECTOR_INDEX` 抛错）**只降级向量路**——继续关键词路、结果标 `degraded: true`、
- * 原因经 {@link RecallCoreResult.vectorError} 交给调用方记 warn。关键词路的命中绝不因
- * 向量路故障丢失。仅当**两路都失败**时才抛（工具面收敛为失败信封）。
+ * `QUERY_VECTOR_INDEX` 抛错）只降级向量路：继续关键词路、结果标 `degraded: true`、
+ * 原因经 {@link RecallCoreResult.vectorError} 交给调用方记 warn。关键词路的命中不因
+ * 向量路故障丢失。仅当两路都失败时才抛（工具面收敛为失败信封）。
  *
  * 无命中不是错误：返回 `total: 0` 的正常成功值。
  */
@@ -265,7 +252,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   const candidates = new Map<string, RecallCandidate>()
   const hasQueryVector = input.queryVector !== null && input.queryVector.length > 0
 
-  // ---- 向量路：有查询向量才走；模型不符的节点已在 Cypher 内排除。 ----
+  // 向量路：有查询向量才走；模型不符的节点已在 Cypher 内排除。
   // 异常不冒泡（F-01）：本路失败只降级，关键词路有独立预算（spec I/O 矩阵 :65）。
   let vectorRows: Record<string, unknown>[] = []
   let vectorError: string | undefined
@@ -286,7 +273,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   }
   addRankedRows(candidates, vectorRows, rrfK)
 
-  // ---- 关键词路：FTS 查询串经 $q 绑定（P2 复测：绑定可用，内联弃用）；空串不发查询。 ----
+  // 关键词路：FTS 查询串经 $q 绑定（P2 复测：绑定可用，内联弃用）；空串不发查询。
   let keywordRows: Record<string, unknown>[] = []
   let keywordError: unknown
   if (query !== '') {
@@ -311,7 +298,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
 
   const degraded = !hasQueryVector || vectorError !== undefined
 
-  // ---- RRF → 层权重 × priority 乘法系数（score 只作排序，不外发）。 ----
+  // RRF → 层权重 × priority 乘法系数（score 只作排序，不外发）。
   const layerWeightOf = (layer: string): number => {
     if (layer === 'L2') return input.layerWeights.l2
     if (layer === 'L1') return input.layerWeights.l1
@@ -322,7 +309,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
     score: candidate.rrf * layerWeightOf(candidate.layer) * priorityFactor(candidate.priority, input.priorityWeight),
   }))
 
-  // ---- 排序：-1 恒置顶 → score 降序 → recorded_at 降序 → id 升序（稳定次级键）。 ----
+  // 排序：-1 恒置顶 → score 降序 → recorded_at 降序 → id 升序（稳定次级键）。
   scored.sort((a, b) => {
     const aPinned = a.candidate.priority === -1 ? 0 : 1
     const bPinned = b.candidate.priority === -1 ? 0 : 1
@@ -331,26 +318,26 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
     if (a.candidate.recordedAt !== b.candidate.recordedAt) {
       return a.candidate.recordedAt < b.candidate.recordedAt ? 1 : -1
     }
-    if (a.candidate.id === b.candidate.id) return 0
+    // candidates 以 id 为键 ⇒ 两个元素 id 必不相同，直接以 id 升序作稳定次级键。
     return a.candidate.id < b.candidate.id ? -1 : 1
   })
 
-  // ---- 层过滤 → 标注 truncated / evidence，再 limit 截断。 ----
+  // 层过滤 → 标注 truncated / evidence，再 limit 截断。
   const layerFilter = input.layer?.trim()
   const filtered = layerFilter ? scored.filter((entry) => entry.candidate.layer === layerFilter) : scored
   const limit = clampRecallLimit(input.limit)
-  // total 语义（spec D6）：limit 截断**前**的融合命中总数；results.length = min(limit, total)。
-  // 没有命中时即 0——limit 并存时 total 才有信息量（「还有多少没显示」）。
+  // total 语义（spec D6）：limit 截断前的融合命中总数；results.length = min(limit, total)。
+  // 没有命中时即 0，limit 并存时 total 才有信息量（「还有多少没显示」）。
   const total = filtered.length
   const results: RecallResultItem[] = filtered.slice(0, limit).map(({ candidate }) => {
-    const truncated = truncateRecallText(candidate.text)
+    const preview = truncateRecallText(candidate.text)
     return {
       id: candidate.id,
       layer: candidate.layer,
       kind: candidate.kind,
       priority: candidate.priority,
-      text: truncated.text,
-      ...(truncated.truncated ? { truncated: true } : {}),
+      text: preview.text,
+      ...(preview.truncated ? { truncated: true } : {}),
       ...(candidate.sourceRefs.length > 0 ? { evidence: candidate.sourceRefs } : {}),
     }
   })

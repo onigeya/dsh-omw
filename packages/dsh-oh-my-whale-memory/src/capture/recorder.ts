@@ -3,14 +3,14 @@
  * L0 原始流水 + L1_INBOX 排队条目。
  *
  * 三条纪律：
- * 1. **同一事务 + 同一身份**：L0 行与 INBOX 行在同一个 runInTransaction 里写（FR-2 原子）。
- *    **两行共用 l0RawId(stableKey)**（Story 2.3 评审 T1：L1 的 source_refs 必须能命中 L0），
+ * 1. 同一事务 + 同一身份：L0 行与 INBOX 行在同一个 runInTransaction 里写（FR-2 原子）。
+ *    两行共用 l0RawId(stableKey)（Story 2.3 评审 T1：L1 的 source_refs 必须能命中 L0），
  *    该 id 由稳定身份经 uuid5 确定性算出，故崩溃重放不会造出第二条队列条目。
- *    注意 `l1_inbox.id` 的语义因此是「采集身份」而非纯队列序号——同一次采集在两张表里同一个 id。
- * 2. **绝不抛给宿主**：session/event 监听器返回 void，且压缩主路径不能被采集失败牵连；
+ *    `l1_inbox.id` 的语义因此是「采集身份」而非纯队列序号，同一次采集在两张表里同一个 id。
+ * 2. 不抛给宿主：session/event 监听器返回 void，且压缩主路径不能被采集失败牵连；
  *    因此所有落库都登记进 INBOX_BACKGROUND_TASKS（防 GC、dispose 前统一 drain）并在内部
  *    捕获异常，只留下 warn。
- * 3. **压缩走同步快照**：compaction/start 的同步路径只做「取文本 + 落快照文件」，< 50ms；
+ * 3. 压缩走同步快照：compaction/start 的同步路径只做「取文本 + 落快照文件」，< 50ms；
  *    落库转后台，快照文件是崩溃标记，未删即孤儿，启动时重放（AC5）。
  */
 import type * as lbug from '@ladybugdb/core'
@@ -28,7 +28,7 @@ const SYNTHETIC_TURN_END = ['interrupted', 'forked']
 
 /**
  * 宿主 SessionEvent 的形状是 { type, seq, time, data }（宿主 packages/core/session/src/types.ts:501-508，
- * 官方范例读 event.data.stream 见 docs/cookbook/extension-cookbook.md:79-86）：payload 在 **data** 里，
+ * 官方范例读 event.data.stream 见 docs/cookbook/extension-cookbook.md:79-86）：payload 在 data 里，
  * 读顶层字段会静默拿到 undefined（2026-11-11 评审 T1）。这里不做顶层回退，回退会让回归钉失效。
  */
 function eventPayload(event: unknown): Record<string, unknown> {
@@ -74,7 +74,7 @@ interface CaptureEntry {
 export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureRecorder {
   const now = options.now ?? (() => new Date())
   const steps: StepCounter = createStepCounter({ limit: options.captureSteps })
-  /** 每会话**落库成功**的最大 turn：turn 号单调，故 turn <= 该值即重复（每轮至多一次，评审 P4）。 */
+  /** 每会话落库成功的最大 turn：turn 号单调，故 turn <= 该值即重复（每轮至多一次，评审 P4）。 */
   const lastTurn = new Map<string, number>()
   const warn = (message: string): void => {
     options.logger?.warn(message)
@@ -84,7 +84,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
   /**
    * 一个事务里写 L0 行 + INBOX 行；同一稳定身份重放幂等（MERGE ON CREATE SET）。
    *
-   * **两行共用同一个 l0RawId(stableKey)**（Story 2.3 评审 T1）：证据链要求精炼产出的 L1
+   * 两行共用同一个 l0RawId(stableKey)（Story 2.3 评审 T1）：证据链要求精炼产出的 L1
    * 节点 source_refs 与审计 l0Refs 指向真实的 L0 行；INBOX 行另有前缀就永远命不中。
    */
   async function persist(entry: CaptureEntry): Promise<void> {
@@ -108,7 +108,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     })
   }
 
-  /** 登记后台落库：异常只记 warn，绝不逃逸到 session/event 发射方。 */
+  /** 登记后台落库：异常只记 warn，不逃逸到 session/event 发射方。 */
   function background(work: Promise<unknown>, label: string): void {
     void trackInboxBackgroundTask(work.catch((error: unknown) => {
       warn('采集落库失败（' + label + '）：' + errorText(error))
@@ -173,7 +173,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
           'compaction/start',
         )
       } catch (error) {
-        // AC2：写入失败只捕获放行，绝不抛给压缩事务（宿主也会兜住 observer 失败，但不依赖它）。
+        // AC2：写入失败只捕获放行，不抛给压缩事务（宿主也会兜住 observer 失败，但不依赖它）。
         warn('压缩快照写入失败（不阻塞压缩主路径）：' + errorText(error))
       }
     },
@@ -189,7 +189,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
       const turn = typeof payload.turn === 'number' && Number.isFinite(payload.turn) ? payload.turn : -1
       const seen = lastTurn.get(sessionId)
       if (seen !== undefined && turn <= seen) return
-      // P3：文本与 recorded_at 必须在 flush 之前取——flush 之后 deriveMessages 可能已被下一轮推进。
+      // P3：文本与 recorded_at 必须在 flush 之前取，flush 之后 deriveMessages 可能已被下一轮推进。
       const entry = entryFor('turn', session, String(turn))
       if (!hasText(entry.text)) {
         warn('turn/end 采集跳过：会话文本为空（' + entry.sessionId + ' @ turn ' + turn + '）')
@@ -206,8 +206,8 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
           }
         }
         await persist(entry)
-        // P4：只有落库成功才推进「已采集的最大 turn」——失败的内容会被下一次采集重新带上。
-        lastTurn.set(sessionId, Math.max(seen ?? turn, turn))
+        // P4：只有落库成功才推进「已采集的最大 turn」，失败的内容会被下一次采集重新带上。
+        lastTurn.set(sessionId, turn)
       })(), 'turn/end')
     },
 

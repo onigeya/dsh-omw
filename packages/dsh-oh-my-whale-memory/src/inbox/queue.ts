@@ -1,27 +1,27 @@
 /**
  * INBOX FIFO 队列原语（Story 2.2 / AD-6、NFR7）。
  *
- * 表 `l1_inbox`（表名与既有五张表同一 snake_case 约定）是队列的**唯一持久事实源**：
+ * 表 `l1_inbox`（表名与既有五张表同一 snake_case 约定）是队列的唯一持久事实源：
  * - 一条条目一行，状态机 pending → processing(lease) → done|failed；
  * - FIFO 顺序 = (enqueued_at ASC, id ASC)（时间列一律 UTC ISO-8601 字符串，可直接字典序比较）；
  * - lease_owner 记进程 id、lease_until 记 take 时刻 + 60s（AD-6）；
- * - **lease_until 复用为「最早可取件时刻」（Story 2.3 / R3①）**：processing 行上它是 lease 到期时刻，
- *   pending 行上它是**退避截止**——失败回 pending 时写 now + backoff(attempts)，取件谓词据此跳过未到期条目；
+ * - lease_until 复用为「最早可取件时刻」（Story 2.3 / R3①）：processing 行上它是 lease 到期时刻，
+ *   pending 行上是退避截止；失败回 pending 时写 now + backoff(attempts)，取件谓词据此跳过未到期条目；
  * - 失败 attempts 累加，超过 INBOX_MAX_RETRIES 进 failed 死信（Q-4）。
  *
- * 取队头是「读队头 + 条件写 lease」两步，但**两条语句在同一个 runInTransaction 里**：
+ * 取队头是「读队头 + 条件写 lease」两步，但两条语句在同一个 runInTransaction 里：
  * 同一连接上的所有事务由 transaction.ts 的 per-connection promise 链串行化，跨进程由写者
  * 文件锁保证只有一个写者，故不存在 read-then-write 竞态。
  *
  * Story 2.5 / U1（泛化）：同一套状态机由 L1 精炼队列与 L2 提升队列共用，只有表名不同，
  * 故语句集由 {@link createInboxStatements} 按表名生成、API 由 {@link createInboxQueue} 绑定。
- * **表名只取自 src/db/schema.ts 的常量**（绝不接受外部输入——那是把用户数据拼进 DDL 的口子）。
+ * 表名只取自 src/db/schema.ts 的常量（不接受外部输入，那是把用户数据拼进 DDL 的口子）。
  * 文件末尾的既有导出名一律保留为绑定 `l1_inbox` 的薄包装：2.2 起的调用点与测试零改动。
  */
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
 import { ensureInboxTable } from '../db/inbox-tables.js'
-import { collectRows } from '../db/rows.js'
+import { nullishString, queryRows } from '../db/rows.js'
 import { L1_INBOX_TABLE, L2_INBOX_TABLE } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 
@@ -48,7 +48,7 @@ export const INBOX_STATUSES: readonly InboxStatus[] = [
 /** lease 时长（AD-6：now() + 60s）。 */
 export const INBOX_LEASE_MS = 60_000
 /**
- * 重试上限（U23 口径）：`attempts` = **累计失败次数**——第 1..3 次失败回 pending 重试，
+ * 重试上限（U23 口径）：`attempts` = 累计失败次数，第 1..3 次失败回 pending 重试，
  * 第 4 次失败（`attempts > INBOX_MAX_RETRIES`）进 failed 死信（Q-4 / AD-6）。
  */
 export const INBOX_MAX_RETRIES = 3
@@ -97,7 +97,7 @@ export interface InboxItemInput {
   readonly sessionId?: string
   /**
    * 条目生产者的标签：Story 2.1 写采集来源（step|turn|compaction）；七类记忆 kind 是
-   * **写路径**（工具/命令）的合法域，精炼后由写路径决定节点 kind（评审 P7）。
+   * 写路径（工具/命令）的合法域，精炼后由写路径决定节点 kind（评审 P7）。
    */
   readonly kind?: string
   /** 入队时间，默认 now。 */
@@ -132,20 +132,6 @@ export interface FailInboxOptions {
   readonly fatal?: boolean
 }
 
-/** 参数化读：一律 prepare + execute（与 memory.ts 同一套形态）。 */
-async function queryRows(
-  connection: InboxConnection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
-}
-
-function nullishToString(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value)
-}
-
 function toInboxItem(row: Record<string, unknown>): InboxItem {
   return {
     id: String(row.id),
@@ -154,11 +140,11 @@ function toInboxItem(row: Record<string, unknown>): InboxItem {
     payload: String(row.payload ?? ''),
     status: String(row.status ?? '') as InboxStatus,
     attempts: Number(row.attempts ?? 0),
-    leaseOwner: nullishToString(row.lease_owner),
-    leaseUntil: nullishToString(row.lease_until),
+    leaseOwner: nullishString(row.lease_owner),
+    leaseUntil: nullishString(row.lease_until),
     enqueuedAt: String(row.enqueued_at ?? ''),
     updatedAt: String(row.updated_at ?? ''),
-    lastError: nullishToString(row.last_error),
+    lastError: nullishString(row.last_error),
   }
 }
 
@@ -177,7 +163,7 @@ const COLUMNS = [
 ].join(', ')
 
 /**
- * 一张队列表的全部语句（Story 2.5 / U1 泛化点）：这里**只**做表名替换，
+ * 一张队列表的全部语句（Story 2.5 / U1 泛化点）：这里只做表名替换，
  * 语义与 2.2 的 `l1_inbox` 单表版本逐字相同。
  */
 interface InboxStatements {
@@ -258,7 +244,7 @@ function createInboxStatements(table: string): InboxStatements {
   ].join(' ')
 
   /**
-   * 写者启动回收（R3②）：崩溃是一次失败——attempts+1 并记 last_error，达上限直接进 failed 死信，
+   * 写者启动回收（R3②）：崩溃是一次失败：attempts+1 并记 last_error，达上限直接进 failed 死信，
    * 否则回 pending（不退避：进程刚重启，重试立即进行是期望行为）。
    */
   const RECLAIM_PROCESSING = [
@@ -274,7 +260,7 @@ function createInboxStatements(table: string): InboxStatements {
 
   /**
    * 「这张表还有活儿要干吗」（Story 2.5 / 评审 P6+P6b）：processing 中的条目算忙，
-   * 且 **pending 只有「现在就能取」才算忙** —— 退避把 pending 的 lease_until 写到未来
+   * 且 pending 只有「现在就能取」才算忙：退避把 pending 的 lease_until 写到未来
    * （最长 INBOX_BACKOFF_MAX_MS=120s），那些窗口不该让 L2 慢循环停摆。
    */
   const COUNT_BUSY = [
@@ -314,12 +300,12 @@ export interface InboxQueue {
   readonly table: string
   /** 建表（唯一迁移点由 src/db/database.ts 调用；DDL 在事务内执行，失败即整体回滚）。 */
   ensureTables(connection: InboxConnection): Promise<void>
-  /** 在**调用方已开启的事务**内入队（采集侧「L0 行 + INBOX 行」同事务用）。 */
+  /** 在调用方已开启的事务内入队（采集侧「L0 行 + INBOX 行」同事务用）。 */
   writeItem(connection: InboxConnection, input: InboxItemInput): Promise<string>
-  /** 入队的便利包装：**自带事务**，不得在已有事务内调用。 */
+  /** 入队的便利包装：自带事务，不得在已有事务内调用。 */
   enqueue(connection: InboxConnection, input: InboxItemInput): Promise<string>
   claimNext(connection: InboxConnection, options?: ClaimInboxOptions): Promise<InboxItem | null>
-  /** 标 done，**由调用方开事务**；带 processing 守卫（at-most-once 的支点）。 */
+  /** 标 done，由调用方开事务；带 processing 守卫（at-most-once 的支点）。 */
   markDone(connection: InboxConnection, id: string, options?: { readonly now?: Date }): Promise<boolean>
   /** 标 done 的便利包装：自带事务。 */
   complete(connection: InboxConnection, id: string, options?: { readonly now?: Date }): Promise<boolean>
@@ -346,7 +332,7 @@ export interface InboxQueue {
  * - L1 精炼队列 = {@link l1InboxQueue}（`l1_inbox`，2.2 起的主路径）；
  * - L2 提升队列 = {@link l2InboxQueue}（`l2_inbox`，Story 2.5 / U1）。
  *
- * **表名不来自用户输入**：调用方只应传 src/db/schema.ts 导出的表名常量。
+ * 表名不来自用户输入：调用方只应传 src/db/schema.ts 导出的表名常量。
  */
 export function createInboxQueue(table: string): InboxQueue {
   const statements = createInboxStatements(table)
@@ -470,7 +456,7 @@ export function createInboxQueue(table: string): InboxQueue {
           updated_at: updatedAt,
         })
         // N8：语句带 status 守卫，同事务内刚读到 processing 故不应未命中；真未命中按 no-op 返回，
-        // 不抛错——避免异常冲出消费者的 for 循环。
+        // 不抛错，避免异常冲出消费者的 for 循环。
         if (written.length === 0) return { status: current.status, attempts: current.attempts }
         return { status, attempts }
       })
@@ -534,7 +520,7 @@ export function createInboxQueue(table: string): InboxQueue {
           id: String(row.id ?? ''),
           kind: String(row.kind ?? ''),
           attempts: Number(row.attempts ?? 0),
-          lastError: nullishToString(row.last_error),
+          lastError: nullishString(row.last_error),
           updatedAt,
           stale: Number.isFinite(at) ? now - at > INBOX_FAILED_STALE_MS : false,
         }
@@ -561,9 +547,9 @@ export function inboxErrorText(error: unknown): string {
 export { ensureInboxTables, ensureL2InboxTables } from '../db/inbox-tables.js'
 
 /**
- * 在**调用方已开启的事务**内入队一条条目，返回其 id（Story 2.1 抽出）。
+ * 在调用方已开启的事务内入队一条条目，返回其 id（Story 2.1 抽出）。
  *
- * 写入语义与 INSERT_ITEM 完全一致：MERGE ... ON CREATE SET，只创建、不更新——同 id 重复入队
+ * 写入语义与 INSERT_ITEM 完全一致：MERGE ... ON CREATE SET，只创建、不更新：同 id 重复入队
  * 不会覆盖既有行的 status/attempts/lease。调用方注入确定性 id（采集侧用 uuid5('inbox:' + 稳定身份)）
  * 时，崩溃重放不会造出第二条队列条目。
  */
@@ -577,7 +563,7 @@ export async function writeInboxItem(
 /**
  * 入队一条待精炼条目，返回其 id（缺省 randomUUID；同 id 重复入队幂等，不覆盖既有行）。
  *
- * **自带事务**，因此不得在已有事务内调用——Story 2.2 起 runInTransaction 对同一 async 链的
+ * 自带事务，因此不得在已有事务内调用：Story 2.2 起 runInTransaction 对同一 async 链的
  * 重入直接抛错。需要「与其它写入同事务」的调用方请用 writeInboxItem（由调用方开事务），
  * 例如采集侧的「L0 行 + INBOX 行」同一事务（Story 2.1）。本函数是它的单条便利包装。
  */
@@ -589,7 +575,7 @@ export async function enqueueInboxItem(
 }
 
 /**
- * 取队头并**在同一事务内**写 lease（AC1）：返回条目时它已处于 processing、
+ * 取队头并在同一事务内写 lease（AC1）：返回条目时它已处于 processing、
  * lease_owner = owner、lease_until = now + leaseMs。队空返回 null（不写库）。
  */
 export async function claimNextInboxItem(
@@ -600,9 +586,9 @@ export async function claimNextInboxItem(
 }
 
 /**
- * 标 done 并清 lease（AC2），**由调用方开事务**（Story 2.3 / R1 抽出的连接级原语）。
+ * 标 done 并清 lease（AC2），由调用方开事务（Story 2.3 / R1 抽出的连接级原语）。
  *
- * 带 `status = processing` 守卫：只有**正在处理**的条目能转 done；返回 false 表示未命中
+ * 带 `status = processing` 守卫：只有正在处理的条目能转 done；返回 false 表示未命中
  * （条目已被处理过、或状态不符）。精炼成功路径把本原语与产出写在同一事务里，靠这次条件
  * 转换实现 at-most-once（U12：崩溃重放不重复产出）。
  */
@@ -616,7 +602,7 @@ export async function markInboxItemDone(
 
 /**
  * 标 done 的便利包装：自带事务。语义与 2.2 相同（条目不存在 / 未在处理中返回 false，
- * 不静默 no-op）——2.2 的调用方与测试无需改动。
+ * 不静默 no-op），2.2 的调用方与测试无需改动。
  */
 export async function completeInboxItem(
   connection: InboxConnection,
@@ -650,7 +636,7 @@ export function inboxBackoffMs(attempts: number): number {
  * 记一次失败：attempts+1；未超 INBOX_MAX_RETRIES 或非致命错则回 pending 并写退避截止
  * （`lease_until = now + backoff(attempts)`，R3①），超限/致命进 failed 死信（AC4）。
  *
- * 只有 **processing** 的条目才记失败（N8）：已 done / failed / pending 的行原样返回、不写库，
+ * 只有 processing 的条目才记失败（N8）：已 done / failed / pending 的行原样返回、不写库，
  * 这样「成功路径已 complete、异常兜底又调一次 fail」不会把已完成的条目打回 pending。
  */
 export async function failInboxItem(
@@ -673,19 +659,19 @@ export async function reclaimExpiredLeases(
 }
 
 /**
- * 写者启动回收（AC3 的**超集**，U7）：把**全部** processing 条目回 pending，不等 lease 过期。
+ * 写者启动回收（AC3 的超集，U7）：把全部 processing 条目回 pending，不等 lease 过期。
  *
  * 依据 AD-12：写者文件锁保证同一库同一时刻只有一个写进程，故写者启动那一刻看到的任何
  * processing 行必然属于已死进程（本进程刚启动，不可能有在飞条目）。若只回收 `lease_until < now`，
- * 「T 崩溃、T+20s 重启（lease 到 T+60）」的条目会卡在 processing 直到**下一次**重启才自愈。
+ * 「T 崩溃、T+20s 重启（lease 到 T+60）」的条目会卡在 processing 直到下一次重启才自愈。
  *
- * 刻意**不做**周期性回收：活进程内的周期回收会在「任务时长 > lease(60s)」时抢走自己正在处理的
+ * 刻意不做周期性回收：活进程内的周期回收会在「任务时长 > lease(60s)」时抢走自己正在处理的
  * 条目（同进程重复精炼）。lease 与任务最坏时长的关系属 Story 2.3 契约（需续租或收紧 lease）。
  *
  * reclaimExpiredLeases 保留原语义（活着的持有者不被抢），供运行期/测试使用。
  *
- * Story 2.3 / R3②：启动回收把这次崩溃**记成一次失败**（attempts+1、last_error='reclaimed after crash'），
- * 达到 INBOX_MAX_RETRIES 的条目直接进 failed 死信——否则「精炼每次都以杀死进程告终」的条目会
+ * Story 2.3 / R3②：启动回收把这次崩溃记成一次失败（attempts+1、last_error='reclaimed after crash'），
+ * 达到 INBOX_MAX_RETRIES 的条目直接进 failed 死信，否则「精炼每次都以杀死进程告终」的条目会
  * 无限循环（U11）。
  */
 export async function reclaimProcessingInboxItems(

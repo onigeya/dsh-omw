@@ -1,27 +1,27 @@
 /**
  * 类型化边的写入与读取原语（Story 2.6 / AD-4、AD-19、AD-21）。
  *
- * 本模块是 EVIDENCE / RELATED 边**唯一**的读写实现处（DDL 建表见 ensureEdgeTables）。
+ * 本模块是 EVIDENCE / RELATED 边唯一的读写实现处（DDL 建表见 ensureEdgeTables）。
  *
- * - 写入一律 **MERGE**：AD-10 的崩溃重放与 X1 回填都依赖「重复写不产重边」
+ * - 写入一律 MERGE：AD-10 的崩溃重放与 X1 回填都依赖「重复写不产重边」
  *   （brief-2-6-readiness.md §2.2 ⑨ 实测重放两次边数恒为 1）。
- * - 端点标签**必须显式**（(a:l0_raw …) / (b:memory …)）：0.22.3 对无标签端点的
+ * - 端点标签必须显式（(a:l0_raw …) / (b:memory …)）：0.22.3 对无标签端点的
  *   CREATE 直接 Binder 报错（§2.3 N10）。
- * - 写前做应用层不变量校验（U5）：自环拒绝；EVIDENCE 两端 layer 必须**不同且低→高**
- *   （不要求相邻；**同层禁止 EVIDENCE**，同层关系走 RELATED）。校验失败只**跳过该边**
+ * - 写前做应用层不变量校验（U5）：自环拒绝；EVIDENCE 两端 layer 必须不同且低→高
+ *   （不要求相邻；同层禁止 EVIDENCE，同层关系走 RELATED）。校验失败只跳过该边
  *   并回报原因，绝不抛错、不阻塞记忆主路径（epics.md:706-708 的失败即跳过精神）。
- * - 原语**不自开事务**（与 writeMemoryVersion 同一契约）：调用方决定事务边界，
+ * - 原语不自开事务（与 writeMemoryVersion 同一契约）：调用方决定事务边界，
  *   这样 EVIDENCE 能与节点写入同事务（AD-10 置序）。
  */
 import type * as lbug from '@ladybugdb/core'
 import { runStatement } from './backend.js'
-import { collectRows } from './rows.js'
-import { createEvidenceTableStatement, createRelatedTableStatement, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
+import { collectRows, nullishString, queryRows } from './rows.js'
+import { EVIDENCE_TABLE, RELATED_TABLE, createEvidenceTableStatement, createRelatedTableStatement, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
 
-/** EVIDENCE / RELATED 的常量名（DDL 在 schema.ts）。 */
-export const EVIDENCE = 'EVIDENCE'
-export const RELATED = 'RELATED'
+/** 边类型名 = 关系表名（LadybugDB 的 REL TABLE 标签即类型）；单一来源在 schema.ts。 */
+const EVIDENCE = EVIDENCE_TABLE
+const RELATED = RELATED_TABLE
 
 /** 层序秩：EVIDENCE 必须「低 → 高」（U5）。L3 已退役（AD-17），不在秩内。 */
 export const LAYER_RANK: Readonly<Record<string, number>> = { L0: 0, L1: 1, L2: 2 }
@@ -59,7 +59,7 @@ export interface SkippedEdge {
 }
 
 export interface EdgeWriteResult {
-  /** 真正落库（或已存在）的边数——MATCH 未命中端点时不计。 */
+  /** 真正落库（或已存在）的边数，MATCH 未命中端点时不计。 */
   readonly written: number
   readonly skipped: readonly SkippedEdge[]
 }
@@ -94,7 +94,7 @@ const DIRECT_IN_EDGE_IDS = [
 ].join('\n')
 
 /** 建两张边表。只应在建库/打开库的唯一迁移点调用一次；DDL 在事务内执行（all-or-nothing）。
- *  必须在 memory / l0_raw 节点表之后调用——0.22.3 对不存在端点的 GROUP DDL 直接 Binder 报错
+ *  必须在 memory / l0_raw 节点表之后调用，0.22.3 对不存在端点的 GROUP DDL 直接 Binder 报错
  *  （brief §2.3 N14）。只读实例走 initializeReadOnlyDatabase，不经本函数（AD-12）。 */
 export async function ensureEdgeTables(connection: lbug.Connection): Promise<void> {
   await runInTransaction(connection, async () => {
@@ -102,15 +102,6 @@ export async function ensureEdgeTables(connection: lbug.Connection): Promise<voi
     await runStatement(connection, createEvidenceTableStatement())
     await runStatement(connection, createRelatedTableStatement())
   })
-}
-
-async function queryRows(
-  connection: lbug.Connection,
-  statement: string,
-  params: Record<string, lbug.LbugValue> = {},
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
 }
 
 /**
@@ -145,7 +136,7 @@ export async function writeEvidenceEdges(
     if (rows.length > 0) {
       written += 1
     } else {
-      // 评审 P6（T6）：MATCH 未命中端点时返回 0 行——既没写边也不是「已存在」，
+      // 评审 P6（T6）：MATCH 未命中端点时返回 0 行，既没写边也不是「已存在」，
       // 必须显式计入 skipped，否则调用方无法把「端点缺失」与「成功」区分开。
       skipped.push({ reason: 'endpoint-missing', fromId: entry.fromId, toId: entry.toId })
     }
@@ -179,7 +170,7 @@ export async function writeRelatedEdges(
   return written
 }
 
-/** 某节点的 EVIDENCE **直接入边**低端 id 集（audit_gap 漂移基准的 B 侧）。 */
+/** 某节点的 EVIDENCE 直接入边低端 id 集（audit_gap 漂移基准的 B 侧）。 */
 export async function readEvidenceInEdgeIds(connection: lbug.Connection, id: string): Promise<string[]> {
   const rows = await queryRows(connection, DIRECT_IN_EDGE_IDS, { id })
   return rows.map((row) => String(row.from_id))
@@ -188,17 +179,17 @@ export async function readEvidenceInEdgeIds(connection: lbug.Connection, id: str
 // ---------------------------------------------------------------------------
 // 图遍历原语（Story 3.2 / FR-12 / AC:872-889）
 //
-// ⚠️ **升版必回归**（与 eii.ts:20-21 同款）：本模块依赖多处 0.22.3 未文档化行为——
+// ⚠️ 升版必回归（与 eii.ts:20-21 同款）：本模块依赖多处 0.22.3 未文档化行为，
 // `relationships(p)` 的序列化形状（`reason`/`_label`）、`length(p)`、`all()` 内动态属性
 // 语义、REL TABLE GROUP 上的无向变长路径。LadybugDB 升级（AD-3 四条件）时必须回归本模块。
 //
 // 形态由 2026-11-14 探针钉死（probe-3-2b.md）：
-// - `type()` / `last()` / `head()` 在 0.22.3 **不存在**（Catalog exception），故 edge_type
-//   只能由**语句常量**给出 ⇒ EVIDENCE、RELATED 各一条无向变长语句（spec D1 方案）。
+// - `type()` / `last()` / `head()` 在 0.22.3 不存在（Catalog exception），故 edge_type
+//   只能由语句常量给出 ⇒ EVIDENCE、RELATED 各一条无向变长语句（spec D1 方案）。
 // - `relationships(p)` 可作 RETURN 值且按路径方向序列化（含 `reason`）⇒ 末元素即「最后一跳」
 //   的关系，用它取 `reason`（AC:880 的可选字段）；GROUP 边上同样可用（探针 G1）。
 // - 端点显式 `(n:memory)`：无向 EVIDENCE 会走到 l0_raw（探针 2b 实测），不约束会污染结果面。
-// - **路径不带有效性过滤**：`all(x IN nodes(p) WHERE …)` 作 RETURN 布尔（探针 P4b/P4d：
+// - 路径不带有效性过滤：`all(x IN nodes(p) WHERE …)` 作 RETURN 布尔（探针 P4b/P4d：
 //   作 WHERE 会整条剔掉含失效中间节点的路径，且内部参数表达式触发 0.22.3 断言）。
 // ---------------------------------------------------------------------------
 
@@ -242,9 +233,9 @@ export interface RelatedTraversalItem {
   readonly invalidAt: string | null
   readonly expiredAt: string | null
   /**
-   * 该邻居在 depth 内**存在至少一条**邻居侧全有效路径（spec D4 的判定原语；F-02）。
+   * 该邻居在 depth 内存在至少一条邻居侧全有效路径（spec D4 的判定原语；F-02）。
    * 跨路径 OR：同一邻居的多条路径只要有一条除起点外全有效即为 true（不是「min-hops 那条」）。
-   * 起点不参与判定（F-04）；只作 RETURN 布尔取回、**绝不**用于过滤（D3）。
+   * 起点不参与判定（F-04）；只作 RETURN 布尔取回、绝不用于过滤（D3）。
    */
   readonly pathValid: boolean
 }
@@ -263,11 +254,11 @@ export interface RelatedTraversalResult {
   readonly startFound: boolean
   /** 起点自身有效性；`startFound:false` 时为零值。 */
   readonly start: RelatedTraversalStart
-  /** 去重归并后、20 条截断**前**的邻居总数（spec D6 的 total 口径）。 */
+  /** 去重归并后、20 条截断前的邻居总数（spec D6 的 total 口径）。 */
   readonly total: number
   /**
-   * 截断**前**是否存在任一「邻居侧全有效路径」的邻居（F-02：evidence expired 判定必须用它，
-   * 不能用 20 条截断后的 `results`——有效路径可能来自第 21 名而被截断）。
+   * 截断前是否存在任一「邻居侧全有效路径」的邻居（F-02：evidence expired 判定必须用它，
+   * 不能用 20 条截断后的 `results`，有效路径可能来自第 21 名而被截断）。
    */
   readonly anyValidPath: boolean
   /** 已排序：按跳数升序；同跳有效优先于失效（AC:880/888）。 */
@@ -291,8 +282,8 @@ function relatedTraversalStatement(edgeType: typeof EVIDENCE | typeof RELATED, d
     'RETURN n.id AS id, n.layer AS layer, n.text AS text,',
     '  n.invalid_at AS invalid_at, n.expired_at AS expired_at,',
     '  length(p) AS hops,',
-    // path_valid = **邻居侧**有效性：起点节点豁免（F-04：起点不是证据链判定对象），
-    // 其余节点必须未失效。写法用节点比较 `x.id = m.id` 而非参数——0.22.3 的 `all()` 内
+    // path_valid = 邻居侧有效性：起点节点豁免（F-04：起点不是证据链判定对象），
+    // 其余节点必须未失效。写法用节点比较 `x.id = m.id` 而非参数，0.22.3 的 `all()` 内
     // 出现参数表达式会触发 `UNREACHABLE_CODE` 断言（探针 P4d/start-exclude 实测），
     // 而 `x.id = m.id`（或 `id(x) = id(m)`）在同一 all() 内可用（2026-11-14 实测）。
     '  all(x IN nodes(p) WHERE x.id = m.id OR (x.invalid_at IS NULL AND x.expired_at IS NULL)) AS path_valid,',
@@ -310,8 +301,8 @@ const START_NODE_STATEMENT = [
 const START_NOT_FOUND: RelatedTraversalStart = { invalid: false, invalidAt: null, expiredAt: null }
 
 /**
- * 带预算的查询：`Promise.race` 只是**调用方**预算（0.22.3 无查询取消 API），超时后底层查询
- * 仍会跑完——超时方吞掉它后续的 rejection，避免未处理拒绝把宿主/进程搞崩。
+ * 带预算的查询：`Promise.race` 只是调用方预算（0.22.3 无查询取消 API），超时后底层查询
+ * 仍会跑完，超时方吞掉它后续的 rejection，避免未处理拒绝把宿主/进程搞崩。
  */
 async function queryRowsWithinBudget(
   connection: lbug.Connection,
@@ -319,10 +310,7 @@ async function queryRowsWithinBudget(
   params: Record<string, lbug.LbugValue>,
   timeoutMs: number | undefined,
 ): Promise<Record<string, unknown>[]> {
-  const query = (async () => {
-    const prepared = await connection.prepare(statement)
-    return collectRows(await connection.execute(prepared, params))
-  })()
+  const query = queryRows(connection, statement, params)
   if (timeoutMs === undefined) return await query
 
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -341,10 +329,6 @@ async function queryRowsWithinBudget(
     if (timer !== undefined) clearTimeout(timer)
     if (timedOut) query.catch(() => {})
   }
-}
-
-function nullishString(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value)
 }
 
 /** 从 `relationships(p)` 的末元素取 reason（形状见文件头：`{ reason, _label, … }`）。 */
@@ -390,7 +374,7 @@ function mergeTraversalRows(
       merged.set(id, item)
       continue
     }
-    // F-02：有效性跨路径 OR——展示用字段（hops/reason/edgeType）仍取最优那条路径，
+    // F-02：有效性跨路径 OR，展示用字段（hops/reason/edgeType）仍取最优那条路径，
     // 但「是否存在全有效路径」只要任一命中路径成立就成立。
     const pathValid = current.pathValid || item.pathValid
     const preferred = isBetterTraversal(item, current) ? item : current
@@ -410,7 +394,7 @@ function compareTraversal(a: RelatedTraversalItem, b: RelatedTraversalItem): num
 /**
  * 沿 EVIDENCE / RELATED 边做无向 BFS（AC:872-889 / FR-12）。
  *
- * 两条语句（两型分查）并行发出，JS 侧按 id 归并取最小 hops，然后**有效邻居优先**填满
+ * 两条语句（两型分查）并行发出，JS 侧按 id 归并取最小 hops，然后有效邻居优先填满
  * {@link RELATED_MAX_RESULTS}，不足时用失效邻居补位（AC:888）。起点不存在时返回空结果 +
  * `startFound:false`（不抛错，AC:882-884）；起点自身失效不拦截（spec D5：它是锚点不是候选）。
  *
@@ -437,8 +421,8 @@ export async function traverseRelated(
   const valid = all.filter((item) => !item.invalid).sort(compareTraversal)
   const invalid = all.filter((item) => item.invalid).sort(compareTraversal)
   const validCount = Math.min(valid.length, RELATED_MAX_RESULTS)
-  // AC:888 的分组只决定 **20 条入选**（有效优先、不足补失效）；展示顺序仍按 AC:880
-  // 「跳数升序」——把失效组直接追加在末尾会让 2 跳的有效邻居排到 1 跳的失效邻居前面，
+  // AC:888 的分组只决定 20 条入选（有效优先、不足补失效）；展示顺序仍按 AC:880
+  // 「跳数升序」，把失效组直接追加在末尾会让 2 跳的有效邻居排到 1 跳的失效邻居前面，
   // 违反 AC:880。故入选后统一按 compareTraversal 重排（同跳有效在前、再 id 升序）。
   const results = [
     ...valid.slice(0, RELATED_MAX_RESULTS),
@@ -464,7 +448,7 @@ export async function traverseRelated(
     startFound,
     start,
     total: all.length,
-    // F-02：截断前聚合——有效路径可能来自第 21+ 名邻居，不能用截断后的 results 判定。
+    // F-02：截断前聚合，有效路径可能来自第 21+ 名邻居，不能用截断后的 results 判定。
     anyValidPath: all.some((item) => item.pathValid),
     results,
   }

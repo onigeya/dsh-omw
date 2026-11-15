@@ -1,18 +1,18 @@
 /**
- * 新会话开局注入的**生成编排**（Story 3.3 / B2）：首条真人消息 → recall(top-8) → 摘要 LLM →
+ * 新会话开局注入的生成编排（Story 3.3 / B2）：首条真人消息 → recall(top-8) → 摘要 LLM →
  * 注入状态。降级阶梯见 spec D2；本模块不含预算裁剪（B3）与 `/memory status` 标注（B4）。
  *
  * 关键纪律：
- * - **LLM 单通道**：只经 `ctx.llm.stream()`（AD-5），显式 provider+model（Config 优先，
- *   否则 `routeFromSession` 回退链）；**单次尝试不重试**（3s 预算 + 有降级路径，§14）；
- * - **prompt 与输出 schema 同文件**（§14，sentinel preamble）；输出 `{summary, evidence_ids}`，
+ * - LLM 单通道：只经 `ctx.llm.stream()`（AD-5），显式 provider+model（Config 优先，
+ *   否则 `routeFromSession` 回退链）；单次尝试不重试（3s 预算 + 有降级路径，§14）；
+ * - prompt 与输出 schema 同文件（§14，sentinel preamble）；输出 `{summary, evidence_ids}`，
  *   evidence_ids 只允许取本次召回候选的 id（不信任模型）；
- * - **不写库**：生成过程纯读 + 内存状态（spec Never：注入热路径不同步写库/不写 generation_log）；
- * - **每会话一次**：进入前查 `InjectionStore`，pending/ready/skipped 一律短路（AC:916）。
+ * - 不写库：生成过程纯读 + 内存状态（spec Never：注入热路径不同步写库/不写 generation_log）；
+ * - 每会话一次：进入前查 `InjectionStore`，pending/ready/skipped 一律短路（AC:916）。
  */
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { routeFromSession } from '../distill/session-route.js'
-import { foldStream } from '../distill/stream-fold.js'
+import { foldStream } from '../shared/stream-fold.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import type { RecallCoreResult, RecallResultItem } from '../recall/core.js'
 import {
@@ -21,7 +21,7 @@ import {
   type InjectionBudgetResult,
   type InjectionDraft,
 } from './budget.js'
-import type { InjectionStore, LastInjectionSummary } from './state.js'
+import type { InjectionStore } from './state.js'
 
 /** 摘要输入的召回条数（AC:915：输入为 recall(top-K=8)）。 */
 export const OPENSTART_RECALL_TOP_K = 8
@@ -137,7 +137,7 @@ function messageText(message: OpenstartMessageLike): string {
     .join('\n')
 }
 
-/** 候选 → prompt 文本（**确定性**：沿用召回顺序；id 与 layer 明示）。 */
+/** 候选 → prompt 文本（确定性：沿用召回顺序；id 与 layer 明示）。 */
 export function formatCandidates(results: readonly RecallResultItem[]): string {
   return results.map((item) => `- [${item.layer}] ${item.id}: ${item.text}`).join('\n')
 }
@@ -272,8 +272,8 @@ export function createOpenstartGenerator(
       at: finishedAt.toISOString(),
     }
     options.store.setLastInjection(summary)
-    // Story 3.3 / B4b：观测事件——结构化单行，fire-and-forget（**不**写 generation_log、
-    // 不含原文/凭据、不阻塞主路径）。logger 自身抛错只吞掉，绝不影响已完成的注入结果。
+    // Story 3.3 / B4b：观测事件，结构化单行，fire-and-forget（不写 generation_log、
+    // 不含原文/凭据、不阻塞主路径）。logger 自身抛错只吞掉，不影响已完成的注入结果。
     try {
       options.logger?.info?.(
         'injection: ' +
@@ -298,7 +298,7 @@ export function createOpenstartGenerator(
     options.store.markPending(key)
     const startedAt = now()
     // F-04：整条生成链共享同一预算（embed/recall/LLM）；宿主已取消 ⇒ 不开始生成、不写 ready。
-    const budgetMs = Math.max(1, Math.trunc(options.budgetMs ?? options.timeoutMs ?? OPENSTART_LLM_TIMEOUT_MS))
+    const budgetMs = Math.max(1, Math.trunc(options.budgetMs ?? timeoutMs))
     const deadline = startedAt.getTime() + budgetMs
     const remainingMs = (): number => deadline - now().getTime()
     const hostSignal = payload.signal
@@ -329,7 +329,7 @@ export function createOpenstartGenerator(
 
     // recall：不重写检索，直接复用 3.1 的内核；embedding 不可用/失败 ⇒ 关键词单路仍可用。
     // F-03 顺序（AC:937-939 / I/O 矩阵 / D12）：Config 关闭 → skip；否则先 recall，
-    // **只有召回命中为空才零注入**；无 llm/无路由属于「摘要生成失败」，走仅 L1 降级。
+    // 只有召回命中为空才零注入；无 llm/无路由属于「摘要生成失败」，走仅 L1 降级。
     let recalled: RecallCoreResult
     try {
       let queryVector: readonly number[] | null = null
@@ -373,7 +373,7 @@ export function createOpenstartGenerator(
     }
 
     // F-03：无 ctx.llm / 无路由（Config 未配且 session 无已记录目标）不是「跳过」，而是
-    // 「摘要生成失败」——直接走仅 L1 降级（不调 LLM、不报错），与超时/失败同一阶梯。
+    // 「摘要生成失败」，直接走仅 L1 降级（不调 LLM、不报错），与超时/失败同一阶梯。
     const llm = options.getLlm()
     const route = llm === undefined
       ? null
@@ -387,7 +387,7 @@ export function createOpenstartGenerator(
         options.store.markSkipped(key)
         return
       }
-      commit({ ...buildInjectionDraft({ results }), evidence: [] }, true)
+      commit({ ...draft, evidence: [] }, true)
       return
     }
 
@@ -409,6 +409,6 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
-    finalize(key, { ...buildInjectionDraft({ results }), evidence: [] }, true, startedAt)
+    finalize(key, { ...draft, evidence: [] }, true, startedAt)
   }
 }

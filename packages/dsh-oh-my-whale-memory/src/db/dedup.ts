@@ -1,43 +1,42 @@
 /**
  * 写入去重与指纹幂等（Story 2.4；契约见 epic-2-context.md:25 的『写入去重双路径』）。
  *
- * `writeDeduplicatedMemory` 是**按 layer 参数化**的写入原语（U9：2.5 复用同一原语写 L2），
+ * `writeDeduplicatedMemory` 是按 layer 参数化的写入原语（U9：2.5 复用同一原语写 L2），
  * 按顺序判定三条路径：
- * ① 指纹幂等——同 (layer, 归一化 text) 已有节点：走既有 MERGE 语义（追加 source_refs、
+ * ① 指纹幂等，同 (layer, 归一化 text) 已有节点：走既有 MERGE 语义（追加 source_refs、
  *    保留最早 recorded_at、kind/priority 以最新写入为准），不新建节点；
- * ② 语义重复——cosine ≥ 0.97 命中同 layer 有效节点：向**最近**命中节点追加 source_refs，
- *    **不新建节点**，也不改目标的 kind/priority/recorded_at（AC 只要求追加 source_refs）；
- * ③ 版本作废——cosine ∈ [0.90, 0.97) 且 source_refs 有非空交集、且**唯一命中**：
+ * ② 语义重复，cosine ≥ 0.97 命中同 layer 有效节点：向最近命中节点追加 source_refs，
+ *    不新建节点，也不改目标的 kind/priority/recorded_at（AC 只要求追加 source_refs）；
+ * ③ 版本作废，cosine ∈ [0.90, 0.97) 且 source_refs 有非空交集、且唯一命中：
  *    旧节点置 invalid_at、新节点记 parent_id = 旧 id（prd.md:172 权威读法：parent_id 挂新节点）。
  *
  * 判定前置（U8）：`embedding` 缺省/null（Epic 1 直写、写时嵌入失败、embedding disabled）时
- * **整段跳过** ANN——不查库、不发网络，只走路径①。库内 pin 的 dim 缺失或与本次向量长度不符时
- * 同样跳过 ANN，并且**剥离向量再写**（评审 P5）：绝不把未校验长度的向量绑进 FLOAT[dim]，
+ * 整段跳过 ANN，不查库、不发网络，只走路径①。库内 pin 的 dim 缺失或与本次向量长度不符时
+ * 同样跳过 ANN，并且剥离向量再写（评审 P5）：绝不把未校验长度的向量绑进 FLOAT[dim]，
  * 那是必抛错、并把调用方整个事务（一条精炼的全部事实）一起回滚的写法。
  *
- * 路径①的墓碑语义（评审 P1，EC-1）：指纹命中一个**已被路径③作废**的节点时必须**复活**它
- * （清 invalid_at、valid_at 提到本次事实的时间，其余按既有 MERGE 语义合并）——id 由
+ * 路径①的墓碑语义（评审 P1，EC-1）：指纹命中一个已被路径③作废的节点时必须复活它
+ * （清 invalid_at、valid_at 提到本次事实的时间，其余按既有 MERGE 语义合并），id 由
  * uuid5(layer:归一化文本) 决定，同文本无法生成第二个 id，不复活等于把重申的事实永久丢出 recall。
- * 命中一个 **expired_at 置位**的节点（用户显式 forget，prd.md:293）则**不复活**：用户删除优先，
+ * 命中一个 expired_at 置位的节点（用户显式 forget，prd.md:293）则不复活：用户删除优先，
  * 只记一条 uncertain 审计供 7.2 过滤。
  *
  * 审计（U10，沿用写路径既有先例）：路径①复活写 `resurrect_memory`、路径②写 `merge_semantic`、
  * 路径③写 `invalidate_version`，均 kind='capture'、policy=DEFAULT_CAPTURE_POLICY，reason 写明
  * 相似度/阈值与前值。
- * AD-10 置序：**同一事务内先写 log、后写节点/指针**（本原语不自开事务——必须由调用方开，
+ * AD-10 置序：同一事务内先写 log、后写节点/指针（本原语不自开事务，必须由调用方开，
  * 与 writeMemoryVersion 同一契约；直接调 upsertMemory 会在事务内重入）。
  *
- * 路径③还必须落一条 **keyed_decision**（评审 P4，Lead 改裁）：原裁决以为 2.4 不做裁决，但漏看
- * 了用户可见后果——audit_gap 的判据是「已失效且无 `old_id = m.id` 的裁决行」，只写
- * generation_log 会让**每一次正常版本替换都永久计入 audit_gap**（/memory status 单调上涨的假警报）。
+ * 路径③还必须落一条 keyed_decision（评审 P4，Lead 改裁）：原裁决以为 2.4 不做裁决，但漏看
+ * 了用户可见后果，audit_gap 的判据是「已失效且无 `old_id = m.id` 的裁决行」，只写
+ * generation_log 会让每一次正常版本替换都永久计入 audit_gap（/memory status 单调上涨的假警报）。
  * 故此处显式给出 action='supersede' + resolutionSource='auto' + policy=DEFAULT_CAPTURE_POLICY；
  * audit.ts 早已预定义这三档，并注明「真出现版本写入时由裁决方显式给出 policy」。
- * AD-18 的**读侧**裁决仍属 Story 2.6，本原语只负责把这次替代写成可重建的证据。
+ * AD-18 的读侧裁决仍属 Story 2.6，本原语只负责把这次替代写成可重建的证据。
  *
- * 阈值语义（U7）：0.97 与 0.90 均为**自定初值**，原『取自 Hindsight 实测』已作废，
- * 待首周冒烟用真实语料标定——改动只允许动本文件的常量。
+ * 阈值语义（U7）：0.97 与 0.90 均为自定初值，原『取自 Hindsight 实测』已作废，
+ * 待首周冒烟用真实语料标定，改动只允许动本文件的常量。
  */
-import type * as lbug from '@ladybugdb/core'
 import {
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
@@ -59,7 +58,7 @@ import {
   type MemoryConnection,
   type UpsertMemoryInput,
 } from './memory.js'
-import { collectRows } from './rows.js'
+import { collectRows, nullishString, queryRows, toStringArray } from './rows.js'
 import { META_KEYS, META_TABLE, MEMORY_TABLE, VECTOR_INDEX_NAME } from './schema.js'
 import { currentSnapshotPredicate } from './snapshot.js'
 
@@ -79,7 +78,7 @@ export const DEDUP_TOP_K = 20
  * 单次 ANN 粗筛的 distance 上界 = 1 − 版本亲缘下界 + 1e-4 浮点余量（0.1001）。
  *
  * distance = 1 − cosine，故 [0.90, 0.97) 的 cosine 对应 distance ∈ (0.03, 0.10]。
- * 若粗筛仍按「语义重复」的 0.03 取，版本链候选永远取不回来（U2 整条死路）——
+ * 若粗筛仍按「语义重复」的 0.03 取，版本链候选永远取不回来（U2 整条死路），
  * 所以这里一次粗筛就放到 0.10，再由下面的精确余弦复核分路，避免跑两次 ANN。
  * 该上界由 Lead 在 2026-11-12 明确批准（见 spec 的 Spec Change Log）。
  */
@@ -112,9 +111,9 @@ export interface DedupOptions {
    * - `'degrade'`（缺省，2.4 语义）：吞错、按「无候选」继续写、只告警；
    * - `'throw'`：抛 {@link SemanticScanError} 让调用方事务干净回滚。
    *
-   * 为什么需要后者：LadybugDB 0.22.3 里**事务内任一语句报错即中止整个事务**（后续语句被
+   * 为什么需要后者：LadybugDB 0.22.3 里事务内任一语句报错即中止整个事务（后续语句被
    * 静默丢弃，COMMIT 抛 'No active transaction for COMMIT.'）。因此在别人的事务里吞掉扫描
-   * 错误再继续写是**假降级**——写入全部丢失。需要降级语义的宿主应先以 'throw' 试一次，
+   * 错误再继续写是假降级，写入全部丢失。需要降级语义的宿主应先以 'throw' 试一次，
    * 捕获后带 {@link DedupOptions.skipSemanticScan} 重试。
    */
   scanFailure?: 'degrade' | 'throw'
@@ -126,7 +125,7 @@ export interface DedupOptions {
 }
 
 /**
- * ANN 粗筛/复核失败（仅 `scanFailure: 'throw'` 时抛）。调用方应把它当作**可重试的降级信号**，
+ * ANN 粗筛/复核失败（仅 `scanFailure: 'throw'` 时抛）。调用方应把它当作可重试的降级信号，
  * 而不是条目失败：同一个事务带 `skipSemanticScan: true` 重跑一次即可正常写入。
  */
 export class SemanticScanError extends Error {
@@ -167,7 +166,7 @@ const INVALIDATE_NODE_STATEMENT = [
 
 /**
  * 路径①的复活（评审 P1）：清 invalid_at、把 valid_at 提到本次事实的时间；其余按既有 MERGE
- * 语义——合并 source_refs、kind/priority 取最新、recorded_at 仍取最早。
+ * 语义，合并 source_refs、kind/priority 取最新、recorded_at 仍取最早。
  */
 const RESURRECT_NODE_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
@@ -185,23 +184,6 @@ interface DedupCandidate {
   /** 旧节点自身的 valid_at（评审 P3）：作废上界必须不早于它，否则造出倒置区间。 */
   validAt: string | null
   similarity: number
-}
-
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map((item) => String(item)) : []
-}
-
-function nullishString(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value)
-}
-
-async function queryRows(
-  connection: MemoryConnection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
 }
 
 /**
@@ -222,7 +204,7 @@ export async function readPinnedEmbeddingDim(connection: MemoryConnection): Prom
 
 /**
  * 精确余弦复核（U4）的语句：`array_cosine_similarity` + CAST 到库内 pin 的 dim，不用 float32 近似值。
- * 语句只随 dim 变，故在候选循环外 **prepare 一次、循环内复用**（评审 P7：原先每条候选各 prepare
+ * 语句只随 dim 变，故在候选循环外 prepare 一次、循环内复用（评审 P7：原先每条候选各 prepare
  * 一次，k=20 时单事务最坏 ~170 次往返，而且全程持写锁）。
  */
 function preciseSimilarityStatement(dim: number): string {
@@ -270,7 +252,7 @@ function hasSourceRefOverlap(left: readonly string[], right: readonly string[]):
 
 /*
  * X4 收窄（评审 P3）：候选谓词已经排除 invalid_at / expired_at 非空的节点，所以旧版本此刻
- * **必无上界区间**——原实现里「不重叠 ⇒ 用 now」的分支不可达（也没有任何测试能钉住），已删除。
+ * 必无上界区间，原实现里「不重叠 ⇒ 用 now」的分支不可达（也没有任何测试能钉住），已删除。
  * 保留的实质要求是「invalid_at 对齐触发事实的 valid_at，且绝不早于旧节点自身 valid_at」，
  * 见路径③的 `invalidAt = newValidAt > oldValidAt ? newValidAt : oldValidAt`。
  */
@@ -305,7 +287,7 @@ async function invalidateMemoryNode(
 }
 
 /**
- * 无向量写入（评审 P5）：三条「跳过 ANN」的分支共用同一实现，**绝不**把未校验长度的向量
+ * 无向量写入（评审 P5）：三条「跳过 ANN」的分支共用同一实现，绝不把未校验长度的向量
  * 交给 writeMemoryVersion（那会绑进 FLOAT[dim] 并抛错回滚调用方整个事务）。
  */
 async function writeNoVector(
@@ -351,7 +333,7 @@ async function resurrectMemoryNode(
 /**
  * 写入一条记忆并按去重双路径归并（Story 2.4）。
  *
- * **必须由调用方开启事务**（与 writeMemoryVersion 同一契约）——三条路径都可能同时写
+ * 必须由调用方开启事务（与 writeMemoryVersion 同一契约），三条路径都可能同时写
  * generation_log 与节点/指针，必须原子。
  */
 export async function writeDeduplicatedMemory(
@@ -372,10 +354,12 @@ export async function writeDeduplicatedMemory(
   // ---- 向量可用性（评审 P5 / EC-5）：绑进 FLOAT[dim] 之前先把长度校验掉 ----
   // 原先「维度失配」分支只跳过 ANN、仍把原 input 交给 writeMemoryVersion ⇒ 未校验长度的向量被绑进
   // FLOAT[dim]，必然抛错并回滚调用方整个事务（一条精炼的全部事实一起丢）。校验提到三条路径之前后，
-  // **本函数内任何写入都只绑已验证长度的向量**（指纹命中路径同样受保护）。
+  // 本函数内任何写入都只绑已验证长度的向量（指纹命中路径同样受保护）。
   const vector = input.embedding == null ? null : Array.from(input.embedding, (value) => Number(value))
   const dim = vector === null || vector.length === 0 ? null : await readPinnedEmbeddingDim(connection)
-  if (vector !== null && vector.length > 0 && (dim === null || dim !== vector.length)) {
+  // 语义路径可用的向量：非空且与库内 pin 的维度一致；库内未 pin dim 同样不可用（U8）。
+  const vectorUsable = vector !== null && vector.length > 0 && dim !== null && dim === vector.length
+  if (vector !== null && vector.length > 0 && !vectorUsable) {
     options?.logger?.warn(
       dim === null
         ? `语义去重跳过：库内未 pin embedding 维度，本次向量长度=${vector.length}`
@@ -384,12 +368,12 @@ export async function writeDeduplicatedMemory(
   }
   // embedding 为 null 时原样传（写入语句本就不绑三列）；空数组或维度不可用时剥离，绝不带未校验向量。
   const writeInput: UpsertMemoryInput =
-    input.embedding == null || (vector !== null && vector.length > 0 && dim === vector.length)
+    input.embedding == null || vectorUsable
       ? input
       : { ...input, embedding: null, embeddingModelId: null }
 
   // 五条路径的审计行共用同一组记账字段（U10）：只有 action / outcome / reason 不同。
-  // 与 processor.ts 同一契约——不自开事务，事务边界由调用方决定（本原语整体在同一事务内）。
+  // 与 processor.ts 同一契约，不自开事务，事务边界由调用方决定（本原语整体在同一事务内）。
   const audit = (action: string, outcome: GenerationLogOutcome, reason: string): Promise<string> =>
     insertGenerationLog(connection, {
       recordedAt: nowIso,
@@ -407,7 +391,7 @@ export async function writeDeduplicatedMemory(
   if (existing !== null) {
     if (existing.expiredAt !== null) {
       // 用户显式 forget（prd.md:293）优先于自动复活：保留失效态，只记一条 uncertain 供 7.2 过滤。
-      // 评审 P19a（T23）：**仍要合并 source_refs**。processor 会为本次观测量出
+      // 评审 P19a（T23）：仍要合并 source_refs。processor 会为本次观测量出
       // l0_raw→该节点 的 EVIDENCE 边（事实层面为真：这次观测确实产出过这条记忆），
       // 而 EFFECTIVE_MEMORY_REFS / computeEvidenceDrift 都过滤 expired_at IS NULL ⇒
       // 不合并的话边与 source_refs 两个载体永久不一致且不可见。
@@ -417,7 +401,7 @@ export async function writeDeduplicatedMemory(
       return { id: existing.id, recordedAt: existing.recordedAt, outcome: 'fingerprint-merge' }
     }
     if (existing.invalidAt !== null) {
-      // 被路径③作废的旧版本被重申：**复活**。同文本生成不出第二个 id，不复活就等于把这条
+      // 被路径③作废的旧版本被重申：复活。同文本生成不出第二个 id，不复活就等于把这条
       // 事实永久留在 recall 之外（评审 P1 / EC-1）。
       await audit(RESURRECT_MEMORY_ACTION, 'success', `revive previous_invalid_at=${existing.invalidAt}`)
       const recordedAt = await resurrectMemoryNode(connection, {
@@ -435,7 +419,7 @@ export async function writeDeduplicatedMemory(
   }
 
   // ---- 路径②③前置：无向量 / 维度不可用 ⇒ 整段跳过（U8：不查库、不发网络）----
-  if (vector === null || vector.length === 0 || dim === null || dim !== vector.length) {
+  if (!vectorUsable) {
     const written = await writeNoVector(connection, input, options)
     return { id: written.id, recordedAt: written.recordedAt, outcome: 'created' }
   }
@@ -444,7 +428,7 @@ export async function writeDeduplicatedMemory(
   let candidates: DedupCandidate[] = []
   if (options?.skipSemanticScan === true) {
     // 调用方上一轮已被扫描失败中止过事务（见 DedupOptions.scanFailure）：本轮整段跳过。
-    // 向量照常往下传——索引要靠这次成功提交自愈。
+    // 向量照常往下传，索引要靠这次成功提交自愈。
     options.logger?.warn('语义去重扫描本轮跳过（扫描失败后的降级重试）')
   } else {
     try {
@@ -457,8 +441,8 @@ export async function writeDeduplicatedMemory(
       })
     } catch (error) {
       // 去重是守门而非致命：向量索引缺失/扩展未装载等失败按「无候选」处理，绝不阻塞写入
-      // （宁可留下重复节点，也不能丢数据）。**但**事务内失败会中止整个事务，那种情况下继续
-      // 写等于往一个已死的事务里写——所以把选择权交给调用方（scanFailure）。
+      // （宁可留下重复节点，也不能丢数据）。但事务内失败会中止整个事务，那种情况下继续
+      // 写等于往一个已死的事务里写，所以把选择权交给调用方（scanFailure）。
       if (options?.scanFailure === 'throw') throw new SemanticScanError(error)
       options?.logger?.warn(`语义去重扫描失败，按无候选写入：${(error as Error).message}`)
       candidates = []
@@ -466,7 +450,7 @@ export async function writeDeduplicatedMemory(
   }
 
   // ---- 路径②：语义重复（cosine ≥ 0.97）----
-  // 评审 P6：ANN 只给 ORDER BY distance 的粗排，精确复核后次序可能变——按**精确** similarity
+  // 评审 P6：ANN 只给 ORDER BY distance 的粗排，精确复核后次序可能变，按精确 similarity
   // 取最大，不能依赖候选数组的顺序。
   const duplicates = candidates.filter((candidate) => candidate.similarity >= SEMANTIC_DUP_THRESHOLD)
   const duplicate =
@@ -499,7 +483,7 @@ export async function writeDeduplicatedMemory(
   const oldVersion = versionHits[0]
   if (oldVersion !== undefined) {
     // X4（评审 P3）：候选谓词已排除 invalid_at / expired_at 非空的节点，旧版本此刻必无上界区间，
-    // 所以 invalid_at 对齐**触发事实的 valid_at**；同时绝不早于旧节点自身 valid_at（EC-2 的
+    // 所以 invalid_at 对齐触发事实的 valid_at；同时绝不早于旧节点自身 valid_at（EC-2 的
     // 倒置区间：2.5 复用本原语时可能传入更早的 validAt）。
     const oldValidAt = oldVersion.validAt ?? newValidAt
     const invalidAt = newValidAt > oldValidAt ? newValidAt : oldValidAt
@@ -510,7 +494,7 @@ export async function writeDeduplicatedMemory(
       `version-presentation similarity=${oldVersion.similarity.toFixed(4)} ` +
         `window=[${VERSION_AFFINITY_MIN_SIMILARITY},${SEMANTIC_DUP_THRESHOLD}) invalid_at=${invalidAt}`,
     )
-    // 评审 P4：这次版本替换必须留下**可重建的键式裁决**，否则 AUDIT_GAP_STATEMENT
+    // 评审 P4：这次版本替换必须留下可重建的键式裁决，否则 AUDIT_GAP_STATEMENT
     //（已失效且无 k.old_id = m.id 的裁决行）会把每一次正常替换都永久计成缺口。
     await insertKeyedDecision(connection, {
       judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, oldVersion.id, id),

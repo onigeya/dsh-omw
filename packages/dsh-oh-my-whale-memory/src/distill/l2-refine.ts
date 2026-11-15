@@ -1,25 +1,25 @@
 /**
- * L1→L2 高层抽象（Story 2.5 / FR-5）：把一条（或同批若干条）L1 综合成一条 L2 经验陈述。
+ * L1→L2 高层抽象（Story 2.5 / FR-5）：把一条或同批若干条 L1 综合成一条 L2 经验陈述。
  *
- * prompt 与输出 schema **同文件**（沿用 2.3 AC:573 的硬要求），结构化输出加
- * sentinel preamble（§14）。单次 ctx.llm.stream 调用（认证路由见调用方）——
- * 与 2.3 的精炼共用 LlmPort 结构端口，不新增通道、不自带 key（AD-5）。
+ * prompt 与输出 schema 同文件（沿用 2.3 AC:573 的硬要求），结构化输出加 sentinel
+ * preamble（§14）。单次 ctx.llm.stream 调用，认证路由见调用方；与 2.3 共用 LlmPort
+ * 端口，不新增通道、不自带 key（AD-5）。
  *
- * 与 2.3 的区别：输入是**已精炼过的 L1 原子事实**（不是原始对话），输出是**一条**
- * 综合陈述（不是数组）——L2 的语义是「那次为什么失败 / 那次怎么解决」（PRD:104），
- * 故 prompt 要求保留跨事实的因果与教训，而不是罗列。
+ * 输入是已精炼过的 L1 原子事实（不是原始对话），输出一条综合陈述（不是数组）。L2 的语义是
+ * 「那次为什么失败 / 那次怎么解决」（PRD:104），所以 prompt 要求保留跨事实的因果
+ * 与教训，不罗列。
  */
 import { MAX_REFINE_FACT_TOKENS, estimateTokens, type LlmPort } from './llm-refine.js'
-import { foldStream, type FoldedStream } from './stream-fold.js'
+import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 
 /** sentinel preamble（§14）：字段说明永远不是合法值。 */
 export const L2_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
 
-/** prompt 版本；改 prompt 或 schema 必须同时递增。 */
 /**
- * 评审 P16①（T20）：从 '1' 升到 '2' —— 模型不再被问 kind / priority。
- * 提升路径恒用来源 L1 的`dominantKind`/`maxPriority` 覆盖（AC:723-726），模型输出这两个字段
- * 是**死数据**：既白耗输出预算，也让「prompt 与 schema 同源」失去意义。
+ * prompt 版本；改 prompt 或 schema 必须同时递增。评审 P16①（T20）从 '1' 升到 '2'：
+ * 模型不再被问 kind / priority。提升路径恒用来源 L1 的`dominantKind`/`maxPriority`
+ * 覆盖（AC:723-726），模型输出这两个字段是死数据：既白耗输出预算，也让「prompt
+ * 与 schema 同源」失去意义。
  */
 export const L2_PROMPT_VERSION = '2'
 
@@ -29,7 +29,7 @@ export const MAX_L2_STATEMENT_TOKENS = MAX_REFINE_FACT_TOKENS
 /** 单次请求的输出预算（不是任务预算）。 */
 export const L2_MAX_OUTPUT_TOKENS = 1024
 
-/** 输出 schema（与 prompt 同文件）。只问 text —— 分类由调用方从来源继承（评审 P16①）。 */
+/** 输出 schema（与 prompt 同文件）。只问 text，分类由调用方从来源继承（评审 P16①）。 */
 export const L2_OUTPUT_SCHEMA = [
   '{',
   '  "text": string   // L2 综合陈述：跨来源事实成立的经验/教训，必填、非空',
@@ -76,7 +76,7 @@ export function buildL2Messages(
 }
 
 /**
- * L2 综合结果（评审 P16①）：**只有** text —— 分类恒由调用方按来源继承
+ * L2 综合结果（评审 P16①）：只有 text。分类恒由调用方按来源继承
  * （`dominantKind` / `maxPriority`），模型给出的一律不采信，故不再索要。
  */
 export interface L2Statement {
@@ -95,7 +95,7 @@ export type L2RefineResult =
 
 /**
  * 解析 L2 输出。text 缺失、非字符串、trim 后为空、或超预算一律判失败
- * （超预算按**不可重试**处理：重试只会得到同样的超长输出）。
+ * （超预算按不可重试处理：重试只会得到同样的超长输出）。
  */
 export function parseL2Output(raw: string): L2RefineResult {
   const start = raw.indexOf('{')
@@ -124,15 +124,15 @@ export function parseL2Output(raw: string): L2RefineResult {
       },
     }
   }
-  // 评审 P16①：kind / priority 不再从模型输出读取 —— 调用方恒用来源 L1 的 taboo/主流值覆盖。
+  // 评审 P16①：kind / priority 不再从模型输出读取，调用方恒用来源 L1 的 taboo/主流值覆盖。
   return { ok: true, statement: { text } }
 }
 
 /**
- * 折叠一次 ctx.llm.stream 调用的**公共终态处理**：综合与核实两个入口只差超长截断的文案，
+ * 折叠一次 ctx.llm.stream 调用的公共终态处理：综合与核实两个入口只差超长截断的文案，
  * 其余分支（无 finish / error / aborted / max-tokens / 空文本）逐字相同。
  *
- * `open` 收成 thunk：`stream()` 可能**同步**抛错，必须在 try 内求值才能归入 llm-threw。
+ * `open` 收成 thunk：`stream()` 可能同步抛错，必须在 try 内求值才归入 llm-threw。
  */
 async function foldLlmCall(
   open: () => ReturnType<LlmPort['stream']>,
@@ -180,7 +180,7 @@ export interface L2RefineInput {
   readonly signal: AbortSignal
 }
 
-/** 一次 L2 综合：**单次** ctx.llm.stream 调用（重试归任务层，与 2.3 同纪律）。 */
+/** 一次 L2 综合：单次 ctx.llm.stream 调用（重试归任务层，与 2.3 同纪律）。 */
 export async function refineToL2(input: L2RefineInput): Promise<L2RefineResult> {
   const folded = await foldLlmCall(
     () => input.llm.stream({
@@ -197,9 +197,7 @@ export async function refineToL2(input: L2RefineInput): Promise<L2RefineResult> 
   return parseL2Output(folded.text)
 }
 
-// ---------------------------------------------------------------------------
-// 忠实性核实（ctx.llm 降级通道，AC:674）
-// ---------------------------------------------------------------------------
+/** 忠实性核实（ctx.llm 降级通道，AC:674）。 */
 
 /** 核实 prompt 版本；与 refine 的 prompt 独立演进（改任一个都要同时改它的 schema）。 */
 export const L2_VERIFY_PROMPT_VERSION = '1'
@@ -239,9 +237,9 @@ export interface L2VerifyFailure {
 export type L2VerifyResult =
   | {
     readonly ok: true
-    /** 忠实于来源（false = 标疑，**不丢弃**）。 */
+    /** 忠实于来源（false = 标疑，不丢弃）。 */
     readonly faithful: boolean
-    /** 存在隐式冲突（true = 标疑，**不丢弃**）。 */
+    /** 存在隐式冲突（true = 标疑，不丢弃）。 */
     readonly conflict: boolean
     readonly reason: string
   }
@@ -272,7 +270,7 @@ export function buildVerifyMessages(
   return [{ role: 'user', content: [{ type: 'text', text: instruction }] }]
 }
 
-/** 解析核实输出：两个布尔都必须是**真布尔**，缺失/类型不符一律判调用失败（不猜默认值）。 */
+/** 解析核实输出：两个布尔都必须是真布尔，缺失/类型不符一律判调用失败（不猜默认值）。 */
 export function parseVerifyOutput(raw: string): L2VerifyResult {
   const start = raw.indexOf('{')
   const end = raw.lastIndexOf('}')
@@ -311,8 +309,8 @@ export interface L2VerifyInput {
 /**
  * ctx.llm 单次忠实性检查（AD-15 的降级通道 / AC:674）。
  *
- * 与 refineToL2 同一纪律：**单次** ctx.llm.stream（宿主直连不带重试，llm-streaming.md:301）。
- * 调用失败返回 ok:false，由调用方 **throw** 让 INBOX 重试——调用失败 ≠ 判定失败（AD-15）。
+ * 与 refineToL2 同一纪律：单次 ctx.llm.stream（宿主直连不带重试，llm-streaming.md:301）。
+ * 调用失败返回 ok:false，由调用方 throw 让 INBOX 重试。调用失败 ≠ 判定失败（AD-15）。
  */
 export async function verifyL2Statement(input: L2VerifyInput): Promise<L2VerifyResult> {
   const folded = await foldLlmCall(

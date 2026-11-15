@@ -1,10 +1,10 @@
 /**
  * 精炼域装配（Story 2.3 / 2.4 / 2.5 / 2.6：R4①、U5、U1、X1）。
  *
- * 这里只构造**处理器与回填器**，不创建消费者、不注册任何 effect/定时器：
+ * 这里只构造处理器与回填器，不创建消费者、不注册任何 effect/定时器：
  * - embedding 客户端只在配置齐全时构造（FR-18 降级）；它的失败只记审计、不阻塞 L1 写入（N4）；
  * - 路由：Config 的 llmProvider/llmModel 优先，缺省从 session 的已记录请求目标解析（AC:567）；
- * - N2：apply 期间**不得求值** ctx.llm —— 用惰性端口，真正取用发生在消费轮次里；
+ * - N2：apply 期间不得求值 ctx.llm，用惰性端口，真正取用发生在消费轮次里；
  *   裸 ctx（单测）没有 llm/sessions 时也不会在 apply 阶段抛错；
  * - 回填挂消费者的 maintenance 钩子（空闲窗口），不新增 ctx.effect/定时器。
  */
@@ -42,7 +42,7 @@ export interface DistillWiring {
   readonly l2Processor: InboxProcessor
   /**
    * L1 消费者的维护钩子：向量回填（有客户端才跑）+ EVIDENCE 回填（恒跑）。
-   * 评审 P18a（T19）：**串行**跑两个回填——两者都在事务外做裸 prepare/execute，
+   * 评审 P18a（T19）：串行跑两个回填，两者都在事务外做裸 prepare/execute，
    * 并发会在同一条连接上交错（语句可能落进对方未结算的连接级事务）。
    */
   readonly maintenance: () => Promise<number>
@@ -50,6 +50,8 @@ export interface DistillWiring {
 
 export function createDistillWiring(options: DistillWiringOptions): DistillWiring {
   const { ctx, getDb, resolved, embedding, gate, slots } = options
+  /** 库句柄还没就绪时给处理器一个 null（各闭包只调用、不做身份判断）。 */
+  const connectionOrNull = () => getDb()?.connection ?? null
 
   const embeddingClient: EmbedClient | null =
     resolved.embeddingMode === 'enabled' && resolved.embedding.endpoint
@@ -77,18 +79,18 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
   const resolveRoute = (sessionId: string): RefineRoute | null =>
     configuredRoute ?? sessionRoute(sessionId)
 
-  // Story 2.6：关系维护跑者——在每个新 L1 节点上跑一次 KNN + 一次 ctx.llm 识别 + 应用层
+  // Story 2.6：关系维护跑者：在每个新 L1 节点上跑一次 KNN + 一次 ctx.llm 识别 + 应用层
   // 校验 + 写 RELATED 边。调用点在精炼事务之外（AC:779-782：关系失败不影响记忆进库）。
   // embedding 禁用 ⇒ 整体跳过 RELATED（记忆照常进库）并落一条 skip 审计供 status 可见。
   const relationRunner = createRelationRunner({
-    connection: () => getDb()?.connection ?? null,
+    connection: connectionOrNull,
     llm: llmPort,
     embeddingEnabled: embeddingClient !== null,
     logger: ctx.logger,
   })
 
   const l1Processor: InboxProcessor = createInboxProcessor({
-    connection: () => getDb()?.connection ?? null,
+    connection: connectionOrNull,
     llm: llmPort,
     relations: relationRunner,
     resolveRoute,
@@ -98,11 +100,11 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     logger: ctx.logger,
   })
 
-  // Story 2.4 / U5：NULL 向量有界回填——只在 embedding 客户端存在时接线，挂消费者的
+  // Story 2.4 / U5：NULL 向量有界回填：只在 embedding 客户端存在时接线，挂消费者的
   // maintenance 钩子（空闲窗口、每轮 ≤50、不新增 ctx.effect/定时器；dispose 由既有 drain 覆盖）。
   const embeddingBackfill = embeddingClient
     ? createEmbeddingBackfill({
-      connection: () => getDb()?.connection ?? null,
+      connection: connectionOrNull,
       gate,
       client: embeddingClient,
       model: resolved.embedding.model ?? '',
@@ -110,10 +112,10 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
       logger: ctx.logger,
     })
     : null
-  // Story 2.6 / X1：EVIDENCE 边历史回填（建表前的 L1/L2 没有边）——与向量回填共用同一个
+  // Story 2.6 / X1：EVIDENCE 边历史回填（建表前的 L1/L2 没有边），与向量回填共用同一个
   // maintenance 钩子与空闲闸门，不新增 ctx.effect/定时器。
   const evidenceBackfill = createEvidenceBackfill({
-    connection: () => getDb()?.connection ?? null,
+    connection: connectionOrNull,
     gate,
     logger: ctx.logger,
   })
@@ -131,7 +133,7 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
 
   // Story 2.5：L1→L2 提升的第二条消费链的处理器。
   const l2Processor: InboxProcessor = createL2PromotionProcessor({
-    connection: () => getDb()?.connection ?? null,
+    connection: connectionOrNull,
     llm: llmPort,
     resolveRoute,
     systemOne: slots.systemOneClient,

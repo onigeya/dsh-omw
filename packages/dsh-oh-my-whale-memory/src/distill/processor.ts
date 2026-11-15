@@ -1,18 +1,17 @@
 /**
  * INBOX 精炼处理器（Story 2.3）：`ctx.llm` 单通道精炼 → 写时嵌入 → 单事务落 L1 + 记账。
  *
- * 顺序（AD-10 置序 / N9）：**先在同一个事务里**把条目标 done（`markInboxItemDone`，
+ * 顺序（AD-10 置序 / N9）：先在同一个事务里把条目标 done（`markInboxItemDone`，
  * 条件转换 processing→done 即 at-most-once，R1），再写 L1 节点，最后写精炼 outcome 审计行；
  * 三者要么一起落、要么一起回滚，崩溃重放不会重复产出（U12）。
  *
- * 失败路径：审计行必须在事务回滚**之后另开事务**写，然后抛 {@link InboxRefineError} 让消费者
+ * 失败路径：审计行必须在事务回滚之后另开事务写，然后抛 {@link InboxRefineError} 让消费者
  * 记队列失败（attempts+1 + 退避；`fatal` 时直接进死信，AC:581）。
  */
 import type * as lbug from '@ladybugdb/core'
 import {
   REFINE_INBOX_ACTION,
   REFINE_KIND,
-  WRITE_EVIDENCE_ACTION,
   WRITE_EVIDENCE_SKIPPED_ACTION,
   insertGenerationLog,
   type GenerationLogOutcome,
@@ -57,8 +56,8 @@ export const COERCED_CLASSIFICATION_REASON = 'coerced-kind-or-priority'
 /**
  * 语义去重扫描失败、本次改为「只走指纹路径」写入的降级理由（评审补钉 P20）。
  *
- * 背景：LadybugDB 0.22.3 里事务内任一语句报错即**中止整个事务**（后续语句被静默丢弃），
- * 所以「在事务里吞掉 ANN 失败继续写」是假降级——写入全丢、COMMIT 还会抛
+ * 背景：LadybugDB 0.22.3 里事务内任一语句报错即中止整个事务（后续语句被静默丢弃），
+ * 所以「在事务里吞掉 ANN 失败继续写」是假降级：写入全丢、COMMIT 还会抛
  * 'No active transaction for COMMIT.'。正确做法是让首次尝试干净回滚（scanFailure: 'throw'），
  * 再跳过语义去重把整段重写一遍；降级事实必须留痕（AD-21）。
  */
@@ -71,7 +70,7 @@ export interface InboxProcessorDeps {
   readonly llm: LlmPort
   /**
    * 路由解析：Config 的 llmProvider/llmModel 优先，缺省从 session model/selection 解析
-   * （AC:567）。返回 null = 解析失败 ⇒ 直接降级、**不调 LLM**（N5）。
+   * （AC:567）。返回 null = 解析失败 ⇒ 直接降级、不调 LLM（N5）。
    */
   readonly resolveRoute: (sessionId: string) => RefineRoute | null
   /** embeddings 客户端；缺省或未给 model 则本次不产向量（L1 照常写入）。 */
@@ -85,8 +84,8 @@ export interface InboxProcessorDeps {
   readonly now?: () => Date
   readonly logger?: { warn(message: string): void }
   /**
-   * 关系识别跑者（Story 2.6 / FR-17）。在 L1 事务**提交之后**调用：LLM 不可用 / 超时 /
-   * embedding 缺失都只跳过关系写入，**记忆照常进库**（AC:779-782）。不传即完全不跑关系。
+   * 关系识别跑者（Story 2.6 / FR-17）。在 L1 事务提交之后调用：LLM 不可用 / 超时 /
+   * embedding 缺失都只跳过关系写入，记忆照常进库（AC:779-782）。不传即完全不跑关系。
    */
   readonly relations?: RelationRunner | null
 }
@@ -97,9 +96,9 @@ export interface EmbedFactsResult {
 }
 
 /**
- * 写时嵌入的通用实现（N4 / AC:589 / Story 2.5 AC:755）：写库事务**之前**取向量。
+ * 写时嵌入的通用实现（N4 / AC:589 / Story 2.5 AC:755）：写库事务之前取向量。
  * 任一批次失败都不阻塞节点写入，只把该批记成无向量（三列留空），并把失败摘要交给审计行。
- * L1（本文件）与 L2（distill/promotion.ts）共用——两处的分批与失败语义必须一致。
+ * L1（本文件）与 L2（distill/promotion.ts）共用，两处的分批与失败语义必须一致。
  */
 export async function embedTexts(
   client: EmbedClient | null | undefined,
@@ -131,8 +130,8 @@ export function isProcessableStatus(status: InboxStatus | null): boolean {
 }
 
 /**
- * 写一行 refine 审计（N9）。**不开事务**：事务边界由调用方决定——失败路径另开事务写，
- * 成功路径与产出同事务写。四处记账的字段原本逐字重复，这里收敛为唯一实现。
+ * 写一行 refine 审计（N9）。不开事务：事务边界由调用方决定，失败路径另开事务写，
+ * 成功路径与产出同事务写。
  */
 function insertRefineAudit(
   connection: lbug.Connection,
@@ -141,9 +140,9 @@ function insertRefineAudit(
   reason: string | null,
   now: () => Date,
   /**
-   * action 缺省 refine_inbox。**降级可见性**（P16/T18）要把某些行落到独立 action 上——
+   * action 缺省 refine_inbox。降级可见性（P16/T18）要把某些行落到独立 action 上：
    * countRelatedSkips（/memory status 的降级计数）按 action 白名单统计，只改 reason 文本
-   * 是统计不到的（曾经就是这样：reason 前缀写了 write_evidence_skipped，action 仍是 refine_inbox）。
+   * 统计不到（曾经就是这样：reason 前缀写了 write_evidence_skipped，action 仍是 refine_inbox）。
    */
   action: string = REFINE_INBOX_ACTION,
 ): Promise<string> {
@@ -158,7 +157,7 @@ function insertRefineAudit(
   })
 }
 
-/** 失败审计行：必须**另开事务**写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
+/** 失败审计行：必须另开事务写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
 async function recordRefineFailure(
   connection: lbug.Connection,
   item: InboxItem,
@@ -185,11 +184,11 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
 
     // ⓪ 入口状态守卫（评审 T7）：只有还「待处理」的条目才值得精炼。
     // 消费者已把它 claim 成 processing（正常路径）；直接对 done/failed/缺失的条目调 process 时
-    // 立刻返回，**不写审计、不调 LLM**——否则会在 markInboxItemDone 守卫之前多写一行 refine 审计。
+    // 立刻返回，不写审计、不调 LLM，否则会在 markInboxItemDone 守卫之前多写一行 refine 审计。
     const status = await readInboxItemStatus(connection, item.id)
     if (!isProcessableStatus(status)) return { completed: true, kinds: [] }
 
-    // ① 路由解析闸门（AC:568）：解析失败直接降级，绝不调 LLM。
+    // ① 路由解析闸门（AC:568）：解析失败直接降级，不调 LLM。
     const route = deps.resolveRoute(item.sessionId)
     if (!route) {
       const failure: RefineFailure = {
@@ -232,21 +231,18 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       )
     }
 
-    // ④ 单事务：条件转 done → 经**去重原语**写 L1（Story 2.4：指纹/语义/版本三路）
+    // ④ 单事务：条件转 done → 经去重原语写 L1（Story 2.4：指纹/语义/版本三路）
     //    → 按 source_refs 建 EVIDENCE 边（Story 2.6 / AD-10：精炼结构是 EVIDENCE 唯一写者）
     //    → 写 outcome 审计行（R1 / N9）。
     // item.id 就是 l0_raw 行 id（2.3 P1 已把 L0 与 INBOX 统一成同一身份），故它的层是 L0，
     // 与刚写的 L1 节点构成 l0_raw→memory 的 EVIDENCE 边（2.5 判据②的链头）。
     let marked = false
-    // 事务外仍需这份清单（关系识别在事务提交后跑），故声明在闭包之外。
-    // writtenL1Ids = 本次**每个**产出节点 id（含指纹合并 / 语义合并 / 版本作废命中既有节点）：
-    //   它们都新增了 source_refs，需要物化成 EVIDENCE 边（X1 语义）。建边只用到 id。
-    // relationEntries = **只含新节点**（outcome === 'created' | 'version-invalidated'）：
-    //   评审 P2（T2）——关系是一次性决定（AC4）。合并命中既有节点时它早已跑过关系识别，
+    // relationEntries 在事务外仍需要（关系识别在事务提交后跑），故声明在闭包之外：
+    //   只含新节点（outcome === 'created' | 'version-invalidated'）。
+    //   评审 P2（T2）：关系是一次性决定（AC4）。合并命中既有节点时它早已跑过关系识别，
     //   再跑一次会突破「每条新记忆 ≤5 条 RELATED」并产生噪声边。
-    const writtenL1Ids: string[] = []
     const relationEntries: { readonly id: string, readonly text: string, readonly kind: string, readonly vector: readonly number[] | null }[] = []
-    // 评审补钉 P20：若本轮因语义扫描失败而退化成「只走指纹」，在**成功那次事务内**留一条痕迹。
+    // 评审补钉 P20：若本轮因语义扫描失败而退化成「只走指纹」，在成功那次事务内留一条痕迹。
     let scanDegraded: string | null = null
 
     /**
@@ -260,8 +256,10 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     const writeL1 = async (skipSemanticScan: boolean): Promise<void> => {
       // 重跑前把闭包状态复位（首轮失败时可能已推进到一半）。
       marked = false
-      writtenL1Ids.length = 0
       relationEntries.length = 0
+      // 本次每个产出节点 id（含指纹合并 / 语义合并 / 版本作废命中既有节点）：
+      // 它们都新增了 source_refs，需要物化成 EVIDENCE 边（X1 语义）。建边只用到 id。
+      const writtenL1Ids: string[] = []
       await runInTransaction(connection, async () => {
         marked = await markInboxItemDone(connection, item.id, { now: now() })
         if (!marked) return
@@ -308,7 +306,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         )
         await insertRefineAudit(connection, item.id, 'success', null, now)
         if (edgeResult.skipped.length > 0) {
-          // 评审 P16（T18）：落**独立 action**（不是 refine_inbox 的 reason 文本）——
+          // 评审 P16（T18）：落独立 action（不是 refine_inbox 的 reason 文本）。
           // countRelatedSkips 按 action 白名单计数，只改 reason 统计不到（AD-21 降级必须可见）。
           await insertRefineAudit(
             connection,
@@ -358,7 +356,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     // marked=false：条目已被处理过（R1 的 at-most-once 命中），本次不写任何产出。
     if (!marked) return { completed: true, kinds: [] }
 
-    // ⑤ 关系识别（Story 2.6 / FR-17）：在 L1 事务之外 best-effort 执行——AC:779-782 明确
+    // ⑤ 关系识别（Story 2.6 / FR-17）：在 L1 事务之外 best-effort 执行，AC:779-782 明确
     // 「LLM 不可用或关系识别超时 ⇒ 跳过关系写入、记忆仍进库」。复用写时已算的 embedding，
     // 不重算、不新增 ctx.effect；跟随精炼任务的总预算 signal。
     if (deps.relations) {

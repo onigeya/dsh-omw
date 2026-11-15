@@ -2,11 +2,11 @@
  * 流折叠单测（Story 2.3 / N1）。
  *
  * 运行期不 import 宿主 llm 值，所以折叠自己实现；契约：只累加 text-delta、
- * **见到首个 finish 即停止**（评审 T10）、其余 chunk（reasoning/tool-call/usage/block）一律忽略。
+ * 见到首个 finish 即停止（评审 T10）、其余 chunk（reasoning/tool-call/usage/block）一律忽略。
  */
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
-import { foldChunks, foldStream } from '../src/distill/stream-fold'
+import { foldChunks, foldStream } from '../src/shared/stream-fold'
 
 const chunk = (value: unknown): StreamChunk => value as StreamChunk
 

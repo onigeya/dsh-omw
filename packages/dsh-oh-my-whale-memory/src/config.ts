@@ -2,9 +2,9 @@
  * Config schema 与运行时配置投影（Story 1.3）。
  *
  * 契约锁定（见 spec frozen block / AD-9 / AD-11 / FR-18）：
- * - 凭据字段命名 `token` 且标 `.role('secret')`——redact.ts 按 node.meta?.role === 'secret' 判定，
+ * - 凭据字段命名 `token` 且标 `.role('secret')`，redact.ts 按 node.meta?.role === 'secret' 判定，
  *   字段名不参与脱敏判定（AD-9）。
- * - 所有进 /settings 表单的字段标 `.volatile()`——宿主 volatileForm() 只递归 volatile 节点（AD-11）。
+ * - 所有进 /settings 表单的字段标 `.volatile()`，宿主 volatileForm() 只递归 volatile 节点（AD-11）。
  * - 嵌套对象（embedding / rerank / layerWeights / systemOne）整体 `.volatile()`，子字段保持 plain：
  *   schemastery 的 validateVolatileSchema 硬约束禁止 volatile 嵌套 volatile，否则启动即抛
  *   ValidationError('volatile fields require a fixed object path without an enclosing volatile field')。
@@ -12,6 +12,21 @@
  */
 import Schema from '@deepseek-ai/schemastery'
 import type { Volatile } from '@deepseek-ai/cordis'
+
+/**
+ * 配置缺省值的唯一来源：schema 的 `default(...)` 与 `resolveRuntimeConfig` 的兜底必须同源。
+ * 两处若各写一份数字，「宿主未注入该字段」与「volatile 节点取默认值」会给出不同结果（没有测试绑住两者）。
+ */
+const MEMORY_CONFIG_DEFAULTS = {
+  captureSteps: 50,
+  inboxRefineConcurrency: 4,
+  injectOnNewSession: true,
+  rrfK: 60,
+  retrievalTopK: 50,
+  layerWeights: { l2: 0.7, l1: 0.4 },
+  priorityWeight: 0.5,
+  systemOneEnabled: true,
+}
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
 const EmbeddingSchema = Schema.object({
@@ -29,20 +44,20 @@ const RerankSchema = Schema.object({
 }).default({}).volatile()
 
 const LayerWeightsSchema = Schema.object({
-  l2: Schema.number().default(0.7),
-  l1: Schema.number().default(0.4),
+  l2: Schema.number().default(MEMORY_CONFIG_DEFAULTS.layerWeights.l2),
+  l1: Schema.number().default(MEMORY_CONFIG_DEFAULTS.layerWeights.l1),
 }).default({}).volatile()
 
 /**
- * System One 配置（Story 2.5 / 评审 P3-T4）：`enabled` 之外再给三个**可选**覆盖项。
+ * System One 配置（Story 2.5 / 评审 P3-T4）：`enabled` 之外再给三个可选覆盖项。
  *
- * 动机：端点与模型此前只有模块常量，不可覆盖；`token` 更是完全无处可配（上游若要求凭据就无解）。
- * - 三者全部可选 ⇒ 缺省行为与 2.5 之前**逐字一致**（不翻转 `enabled` 的默认值）；
+ * 端点与模型此前只有模块常量，不可覆盖；`token` 更是完全无处可配（上游若要求凭据就无解）。
+ * - 三者全部可选，缺省行为与 2.5 之前逐字一致（不翻转 `enabled` 的默认值）；
  * - `token` 必须标 `.role('secret')`（AD-9：字段名不参与脱敏判定，不标则明文广播）；
- * - 凭据值绝不进日志 / 审计 / status（NFR9）。
+ * - 凭据值不进日志 / 审计 / status（NFR9）。
  */
 const SystemOneSchema = Schema.object({
-  enabled: Schema.boolean().default(true),
+  enabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.systemOneEnabled),
   endpoint: Schema.string(),
   model: Schema.string(),
   token: Schema.string().role('secret'),
@@ -52,14 +67,14 @@ const SystemOneSchema = Schema.object({
 export const Config = Schema.object({
   embedding: EmbeddingSchema,
   rerank: RerankSchema,
-  captureSteps: Schema.number().default(50).volatile(),
-  inboxRefineConcurrency: Schema.number().default(4).volatile(),
-  injectOnNewSession: Schema.boolean().default(true).volatile(),
-  rrfK: Schema.number().default(60).volatile(),
-  retrievalTopK: Schema.number().default(50).volatile(),
+  captureSteps: Schema.number().default(MEMORY_CONFIG_DEFAULTS.captureSteps).volatile(),
+  inboxRefineConcurrency: Schema.number().default(MEMORY_CONFIG_DEFAULTS.inboxRefineConcurrency).volatile(),
+  injectOnNewSession: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.injectOnNewSession).volatile(),
+  rrfK: Schema.number().default(MEMORY_CONFIG_DEFAULTS.rrfK).volatile(),
+  retrievalTopK: Schema.number().default(MEMORY_CONFIG_DEFAULTS.retrievalTopK).volatile(),
   layerWeights: LayerWeightsSchema,
   // priority 二次加权系数（Story 3.1 / FR-16）：排序分再乘 `1 + priorityWeight × priority/100`。
-  priorityWeight: Schema.number().default(0.5).volatile(),
+  priorityWeight: Schema.number().default(MEMORY_CONFIG_DEFAULTS.priorityWeight).volatile(),
   llmProvider: Schema.string().volatile(),
   llmModel: Schema.string().volatile(),
   systemOne: SystemOneSchema,
@@ -87,7 +102,7 @@ export interface RuntimeConfig {
   warnings: string[]
 }
 
-/** 统一读法：既接受 volatile 节点（.get()），也接受普通值——便于纯单测直接传值包装。 */
+/** 统一读法：既接受 volatile 节点（.get()），也接受普通值，便于纯单测直接传值包装。 */
 type Getter<T> = { get(): T } | T
 function read<T>(field: Getter<T>): T {
   return typeof field === 'object' && field !== null && typeof (field as { get?: unknown }).get === 'function'
@@ -140,7 +155,7 @@ function requireNonNegativeWeight(field: string, value: number): number {
  * 分级校验入口。
  * 硬校验失败即抛 Error（仅阻塞本插件，宿主继续运行）；
  * Embedding token/model 缺失走降级（warn + embeddingMode='disabled'，FR-18）。
- * 凭据字段（token）的错误信息固定只含字段名——值本身是秘密，不得入错误日志（NFR9）。
+ * 凭据字段（token）的错误信息固定只含字段名，值本身是秘密，不得入错误日志（NFR9）。
  */
 export function resolveRuntimeConfig(config: {
   embedding?: Getter<{ endpoint?: string; token?: string; model?: string; dim?: number }>
@@ -165,7 +180,7 @@ export function resolveRuntimeConfig(config: {
 
   // Embedding endpoint / token / model：任一缺失即降级，不抛错（FR-18）。
   // endpoint 也纳入判据（评审 T6）：客户端构造要求 endpoint，只按 token+model 判 enabled
-  // 会造出「假启用态」——L1 静默写 NULL 向量且无审计，而 /memory status 仍打印 enabled。
+  // 会造出「假启用态」：L1 静默写 NULL 向量且无审计，而 /memory status 仍打印 enabled。
   const token = embeddingRaw.token?.trim() || ''
   const model = embeddingRaw.model?.trim() || ''
   let embeddingMode: RuntimeConfig['embeddingMode'] = 'enabled'
@@ -179,20 +194,20 @@ export function resolveRuntimeConfig(config: {
     warnings.push(`embedding 降级为 disabled：缺少 ${missing}（可留空走关键词单路）`)
   }
 
-  const captureSteps = requirePositiveInt('captureSteps', read(config.captureSteps ?? 50))
-  const inboxRefineConcurrency = requirePositiveInt('inboxRefineConcurrency', read(config.inboxRefineConcurrency ?? 4))
-  const rrfK = read(config.rrfK ?? 60)
+  const captureSteps = requirePositiveInt('captureSteps', read(config.captureSteps ?? MEMORY_CONFIG_DEFAULTS.captureSteps))
+  const inboxRefineConcurrency = requirePositiveInt('inboxRefineConcurrency', read(config.inboxRefineConcurrency ?? MEMORY_CONFIG_DEFAULTS.inboxRefineConcurrency))
+  const rrfK = read(config.rrfK ?? MEMORY_CONFIG_DEFAULTS.rrfK)
   if (!Number.isFinite(rrfK) || rrfK <= 0) {
     throw new Error(`rrfK（期望 > 0 的数，实际 ${rrfK}）`)
   }
-  // F-12：与相邻 rrfK 同款硬校验——生成为 NaN/0/负数会被 `Math.max(1, Math.trunc(...))`
+  // F-12：与相邻 rrfK 同款硬校验，生成为 NaN/0/负数会被 `Math.max(1, Math.trunc(...))`
   // 静默变成 1（或把 NaN 绑进 $k/TOP 变成查询期失败），配错必须 fail-loud。
-  const retrievalTopK = requirePositiveInt('retrievalTopK', read(config.retrievalTopK ?? 50))
+  const retrievalTopK = requirePositiveInt('retrievalTopK', read(config.retrievalTopK ?? MEMORY_CONFIG_DEFAULTS.retrievalTopK))
 
   const weightsRaw = read(config.layerWeights ?? {}) as { l2?: number; l1?: number }
-  const l2 = requireUnitWeight('layerWeights.l2', weightsRaw.l2 ?? 0.7)
-  const l1 = requireUnitWeight('layerWeights.l1', weightsRaw.l1 ?? 0.4)
-  const priorityWeight = requireNonNegativeWeight('priorityWeight', read(config.priorityWeight ?? 0.5))
+  const l2 = requireUnitWeight('layerWeights.l2', weightsRaw.l2 ?? MEMORY_CONFIG_DEFAULTS.layerWeights.l2)
+  const l1 = requireUnitWeight('layerWeights.l1', weightsRaw.l1 ?? MEMORY_CONFIG_DEFAULTS.layerWeights.l1)
+  const priorityWeight = requireNonNegativeWeight('priorityWeight', read(config.priorityWeight ?? MEMORY_CONFIG_DEFAULTS.priorityWeight))
 
   const systemOneRaw = read(config.systemOne ?? {}) as {
     enabled?: boolean
@@ -200,12 +215,12 @@ export function resolveRuntimeConfig(config: {
     model?: string
     token?: string
   }
-  const systemOneEnabled = systemOneRaw.enabled ?? true
+  const systemOneEnabled = systemOneRaw.enabled ?? MEMORY_CONFIG_DEFAULTS.systemOneEnabled
   // 端点填了就硬校验（与 embedding.endpoint 同一口径）；token 只做 trim，值本身不落任何输出。
   const systemOneEndpoint = requireHttpUrl('systemOne.endpoint', systemOneRaw.endpoint)
   const systemOneModel = systemOneRaw.model?.trim() || undefined
   const systemOneToken = systemOneRaw.token?.trim() || undefined
-  const injectOnNewSession = read(config.injectOnNewSession ?? true)
+  const injectOnNewSession = read(config.injectOnNewSession ?? MEMORY_CONFIG_DEFAULTS.injectOnNewSession)
   const llmProvider = read(config.llmProvider ?? undefined)
   const llmModel = read(config.llmModel ?? undefined)
 

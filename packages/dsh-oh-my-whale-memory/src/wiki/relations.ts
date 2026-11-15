@@ -3,10 +3,10 @@
  *
  * 三件事，全部围绕「记忆进正式区时一次性决定关系」：
  * 1. `recallNeighbors`：临时直连 KNN（复用 memory_embedding_hnsw），给关系识别当邻接候选；
- *    Epic 3 的 RRF 内核落地后**只换实现、不动调用点**，故单独成函数而非内联。
+ *    Epic 3 的 RRF 内核落地后只换实现、不动调用点，故单独成函数而非内联。
  * 2. `identifyRelations`：一次 ctx.llm 调用，prompt 与输出 schema 同文件，输出
  *    `[{target_id, edge_type:'RELATED'|'EVIDENCE', reason?}]`（epics.md:763）。
- * 3. `applyRelations`：应用层校验后写 RELATED 边——**LLM 提议的 EVIDENCE 一律拒绝建边并记审计**
+ * 3. `applyRelations`：应用层校验后写 RELATED 边，LLM 提议的 EVIDENCE 一律拒绝建边并记审计
  *    （裁决 U4：EVIDENCE 的唯一写者是精炼结构，见 distill/processor.ts）。
  *
  * 校验口径（裁决 U5 + epics.md:773）：
@@ -15,7 +15,7 @@
  * - 每条新记忆最多 5 条 RELATED 边（RELATED_MAX_EDGES）；
  * - 目标必须来自本次 recall 的邻接集（不信任 LLM 编造的 id）。
  *
- * 降级（AC:779-782、brief §5.1）：embedding 禁用或候选无向量 ⇒ **整体跳过 RELATED**，
+ * 降级（AC:779-782、brief §5.1）：embedding 禁用或候选无向量 ⇒ 整体跳过 RELATED，
  * 记忆照常进库；LLM 不可用 / 超时 / 输出不可解析 ⇒ 同样整体跳过。两种降级都落一条
  * `skip_related` 审计行，供 /memory status 可见。
  */
@@ -32,9 +32,10 @@ import {
 } from '../db/audit.js'
 import { readPinnedEmbeddingDim } from '../db/dedup.js'
 import { writeRelatedEdges, type RelatedEdgeInput } from '../db/edges.js'
-import { collectRows } from '../db/rows.js'
+import { isMissingTableError } from '../db/errors.js'
+import { queryRows } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
-import { GENERATION_LOG_TABLE, MEMORY_TABLE, META_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
+import { GENERATION_LOG_TABLE, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import { foldStream } from '../shared/stream-fold.js'
 
@@ -43,7 +44,7 @@ export const RELATION_RECALL_TOP_K = 8
 
 /**
  * 每条新记忆最多写出的 RELATED 边数（AC:773）。
- * 评审 P2（T2）：关系跑者**只对本次新产生的节点**跑（processor 只把 outcome 为
+ * 评审 P2（T2）：关系跑者只对本次新产生的节点跑（processor 只把 outcome 为
  * created / version-invalidated 的条目交给它），所以每次调用就是该节点的一生一次 ⇒
  * 这里的「本次调用上限」等价于「每节点上限」，不会因反复精炼累积。
  */
@@ -92,21 +93,12 @@ const RECALL_STATEMENT = [
   'WITH node, distance',
   'MATCH (node)',
   'WHERE ' + currentSnapshotPredicate('node'),
-  // 评审 P19b（T24）：自身排除**下推**到查询（与 dedup.ts:117 同一形态）。
+  // 评审 P19b（T24）：自身排除下推到查询（与 dedup.ts:117 同一形态）。
   // 原先在 JS 里 continue 过滤会让自身白占一个 top-K 名额（k=8 实际最多 7 条）。
   "  AND node.id <> $self_id",
   'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.text AS text, distance',
   'ORDER BY distance',
 ].join('\n')
-
-async function queryRows(
-  connection: lbug.Connection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
-}
 
 /**
  * 临时直连 KNN（brief §5.1）：不经 Epic 3 的 RRF 融合，不新增索引、不新增存储。
@@ -120,8 +112,8 @@ export async function recallNeighbors(
   if (k === 0 || input.embedding.length === 0) return []
   const dim = await readPinnedEmbeddingDim(connection)
   if (dim === null || dim !== input.embedding.length) return []
-  // 评审 P19b（T24）：排除自身**下推**到查询（与 dedup.ts:117 同形态）。
-  // 但 0.22.3 的 QUERY_VECTOR_INDEX 把 $k 用在索引扫描内、外层 WHERE 过滤是**之后**做的，
+  // 评审 P19b（T24）：排除自身下推到查询（与 dedup.ts:117 同形态）。
+  // 但 0.22.3 的 QUERY_VECTOR_INDEX 把 $k 用在索引扫描内、外层 WHERE 过滤是之后做的，
   // 故自身若落在 top-k 里，光下推仍会少一条。排除时多要一条候选，过滤后再裁到 k。
   const indexK = input.excludeId === undefined ? k : k + 1
   const rows = await queryRows(connection, RECALL_STATEMENT, {
@@ -254,7 +246,7 @@ export interface RelationSelection {
 
 /**
  * 应用层校验（不信任 LLM 输出）：目标必须来自邻接集、同层、同 kind 优先、最多 5 条。
- * 纯函数——写库前可单测。
+ * 纯函数，写库前可单测。
  */
 export function selectRelatedTargets(
   candidate: { readonly id: string; readonly layer: string; readonly kind: string },
@@ -314,7 +306,7 @@ export type IdentifyRelationsResult =
   | { readonly ok: true; readonly proposals: readonly RelationProposal[] }
   | { readonly ok: false; readonly reason: string; readonly message: string }
 
-/** 一次关系识别 LLM 调用（单次尝试，重试不在本次尝试内——与精炼同纪律）。 */
+/** 一次关系识别 LLM 调用（单次尝试，重试不在本次尝试内，与精炼同纪律）。 */
 export async function identifyRelations(input: IdentifyRelationsInput): Promise<IdentifyRelationsResult> {
   if (input.neighbors.length === 0) return { ok: true, proposals: [] }
   let folded: { text: string }
@@ -340,7 +332,7 @@ export async function identifyRelations(input: IdentifyRelationsInput): Promise<
 }
 
 /** 一条关系写入的审计行（skip / reject / write 三种动作复用同一形状）。
- *  l0Refs 一律记**来源 INBOX 条目 id**（向下证据引用，与同表其它写者一致），
+ *  l0Refs 一律记来源 INBOX 条目 id（向下证据引用，与同表其它写者一致），
  *  候选 memory 节点 id 只留在 reason 文本里（评审 P8/T8）。 */
 async function insertRelationAudit(
   connection: lbug.Connection,
@@ -370,7 +362,7 @@ export interface ApplyRelationsResult {
 
 /**
  * 应用层校验 + 写边 + 记账，全部在一个事务里（AD-10：先写日志后写状态）。
- * 任何一步失败都**不回滚已提交的记忆**——本函数的调用点在 L1 事务之外（AC:779-782）。
+ * 任何一步失败都不回滚已提交的记忆：本函数的调用点在 L1 事务之外（AC:779-782）。
  */
 export async function applyRelations(
   connection: lbug.Connection,
@@ -430,8 +422,8 @@ export async function recordRelatedSkip(
 /**
  * `/memory status` 用的计数：被跳过/拒绝的关系写入条数（AD-21：必须可见）。
  *
- * 返回 null 表示**算不出来**（审计表不存在，例如只读降级实例）——与 `computeAuditGap` 同一
- * 约定，调用方渲染「未知」，绝不静默报 0；其它错误照抛。
+ * 返回 null 表示算不出来（审计表不存在，例如只读降级实例），与 `computeAuditGap` 同一
+ * 约定，调用方渲染「未知」，不静默报 0；其它错误照抛。
  */
 export async function countRelatedSkips(connection: lbug.Connection): Promise<number | null> {
   try {
@@ -445,8 +437,7 @@ export async function countRelatedSkips(connection: lbug.Connection): Promise<nu
     )
     return Number(rows[0]?.c ?? 0)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/does not exist/i.test(message)) return null
+    if (isMissingTableError(error)) return null
     throw error
   }
 }
@@ -485,7 +476,7 @@ export interface RelationRunnerOptions {
 /**
  * 生产用的关系跑者：在每个新 L1 节点上跑一次 KNN + LLM 识别 + 应用层校验 + 写边。
  *
- * 调用点在精炼事务**之外**（AC:779-782：关系失败不影响记忆进库）。逐节点串行，
+ * 调用点在精炼事务之外（AC:779-782：关系失败不影响记忆进库）。逐节点串行，
  * 首个 LLM 失败即整体中止（同一次故障没必要每个节点各等一份超时），并落一条 skip 审计。
  */
 export function createRelationRunner(options: RelationRunnerOptions): RelationRunner {
@@ -498,7 +489,7 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
       await recordRelatedSkip(connection, input.itemId, SKIP_RELATED_EMBEDDING_REASON, input.now)
       return
     }
-    // 审计降级时绝不外抛（评审 P4/T4）：审计失败只 warn，关系降级不得把已提交的记忆拖成失败。
+    // 审计降级时不外抛（评审 P4/T4）：审计失败只 warn，关系降级不得把已提交的记忆拖成失败。
     const recordSkipSafely = async (reason: string): Promise<void> => {
       try {
         await recordRelatedSkip(connection, input.itemId, reason, input.now)
@@ -509,7 +500,7 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
     }
     for (const entry of input.entries) {
       if (input.signal.aborted) {
-        // 评审 P4（T4）：30s 总预算耗尽是一类降级，必须落一条 skip 审计（模块头 / AD-21）。
+        // 评审 P4（T4）：30s 总预算耗尽是一类降级，必须落一条 skip 审计（AD-21）。
         await recordSkipSafely('relation-budget-aborted')
         return
       }
@@ -548,7 +539,7 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
           now: input.now,
         })
       } catch (error) {
-        // 关系写入是 best-effort：绝不让它把已提交的记忆拖成失败（AC:779-782）。
+        // 关系写入是 best-effort：不让它把已提交的记忆拖成失败（AC:779-782）。
         // 评审 P4（T4）：DB 抛错同样是一类降级，落一条 skip 审计（自守卫，审计失败只 warn）。
         const message = error instanceof Error ? error.message : String(error)
         options.logger?.warn('关系识别/写入失败（node=' + entry.id + '）：' + message)

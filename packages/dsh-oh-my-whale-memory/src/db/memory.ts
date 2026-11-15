@@ -5,21 +5,21 @@
  * - ON CREATE 建节点；
  * - ON MATCH 合并 source_refs（`list_distinct(list_concat(...))` 去重并集）、
  *   保留最早 recorded_at（`CASE WHEN ... THEN ... END`，ISO-8601 UTC 可字典序比较）、
- *   以**最新写入的分类为准**更新 kind/priority（Story 1.11 AC4——同文本不同分类仍是同一条）；
+ *   以最新写入的分类为准更新 kind/priority（Story 1.11 AC4，同文本不同分类仍是同一条）；
  *   text/layer/embedding 仍以首次写入者的内容为准（指纹不含 kind/priority，见 `./id.js`）。
  *
  * 2026-11-09 实测：MERGE ON CREATE/ON MATCH、list_distinct、CASE 表达式、prepare/execute
  * 参数绑定在 LadybugDB 0.22.3 上均可用。
  *
  * Story 1.6：embedding 可缺省（memory_remember 直写 L1 时不产向量，Epic 2 补齐）。
- * 缺省走 UPSERT_STATEMENT_WITHOUT_EMBEDDING——ON CREATE 完全不触碰
+ * 缺省走 UPSERT_STATEMENT_WITHOUT_EMBEDDING，ON CREATE 完全不触碰
  * embedding / embedding_model_id / embedding_dim 三列（保持 NULL，绝不写零向量），
  * 且不绑定这三个参数；ON MATCH 语义与带向量版本完全一致。
  *
  * Story 1.7：显式 `embedding: null`（手动写入无 embedding 客户端）与缺省走同一条
- * 无向量路径——两条 story 的"无向量"语义必须一致，否则同指纹节点会因写法不同而分叉。
+ * 无向量路径，两条 story 的"无向量"语义必须一致，否则同指纹节点会因写法不同而分叉。
  *
- * Story 1.8：本文件同时承载**只读**浏览路径（`listMemories` / `getMemoryById`）——
+ * Story 1.8：本文件同时承载只读浏览路径（`listMemories` / `getMemoryById`），
  * 过滤/排序/截断全部在库侧完成，参数一律 prepare+execute 绑定，见文件末尾。
  */
 import type * as lbug from '@ladybugdb/core'
@@ -33,7 +33,7 @@ import {
 import { runPrepared } from './backend.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
-import { collectRows, queryAll } from './rows.js'
+import { collectRows, nullishString, queryAll, queryRows, toStringArray } from './rows.js'
 import { currentSnapshotPredicate } from './snapshot.js'
 import { MEMORY_TABLE, META_KEYS, META_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
@@ -44,7 +44,7 @@ export { queryAll } from './rows.js'
 export type MemoryConnection = lbug.Connection
 
 /**
- * kind / priority 的**单一缺省常量**（Story 2.3 / N10）：这两列的语义归 db 层，
+ * kind / priority 的单一缺省常量（Story 2.3 / N10）：这两列的语义归 db 层，
  * 写路径（本文件）与精炼路径（src/distill/*）都必须引用它们，不得再写字面量。
  * kind 缺省空串、priority 缺省 0；合法 kind 值域见 src/shared/memory-vocab.ts 的 MEMORY_KINDS。
  */
@@ -56,14 +56,14 @@ export interface UpsertMemoryInput {
    * 记忆层：spine 枚举 `L0|L1|L2|L3`；禁空、禁冒号。
    * Story 1.11 已收敛写路径：`src/index.ts` 的 `writeL1Inbox` 与 `memory_remember` 都写 `'L1'`
    * （= `MEMORY_REMEMBER_LAYER`）；`'L1_INBOX'` 从此只是 INBOX 队列标识/表名，不再是本表 layer 取值。
-   * 读路径仍不做 layer 白名单——Story 1.7 存量 `'L1_INBOX'` 行必须照常可见（Story 1.8）。
+   * 读路径仍不做 layer 白名单，Story 1.7 存量 `'L1_INBOX'` 行必须照常可见（Story 1.8）。
    */
   layer: string
   /** 记忆原文；参与指纹，归一化后为空即拒绝。 */
   text: string
   /**
    * 向量；长度必须等于库 pin 的 dim。省略或传 `null` 表示本次无向量（Story 1.6
-   * memory_remember 直写 L1 / Story 1.7 手动写入，Epic 1 无 embedding 客户端）——
+   * memory_remember 直写 L1 / Story 1.7 手动写入，Epic 1 无 embedding 客户端），
    * 写入节点时三列 embedding / embedding_model_id / embedding_dim 全部保持 NULL，
    * 绝不写零向量污染 HNSW（Story 2.3 引入客户端后回填）。
    */
@@ -86,15 +86,15 @@ export interface UpsertMemoryInput {
   /** 发起写入的主体（AD-21 三档），只进 generation_log 的 actor 列，不参与节点指纹；缺省 system。 */
   actor?: MemoryActor
   /**
-   * 被作废的旧版本节点 id（Story 2.4 / U1、U10）：挂在**新节点**上，值 = 旧版本 id。
+   * 被作废的旧版本节点 id（Story 2.4 / U1、U10）：挂在新节点上，值 = 旧版本 id。
    * 只有版本作废路径（sim∈[0.90,0.97) 且 source_refs 有交集）会传；其余写入省略。
    * 写 memory.parent_id 列（旧库由初始化期幂等 ALTER 补出，见 database.ts）。
    */
   parentId?: string | null
   /**
-   * 直接支撑该节点的**存活 L0 观测条数**（Story 2.5 / U16、AC③）：
+   * 直接支撑该节点的存活 L0 观测条数（Story 2.5 / U16、AC③）：
    * L1 = 其 source_refs 中命中存活 l0_raw（raw_text IS NOT NULL）的条数；
-   * L2 = 其直接前驱 L1 各自存活 L0 集的**并集去重**后计数。
+   * L2 = 其直接前驱 L1 各自存活 L0 集的并集去重后计数。
    * 只有质量门写 L2 时计算并传入；其余写入省略（列保持 NULL，只写不读）。
    */
   support?: number | null
@@ -110,17 +110,17 @@ export interface UpsertMemoryResult {
  * ON MATCH 子句：带/不带向量的两条 MERGE 逐字共用。
  * 抽成常量是为了避免只改一条语句导致合并语义静默分叉（Story 1.6 新增了第二条语句）。
  *
- * Story 1.11（AC4）：kind / priority 以**最新写入**为准（`m.kind = $kind` / `m.priority = $priority`），
- * 与 text / layer / embedding（首次写入者为准）有意不同——同文本换分类仍命中同一 id。
+ * Story 1.11（AC4）：kind / priority 以最新写入为准（`m.kind = $kind` / `m.priority = $priority`），
+ * 与 text / layer / embedding（首次写入者为准）有意不同，同文本换分类仍命中同一 id。
  *
- * Story 2.5 / 评审 T9：support 是**并集计数**（存活 L0 引用数），故合并语义取「大」且单调不减
- * ——$support 为 NULL（未传）时保留原值、原值为 NULL 时接受新值，否则取两者较大者。
+ * Story 2.5 / 评审 T9：support 是并集计数（存活 L0 引用数），故合并语义取「大」且单调不减
+ * $support 为 NULL（未传）时保留原值、原值为 NULL 时接受新值，否则取两者较大者。
  * 取「最新写入」会让二次综合把已累计的 support 抹成单批的值。
  */
 const UPSERT_ON_MATCH_CLAUSE = [
   '  ON MATCH SET m.source_refs = list_distinct(list_concat(m.source_refs, $source_refs)),',
   '    m.kind = $kind, m.priority = $priority,',
-  // 注意：**不要**写 `WHEN $support IS NULL THEN m.support` —— 0.22.3 的 binder 会因此把同一参数
+  // 注意：不要写 `WHEN $support IS NULL THEN m.support` ，0.22.3 的 binder 会因此把同一参数
   // 先推成 BOOL 再推成 INT64，抛 `Binder exception: Cannot change parameter expression data type from
   // BOOL to INT64.`（实测，评审 P9 首版即踩）。$support 为 NULL 时 `$support > m.support` 求值为
   // NULL（非真）⇒ 落到 ELSE，语义与显式判空完全一致。
@@ -154,7 +154,7 @@ const UPSERT_STATEMENT_WITHOUT_EMBEDDING = [
 ].join('')
 
 /**
- * 写入/合并一条记忆，并在**同一事务**内追加一条溯源行（AD-10）。
+ * 写入/合并一条记忆，并在同一事务内追加一条溯源行（AD-10）。
  * 返回节点 id 与最终 recorded_at。
  */
 export async function upsertMemory(
@@ -166,14 +166,14 @@ export async function upsertMemory(
 }
 
 /**
- * 在**调用方已开启的事务**内写入一次记忆版本：MERGE 节点 + 追加 generation_log 溯源行。
+ * 在调用方已开启的事务内写入一次记忆版本：MERGE 节点 + 追加 generation_log 溯源行。
  *
- * 单独导出是因为 AD-10 的置序要求（先写从属记录、后写指针/发布点）只对**多步**操作有
+ * 单独导出是因为 AD-10 的置序要求（先写从属记录、后写指针/发布点）只对多步操作有
  * 意义：L1→L2 精炼、版本替换、级联作废等下游路径要在自己的事务里把本步骤与其它从属写
  * 放在一起。闭环写路径（upsertMemory）只是它包一层事务的退化情形。
  *
- * 记账行只承载 id / 引用 / 策略 / 结果枚举——**绝不写记忆原文、向量或任何凭据**（NFR9）。
- * 行时间用本次**操作时间**，不是节点最终 recorded_at：同指纹二次写入时节点保留更早的
+ * 记账行只承载 id / 引用 / 策略 / 结果枚举，绝不写记忆原文、向量或任何凭据（NFR9）。
+ * 行时间用本次操作时间，不是节点最终 recorded_at：同指纹二次写入时节点保留更早的
  * recorded_at，而账本记的是「这次操作发生在何时」。
  */
 export async function writeMemoryVersion(
@@ -188,7 +188,7 @@ export async function writeMemoryVersion(
   const sourceRefs = (input.sourceRefs ?? []).map(String)
   // 省略 / null = 本次无向量（Story 1.6 工具直写、Story 1.7 手动写入）：不构造、也不绑定
   // embedding 参数（LadybugDB 对未绑定参数直接报错），改走 UPSERT_STATEMENT_WITHOUT_EMBEDDING，
-  // 三列保持 NULL。禁止用零向量占位——会污染 HNSW 近邻。
+  // 三列保持 NULL。禁止用零向量占位，会污染 HNSW 近邻。
   const embedding = input.embedding == null ? undefined : Array.from(input.embedding, (value) => Number(value))
 
   const statement = await connection.prepare(
@@ -234,15 +234,15 @@ export async function writeMemoryVersion(
 /**
  * Story 1.8 读路径：列表 / 详情。
  *
- * 与写路径共用连接与表，但**只读**：
+ * 与写路径共用连接与表，但只读：
  * - 列表过滤走 `src/db/snapshot.ts` 的共享四条件谓词（FR-15 当前快照语义）；
- *   Story 3.1 起从「只看失效两列」升级为四条件——真实数据 `valid_at` / `recorded_at`
- *   恒 ≤ now，行为不变；`layer` 不做白名单过滤——Story 1.7 存量 `'L1_INBOX'` 行与
+ *   Story 3.1 起从「只看失效两列」升级为四条件，真实数据 `valid_at` / `recorded_at`
+ *   恒 ≤ now，行为不变；`layer` 不做白名单过滤，Story 1.7 存量 `'L1_INBOX'` 行与
  *   其它非枚举值也照常列出；
  * - 排序 `recorded_at DESC` + `$limit` 截断全在库侧完成（LadybugDB 0.22.3 已实测
  *   `ORDER BY`、参数化 `LIMIT`、`lower(...) CONTAINS lower(...)` 均可用）；
- * - 关键词是**字面包含**匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
- * - 详情 `getMemoryById` **不做有效性过滤**：已失效/已过期的墓碑也要能 show 出来，
+ * - 关键词是字面包含匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
+ * - 详情 `getMemoryById` 不做有效性过滤：已失效/已过期的墓碑也要能 show 出来，
  *   与列表的隐藏语义不对称是有意的（Story 1.8 AC3）。
  *
  * 参数（关键词 / id / limit）一律经 prepare+execute 绑定，绝不把用户输入拼进语句。
@@ -265,7 +265,7 @@ const LIST_MEMORIES_WITH_KEYWORD_STATEMENT = [
   LIST_MEMORIES_PROJECTION,
 ].join(' ')
 
-/** 详情投影：显式列出字段，**不含 `m.embedding`**（向量列不回显给命令层）。 */
+/** 详情投影：显式列出字段，不含 `m.embedding`（向量列不回显给命令层）。 */
 const GET_MEMORY_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
   'WHERE m.id = $id',
@@ -273,26 +273,6 @@ const GET_MEMORY_STATEMENT = [
   'm.valid_at AS valid_at, m.recorded_at AS recorded_at, m.invalid_at AS invalid_at,',
   'm.expired_at AS expired_at, m.source_refs AS source_refs, m.embedding_model_id AS embedding_model_id',
 ].join(' ')
-
-/** 参数化读查询：绑定值一律走 prepare+execute（与写路径同一套 execute 形态）。 */
-async function queryRows(
-  connection: MemoryConnection,
-  statement: string,
-  params: Record<string, lbug.LbugValue>,
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
-}
-
-/** NULL/undefined 归一为 null（列里的 null 是「未设置」，与空串不同）。 */
-function nullishToString(value: unknown): string | null {
-  return value === null || value === undefined ? null : String(value)
-}
-
-/** STRING[] 列归一为字符串数组；NULL 归一为 `[]`。 */
-function toStringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.map(String) : []
-}
 
 export interface ListMemoriesOptions {
   /** 关键词（字面包含匹配，两侧小写化）；省略 = 不过滤。 */
@@ -347,7 +327,7 @@ export async function listMemories(
 
 /**
  * 按 id 取一条记忆的完整字段；不存在返回 `null`（不抛错，由命令层渲染「未找到」）。
- * 不做有效性过滤——已失效 / 已过期的墓碑照样返回，且 `invalid_at` / `expired_at` 原样带回。
+ * 不做有效性过滤，已失效 / 已过期的墓碑照样返回，且 `invalid_at` / `expired_at` 原样带回。
  */
 export async function getMemoryById(connection: MemoryConnection, id: string): Promise<MemoryDetail | null> {
   const rows = await queryRows(connection, GET_MEMORY_STATEMENT, { id })
@@ -359,22 +339,22 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
     kind: String(row.kind ?? ''),
     priority: Number(row.priority ?? 0),
     text: String(row.text ?? ''),
-    validAt: nullishToString(row.valid_at),
+    validAt: nullishString(row.valid_at),
     recordedAt: String(row.recorded_at ?? ''),
-    invalidAt: nullishToString(row.invalid_at),
-    expiredAt: nullishToString(row.expired_at),
+    invalidAt: nullishString(row.invalid_at),
+    expiredAt: nullishString(row.expired_at),
     sourceRefs: toStringArray(row.source_refs),
-    embeddingModelId: nullishToString(row.embedding_model_id),
+    embeddingModelId: nullishString(row.embedding_model_id),
   }
 }
 
 /**
  * L1→L2 提升候选的分页语句（Story 2.5 / 评审 P1+T43）。
  *
- * 用 `(recorded_at, id)` 复合游标**升序**扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
+ * 用 `(recorded_at, id)` 复合游标升序扫描有效候选，与 2.6 的 EVIDENCE 回填同一惯用法：
  * - 「当前快照」走 `src/db/snapshot.ts` 的共享四条件谓词（Story 3.1 收敛）：失效 / 过期 /
  *   尚未生效（`valid_at` 在将来）的节点都不产出综合陈述；
- * - `valid_at <= $now` 是评审 T43 补的**时间有效性**，原先与 `eii.ts` 的 `isEffective`
+ * - `valid_at <= $now` 是评审 T43 补的时间有效性，原先与 `eii.ts` 的 `isEffective`
  *   口径对齐；Story 3.1 起共享谓词同时补上 `recorded_at <= $now`（对真实数据零行为变化）。
  *   缺这条会把「生效时间在将来」的 L1 选进队列，随后判据① 判 `not-effective` ⇒ 条目终局 done
  *   且来源 L1 永久 gate-fail，而条目 id 确定性、入队前 `readStatus` 跳过 ⇒ 生效后再也不会被提升。
@@ -408,11 +388,11 @@ export interface ListEffectiveMemoryPage {
  * 按层取一页有效记忆 id（`(recorded_at, id)` 升序游标分页）。
  *
  * Story 2.5 的 L1→L2 提升调度用：提升触发时只知道「L1 累计跨过阈值」，需要把候选 L1 的 id
- * 取出来入 l2_inbox（每条 L1 一个条目，U3）。**评审 P1 前**这里用 `LIMIT = L1_PROMOTION_THRESHOLD`
+ * 取出来入 l2_inbox（每条 L1 一个条目，U3）。评审 P1 前这里用 `LIMIT = L1_PROMOTION_THRESHOLD`
  * （=20）且倒序，导致每轮只覆盖最新 20 条、更早的永久不可达；现在改为升序游标 + 页大小，
  * 配合确定性的条目 id（`buildL2PromotionItemId`）与入队前 `readStatus` 跳过实现幂等推进。
  *
- * 只读；过期 / 失效 / 尚未生效（`valid_at` 在将来）的节点不参与提升——它们不该再产出
+ * 只读；过期 / 失效 / 尚未生效（`valid_at` 在将来）的节点不参与提升，它们不该再产出
  * 综合陈述。返回的 `nextCursor` 为 `null` 表示本页即尾页（调用方把游标回绕到起点）。
  */
 export async function listEffectiveMemoryIdsByLayer(
@@ -458,7 +438,7 @@ export async function readL2PromotionCursor(connection: MemoryConnection): Promi
 }
 
 /**
- * 写回游标。**不自开事务**：调用方通常已在自己的事务里（入队与游标推进必须原子，
+ * 写回游标。不自开事务：调用方通常已在自己的事务里（入队与游标推进必须原子，
  * 否则崩溃会让游标前进而条目未入队 ⇒ 这批候选永久不可达）。
  */
 export async function writeL2PromotionCursor(
@@ -473,17 +453,17 @@ export async function writeL2PromotionCursor(
 /**
  * Story 1.9 读路径：`/memory status` 的层计数。
  *
- * 计数事实源只有 `memory` 表的 `layer` 列——Epic 1 无 INBOX 表、无 failed 存储
+ * 计数事实源只有 `memory` 表的 `layer` 列，Epic 1 无 INBOX 表、无 failed 存储
  * （`schema.ts` 只有 memory / l0_raw / omw_meta），队列与状态机属 Epic 2 Story 2.2。
- * 口径（spec Design Notes）：按 `layer` 聚合**全部行**，不套 `invalid_at` / `expired_at`
- * 过滤——status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
+ * 口径（spec Design Notes）：按 `layer` 聚合全部行，不套 `invalid_at` / `expired_at`
+ * 过滤，status 回答「系统规模 / 占用量」，与 list 的「当前有效快照」是不同问题。
  *
- * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回——
+ * 只展示四个已知层（spec 钉死的展示集合）；未知 `layer` 值不参与展示，也不入返回，
  * 出现即说明有未登记的写路径。Story 1.11 已把写路径收敛到 `'L1'`。
  *
- * 评审 P16②/T41 的**口径漂移**（2.5 之后这里只对 L1_INBOX 成立）：
+ * 评审 P16②/T41 的口径漂移（2.5 之后这里只对 L1_INBOX 成立）：
  * - `'L1_INBOX'` 仍是「memory 表 layer 列的历史计数位」（Story 1.7 的存量行会命中）；
- * - `'L2_INBOX'` 已**不再**由此计数——`/memory status` 读的是 `l2_inbox` 队列深度
+ * - `'L2_INBOX'` 已不再由此计数，`/memory status` 读的是 `l2_inbox` 队列深度
  *   （pending + processing，见 `index.ts` 的 getStatus）。保留它在本枚举里只为不破坏
  *   既有调用方与 Epic 1 的形状；本原语返回的 L2_INBOX 计数已无人消费。
  */
@@ -495,7 +475,7 @@ export type MemoryLayerCounts = Record<CountedMemoryLayer, number>
  * 库侧聚合：一条语句同时给出四层，避免 4 次查询。
  * 2026-11-11 实测 @ladybugdb/core 0.22.3 支持 `RETURN m.layer AS layer, count(m) AS total`
  * （按非聚合投影列分组，`total` 为 number）。但聚合支持度属数据库实现细节，故仍保留
- * `LIST_MEMORY_LAYERS_STATEMENT` 的 JS 侧退化路径——两条路径返回同一形状。
+ * `LIST_MEMORY_LAYERS_STATEMENT` 的 JS 侧退化路径，两条路径返回同一形状。
  */
 const COUNT_MEMORIES_BY_LAYER_STATEMENT = `MATCH (m:${MEMORY_TABLE}) RETURN m.layer AS layer, count(m) AS total`
 const LIST_MEMORY_LAYERS_STATEMENT = `MATCH (m:${MEMORY_TABLE}) RETURN m.layer AS layer`
@@ -517,7 +497,7 @@ function addLayerCount(counts: MemoryLayerCounts, layer: unknown, amount: number
 }
 
 /**
- * 按 `layer` 统计四个已知层的行数。**先探针**库侧聚合；聚合不可用时退化为
+ * 按 `layer` 统计四个已知层的行数。先探针库侧聚合；聚合不可用时退化为
  * `RETURN m.layer AS layer` + JS 侧 tally。两路径返回同一形状（已知层缺省补 0）。
  * 只读：不写库、不加写语句。
  */
@@ -537,11 +517,11 @@ export async function countMemoriesByLayer(connection: MemoryConnection): Promis
 }
 
 /**
- * Story 2.4 / U5：`/memory status` 的「未嵌入节点数」——把路径②（向量去重）看不见的节点
- * 变成可见数字。只数**当前快照**的行（与回填目标集同一口径：embedding 为 NULL 且满足
+ * Story 2.4 / U5：`/memory status` 的「未嵌入节点数」，把路径②（向量去重）看不见的节点
+ * 变成可见数字。只数当前快照的行（与回填目标集同一口径：embedding 为 NULL 且满足
  * `snapshot.ts` 的四条件），这样数字会随回填收敛到 0。只读。
  *
- * Story 3.1 / F-04：从「只看失效两列」换成共享快照谓词——future-valid（`valid_at > now`）
+ * Story 3.1 / F-04：从「只看失效两列」换成共享快照谓词，future-valid（`valid_at > now`）
  * 的节点在生效前不算当前快照，因而不进回填目标集（延后补齐，不是永久跳过）。
  * `now` 可注入（测试钉 clock）；缺省取当前时刻。
  */
@@ -568,10 +548,10 @@ export interface UnembeddedMemoryEntry {
 }
 
 /**
- * 取前 `limit` 条**当前快照**且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
+ * 取前 `limit` 条当前快照且无向量的节点，按 recorded_at 升序（先补最老的，进度可预期）。
  * 只读。回填侧对每轮的条数另有上界（U5：≤50）。
  *
- * Story 3.1 / F-04：谓词换成共享四条件（`$now` 绑定）——future-valid 节点在生效前不是
+ * Story 3.1 / F-04：谓词换成共享四条件（`$now` 绑定），future-valid 节点在生效前不是
  * 当前快照，延后到它生效后的那轮补齐（回填按 `recorded_at` 游标前进，不会永久跳过）。
  */
 const LIST_UNEMBEDDED_STATEMENT = [
@@ -600,8 +580,8 @@ export async function listUnembeddedMemories(
 
 /**
  * 幂等回填一条节点的向量三列（Story 2.4 / U5）。
- * `WHERE m.embedding IS NULL` 让并发/重放安全：第二次调用不再命中，返回 false ——
- * 因此**绝不覆盖**已有向量（Epic 1 遗留 NULL 是唯一目标，不会污染既有 HNSW 条目）。
+ * `WHERE m.embedding IS NULL` 让并发/重放安全：第二次调用不再命中，返回 false ，
+ * 因此绝不覆盖已有向量（Epic 1 遗留 NULL 是唯一目标，不会污染既有 HNSW 条目）。
  */
 const SET_MEMORY_EMBEDDING_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,

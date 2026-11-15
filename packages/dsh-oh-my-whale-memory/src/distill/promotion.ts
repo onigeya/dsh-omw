@@ -1,25 +1,25 @@
 /**
  * L1→L2 提升处理器（Story 2.5 / FR-5、epics.md:710-755）。
  *
- * 一次 process = 一个 l2_inbox 条目 = **一条**源 L1 → 一条 L2 候选（裁决 U3）：
+ * 一次 process = 一个 l2_inbox 条目 = 一条源 L1 → 一条 L2 候选（裁决 U3）：
  * 「多条 L1 → 一条 L2」的批量语义由调度方拆成多个条目，这样单次尝试仍在 30s 内完成、
  * lease 60s 依然有效（不引入续租 API）。
  *
  * 质量门（AC:728-734）的执行序（brief §2.3）：
- * - **写前**：判据① 逐引用可达性（checkRefReachableToL0，2.6 原语）+ 判据③ support 计数
+ * - 写前：判据① 逐引用可达性（checkRefReachableToL0，2.6 原语）+ 判据③ support 计数
  *   （存活 l0_raw 并集去重计数）。两项只读既有节点，失败即根本不写。
- * - **写事务 T1 内**：写 L2 候选（去重原语）→ 写 L1→L2 的 EVIDENCE 边（U15）→
- *   **同事务内**跑判据② checkReachableToL0(candidateId)。不过 ⇒ 抛 L2GateFailure 让 T1
+ * - 写事务 T1 内：写 L2 候选（去重原语）→ 写 L1→L2 的 EVIDENCE 边（U15）→
+ *   同事务内跑判据② checkReachableToL0(candidateId)。不过 ⇒ 抛 L2GateFailure 让 T1
  *   整体回滚（候选与边一起消失 = epics.md:744「丢弃候选」的原子实现）。
- * - **T2（另开事务）**：写候选失败账目 + 每个来源 L1 一条 gate-fail 标注行 + 标 done。
+ * - T2（另开事务）：写候选失败账目 + 每个来源 L1 一条 gate-fail 标注行 + 标 done。
  *
- * 两类失败必须分开（brief §3.5，本文件最容易写错的地方）：
- * - **调用失败**（System One / ctx.llm 网络、5xx、超时、响应畸形）⇒ 抛 InboxRefineError，
- *   交给消费者 failInboxItem（attempts+1 → 退避；第 4 次进死信）。**绝不**标 done：
- *   候选绝不会被静默丢弃（AD-15「调用失败 ≠ 判定失败」）。
- * - **判定失败**（三项外部信号任一不通过）⇒ **不是异常**：丢弃候选 + 来源 L1 标 gate-fail
+ * 两类失败必须分开（brief §3.5）：
+ * - 调用失败（System One / ctx.llm 网络、5xx、超时、响应畸形）⇒ 抛 InboxRefineError，
+ *   交给消费者 failInboxItem（attempts+1 → 退避；第 4 次进死信）。不标 done：
+ *   候选不会被静默丢弃（AD-15「调用失败 ≠ 判定失败」）。
+ * - 判定失败（三项外部信号任一不通过）⇒ 不是异常：丢弃候选 + 来源 L1 标 gate-fail
  *   + outcome='failure' + 标 done（v1 不重试，AC:742-745）。
- * - LLM 的判定**只标注、不丢弃**（AC:662）：faithful=false / conflict=true 只把 outcome
+ * - LLM 的判定只标注、不丢弃（AC:662）：faithful=false / conflict=true 只把 outcome
  *   写成 'uncertain'，节点照常落库。
  *
  * 不新增 schema：gate-fail 的连接键是 uuid5 内容键（裁决 U7），核实结果进 generation_log
@@ -41,7 +41,7 @@ import { writeEvidenceEdges } from '../db/edges.js'
 import { checkReachableToL0, checkRefReachableToL0 } from '../db/eii.js'
 import { memoryNodeId, uuid5 } from '../db/id.js'
 import { getMemoryById, type MemoryDetail } from '../db/memory.js'
-import { collectRows } from '../db/rows.js'
+import { queryRows } from '../db/rows.js'
 import { GENERATION_LOG_TABLE, L0_RAW_TABLE } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { EmbedClient } from '../embedding/client.js'
@@ -52,6 +52,7 @@ import type { LlmPort, RefineRoute } from './llm-refine.js'
 import { refineToL2, verifyL2Statement, type L2SourceFact } from './l2-refine.js'
 import {
   EMBEDDING_FAILED_REASON,
+  NO_PROVIDER_ROUTE_REASON,
   SEMANTIC_SCAN_DEGRADED_REASON,
   embedTexts,
   isProcessableStatus,
@@ -62,7 +63,7 @@ import {
   readEvidenceBackfillCursor,
 } from '../wiki/evidence-backfill.js'
 
-/** L2 记忆层值（层枚举只有 L1/L2；L2_INBOX 是**表名**，不是 layer 取值）。 */
+/** L2 记忆层值（层枚举只有 L1/L2；L2_INBOX 是表名，不是 layer 取值）。 */
 export const L2_LAYER = 'L2'
 
 /** l2_inbox 条目的 kind 标签（与 l1_inbox 的来源标签 step|turn|compaction 区分开）。 */
@@ -95,7 +96,7 @@ export const SYSTEMONE_FAITHFUL_KEY = 'faithful'
 
 /**
  * 评审 P21（T47）：指纹命中既有节点且该节点已 forget（expired_at 非空）时的候选软丢弃 reason。
- * 不产出 L2、不建边、**不连坐**来源 L1 的 gate-fail。
+ * 不产出 L2、不建边、不连坐来源 L1 的 gate-fail。
  */
 const EXPIRED_TARGET_REASON = 'expired-target'
 export const SYSTEMONE_CONFLICT_KEY = 'no-conflict'
@@ -103,7 +104,7 @@ export const SYSTEMONE_CONFLICT_KEY = 'no-conflict'
 /**
  * l2_inbox 条目 id（确定性内容键，与决策 U7 的 buildGateFailLogId 同一惯用法）。
  *
- * 同一条 L1 的重复触发算出同一 id；MERGE ON CREATE 只建一次、**不覆盖**既有行的
+ * 同一条 L1 的重复触发算出同一 id；MERGE ON CREATE 只建一次、不覆盖既有行的
  * status/attempts ⇒ 已提升或已丢弃过的 L1 不会被重新入队，崩溃重放也不产重条目（AC「v1 不重试」）。
  */
 export function buildL2PromotionItemId(l1Id: string): string {
@@ -137,7 +138,7 @@ export function parseL2PromotionPayload(payload: string): readonly string[] | nu
 
 /**
  * 判据② 不通过时的信号：让 T1 整体回滚（候选与边一起消失），再由 T2 另开事务写账目。
- * 它是**判定失败**（不是异常），故外壳把它当正常分支处理，绝不抛给消费者当失败重试。
+ * 它是判定失败（不是异常），故外壳把它当正常分支处理，不抛给消费者当失败重试。
  */
 class L2GateFailure extends Error {
   readonly reasons: readonly string[]
@@ -161,15 +162,6 @@ const LIVE_L0_COUNT_STATEMENT = [
 const GATE_FAIL_EXISTS_STATEMENT =
   'MATCH (g:' + GENERATION_LOG_TABLE + ' {id: $id}) RETURN g.id AS id'
 
-async function queryRows(
-  connection: lbug.Connection,
-  statement: string,
-  params: Record<string, lbug.LbugValue> = {},
-): Promise<Record<string, unknown>[]> {
-  const prepared = await connection.prepare(statement)
-  return collectRows(await connection.execute(prepared, params))
-}
-
 /**
  * 判据③ support：候选 source_refs[] 在 L0 命中且非墓碑的条数（U16 口径）。
  * L2 的 ref 是直接前驱 L1 ⇒ 取各 L1 的 source_refs（L0 id 集）并集去重后计数（brief §2.4）。
@@ -184,7 +176,7 @@ async function countSupport(
   return Number(rows[0]?.live ?? 0)
 }
 
-/** 来源 L1 的 kind 主流值（并列取先达到者，裁决 U11）；无来源时回落到 L2 自身判定。 */
+/** 来源 L1 的 kind 主流值（并列取先达到者，裁决 U11）；无来源时返回空串（不猜）。 */
 function dominantKind(sources: readonly MemoryDetail[]): string {
   const counts = new Map<string, number>()
   for (const node of sources) {
@@ -236,9 +228,9 @@ async function insertL2Audit(
 }
 
 /**
- * 给来源 L1 落一条 gate-fail 标注行（AC:745）。行 id 是确定性内容键，故先点查存在性再 CREATE
- * ——generation_log 的主键是 id，重复 CREATE 会撞键并让整个事务回滚（append-only，不能 UPsert）。
- * 标注**不改变 L1 的可召回性**（L1 仍有效，只是被标注）。
+ * 给来源 L1 落一条 gate-fail 标注行（AC:745）。行 id 是确定性内容键，故先点查存在性再 CREATE：
+ * generation_log 的主键是 id，重复 CREATE 会撞键并让整个事务回滚（append-only，不能 UPsert）。
+ * 标注不改变 L1 的可召回性（L1 仍有效，只是被标注）。
  */
 async function markGateFail(
   connection: lbug.Connection,
@@ -255,8 +247,8 @@ async function markGateFail(
     actor: 'system',
     kind: REFINE_KIND,
     action: GATE_FAIL_ACTION,
-    // 评审 P16③（T35）：与同族的 insertL2Audit 同 policy —— 否则按 policy 过滤审计的消费者
-    // 会漏掉**全部** gate-fail 行（spec §3.6 声明的口径）。
+    // 评审 P16③（T35）：与同族的 insertL2Audit 同 policy，否则按 policy 过滤审计的消费者
+    // 会漏掉全部 gate-fail 行（spec §3.6 声明的口径）。
     policy: L2_PROMOTION_POLICY,
     outcome: 'failure',
     reason: GATE_FAIL_REASON_PREFIX + ': ' + reason,
@@ -306,9 +298,9 @@ export interface L2PromotionDeps {
 
 /**
  * 忠实性核实（AC:736-740 / AD-15）：System One 优先；配置态关闭或运行态降级时整体回落
- * ctx.llm **单次**检查。返回的只是**标注**（不参与丢弃决策）。
+ * ctx.llm 单次检查。返回的只是标注（不参与丢弃决策）。
  *
- * **调用失败一律抛 InboxRefineError**（AD-15「调用失败 ≠ 判定失败」）⇒ 消费者 failInboxItem
+ * 调用失败一律抛 InboxRefineError（AD-15「调用失败 ≠ 判定失败」）⇒ 消费者 failInboxItem
  * 退避重试、候选留在队列里。唯一例外是「本次失败恰好把运行态推进到降级阈值」：那一次按
  * AC:674 整体降级回 ctx.llm，不再抛（否则永远走不到降级分支）。
  */
@@ -327,9 +319,9 @@ async function judgeStatement(
   const threshold = SYSTEMONE_NOUL_THRESHOLD
   const client = deps.systemOne ?? null
   const before = client?.runtimeState() ?? null
-  // 评审 P5（T37）：运行态已降级就别再调 —— 否则每条候选都白等一次完整的 System One 超时。
+  // 评审 P5（T37）：运行态已降级就别再调，否则每条候选都白等一次完整的 System One 超时。
   // 评审 P19（T45）：配置态关闭同样直接回落（客户端此时也会返回 disabled-by-config，但它
-  // 不该被当成端点故障抛出 —— 那会让候选 4 次退避后进死信，而正确行为是降级回 ctx.llm）。
+  // 不该被当成端点故障抛出：那会让候选 4 次退避后进死信，而正确行为是降级回 ctx.llm）。
   if (client !== null && before !== null && before.enabled && !before.degraded) {
     const result = await client.judge(
       buildJudgeState(input.statement, input.facts),
@@ -343,8 +335,8 @@ async function judgeStatement(
           instructions: '该陈述是否与来源 L1 互相矛盾、或与来源中已成立的事实不相容？返回 1 表示不冲突，0 表示冲突。',
         },
       },
-      // 评审 P20（T46）：System One 用**任务级**预算（30s）+ 客户端内部的 10s 超时，
-      // 不与 LLM 的 20s 子预算共享 —— 否则综合耗 19s 时核实只剩 1s。
+      // 评审 P20（T46）：System One 用任务级预算（30s）+ 客户端内部的 10s 超时，
+      // 不与 LLM 的 20s 子预算共享，否则综合耗 19s 时核实只剩 1s。
       // 这里传任务信号（而非组合信号）也保住了 P4 的判定：只有调用方真的中止才算 abort。
       input.systemOneSignal,
     )
@@ -412,7 +404,7 @@ async function judgeStatement(
   }
 }
 
-/** 调用失败时的失败审计：**另开事务**（调用方事务可能已回滚），且**不**标 done。 */
+/** 调用失败时的失败审计：另开事务（调用方事务可能已回滚），且不标 done。 */
 async function recordPromotionFailure(
   connection: lbug.Connection,
   refs: readonly string[],
@@ -433,14 +425,14 @@ async function recordPromotionFailure(
 
 /**
  * 丢弃候选（外部信号不通过，AC:742-745）：一个事务里标 done + 写候选失败行 +
- * 给每个来源 L1 落 gate-fail 标注行。v1 **不重试**（条目已 done，确定性入队 id 也不会重新入队）。
+ * 给每个来源 L1 落 gate-fail 标注行。v1 不重试（条目已 done，确定性入队 id 也不会重新入队）。
  */
 async function discardCandidate(
   connection: lbug.Connection,
   item: InboxItem,
   /** 审计行的 l0_refs（向下证据引用）：来源 L1 的 id 集。 */
   refs: readonly string[],
-  /** 要标 gate-fail 的**来源 L1** id 集；payload 非法等情形传空（没有可信的来源）。 */
+  /** 要标 gate-fail 的来源 L1 id 集；payload 非法等情形传空（没有可信的来源）。 */
   gateFailIds: readonly string[],
   reasons: readonly string[],
   now: () => Date,
@@ -448,11 +440,11 @@ async function discardCandidate(
   const reason = reasons.length > 0 ? reasons.join('+') : GATE_FAIL_REASON_PREFIX
   await runInTransaction(connection, async () => {
     // 评审 P10（T11）：markDone 带 status='processing' 守卫，返回 false 表示条目已被别处处理
-    // （at-most-once 命中）。此时**不得**再写失败账目与 gate-fail —— 否则制造「无产出却有失败账」。
+    // （at-most-once 命中）。此时不得再写失败账目与 gate-fail，否则制造「无产出却有失败账」。
     if (!(await l2InboxQueue.markDone(connection, item.id, { now: now() }))) return
     await insertL2Audit(connection, refs.length > 0 ? refs : [item.id], L2_PROMOTION_ACTION, 'failure', reason, now)
     for (const l1Id of gateFailIds) {
-      // 评审 P22（T48）：标注行写**完整原因串**（与账目同一个 reasons.join），不再只取第一条。
+      // 评审 P22（T48）：标注行写完整原因串（与账目同一个 reasons.join），不再只取第一条。
       await markGateFail(connection, l1Id, reason, now)
     }
   })
@@ -483,12 +475,12 @@ export function createL2PromotionProcessor(
       return { completed: true, kinds: [] }
     }
 
-    // 来源 L1 必须存在且**是 L1 层**；否则这次提升没有语义基础。
+    // 来源 L1 必须存在且是 L1 层；否则这次提升没有语义基础。
     const sources: MemoryDetail[] = []
     for (const l1Id of l1Ids) {
       const node = await getMemoryById(connection, l1Id)
       if (node === null || node.layer !== MEMORY_REMEMBER_LAYER) {
-        // 评审 P11（T15）：只标**缺失的那一个**来源，不连坐同批其它来源。
+        // 评审 P11（T15）：只标缺失的那一个来源，不连坐同批其它来源。
         await discardCandidate(connection, item, l1Ids, [l1Id], [L2_GATE_REASONS.sourceNotFound], now)
         return { completed: true, kinds: [] }
       }
@@ -500,10 +492,10 @@ export function createL2PromotionProcessor(
     // 判据①（写前，AC:730）：候选 source_refs[] 的每个引用都能回溯到非墓碑 L0。
     // L2 的 ref 是直接前驱 L1 ⇒ 委派 checkReachableToL0（2.6 原语，U4 口径）。
     //
-    // 评审 P11（T15）：gate-fail 只标**真正失败**的来源，不再把整批 l1Ids 传下去。
-    // 评审 P18（T44）：失败还要**分级** —— `no-evidence-edge` 在升级库里是「暂时」的
+    // 评审 P11（T15）：gate-fail 只标真正失败的来源，不再把整批 l1Ids 传下去。
+    // 评审 P18（T44）：失败还要分级，`no-evidence-edge` 在升级库里是「暂时」的
     // （2.6 边表之前写入的 L1 没有边；证据回填按 recorded_at ASC 每轮 ≤50，可能还没跑到它）。
-    // 把它当判定失败会让候选 done + 来源**永久** gate-fail，而回填事后补边也救不回来。
+    // 把它当判定失败会让候选 done + 来源永久 gate-fail，而回填事后补边也救不回来。
     const refFailures: string[] = []
     const failedSourceIds: string[] = []
     let evidencePending = false
@@ -519,7 +511,7 @@ export function createL2PromotionProcessor(
     if (refFailures.length > 0) {
       if (evidencePending) {
         const cursor = await readEvidenceBackfillCursor(connection)
-        // 仅在回填**已跑完**（游标 'done'）且仍无入边时才转终局丢弃。
+        // 仅在回填已跑完（游标 'done'）且仍无入边时才转终局丢弃。
         if (cursor !== EVIDENCE_BACKFILL_DONE) {
           await recordPromotionFailure(connection, l1Ids, { reason: refFailures.join('+'), retryable: true }, now)
           throw new InboxRefineError(
@@ -544,7 +536,7 @@ export function createL2PromotionProcessor(
     // ① 路由闸门（N5）：解析失败直接降级、不调 LLM；按失败路径记账（队列重试）。
     const route = deps.resolveRoute(item.sessionId)
     if (!route) {
-      const failure = { reason: 'no-provider-route', retryable: true }
+      const failure = { reason: NO_PROVIDER_ROUTE_REASON, retryable: true }
       await recordPromotionFailure(connection, l1Ids, failure, now)
       throw new InboxRefineError(
         '未解析到可用的 provider/model 路由（session=' + item.sessionId + '）',
@@ -566,7 +558,7 @@ export function createL2PromotionProcessor(
     }
     const statement = refined.statement.text
 
-    // 写时嵌入在写事务**之前**（AC:755：L2 与 L1 同规则）。失败不阻塞 L2 写入。
+    // 写时嵌入在写事务之前（AC:755：L2 与 L1 同规则）。失败不阻塞 L2 写入。
     const embedded = await embedTexts(deps.embedding, deps.embeddingModel, [statement], signal)
     const vector = embedded.vectors[0] ?? null
     if (embedded.failure) {
@@ -578,7 +570,7 @@ export function createL2PromotionProcessor(
 
     // 忠实性核实：只标注、不丢弃；调用失败即抛（候选留队列重试）。
     // 调用失败同样要落一条账目（reason = 上游失败原因），否则这条候选为什么被重试在
-    // generation_log 里完全不可见——Story 7.2 按 outcome 过滤时会整批漏掉它们。
+    // generation_log 里完全不可见：Story 7.2 按 outcome 过滤时会整批漏掉它们。
     let verdict: L2Verdict
     try {
       verdict = await judgeStatement(deps, {
@@ -595,7 +587,7 @@ export function createL2PromotionProcessor(
       throw error
     }
 
-    // kind / priority 按 AC:723-726 从来源 L1 **继承**（不采信模型自己的分类）：
+    // kind / priority 按 AC:723-726 从来源 L1 继承（不采信模型自己的分类）：
     // kind = 来源主流值（并列取先达到者，U11）、priority = 来源最大值。
     const kind = dominantKind(sources)
     const priority = maxPriority(sources)
@@ -609,9 +601,9 @@ export function createL2PromotionProcessor(
       await runInTransaction(connection, async () => {
         marked = await l2InboxQueue.markDone(connection, item.id, { now: now() })
         if (!marked) return
-        // 评审 P21（T47）：去重原语的指纹路径命中的既有节点可能是**已 forget（expired）**的。
+        // 评审 P21（T47）：去重原语的指纹路径命中的既有节点可能是已 forget（expired）的。
         // 那时 writeDeduplicatedMemory 会返回该过期节点，判据② 随即 not-effective ⇒ L2GateFailure
-        // ⇒ 回滚 + discardCandidate ⇒ 全部来源 L1 被**永久** gate-fail。正确语义是「软丢弃」：
+        // ⇒ 回滚 + discardCandidate ⇒ 全部来源 L1 被永久 gate-fail。正确语义是「软丢弃」：
         // 候选照常了结（done），但不产出 L2、不建边、不连坐来源。
         const expiredTarget = await getMemoryById(connection, memoryNodeId(L2_LAYER, statement))
         if (expiredTarget !== null && expiredTarget.expiredAt !== null) {
@@ -640,7 +632,9 @@ export function createL2PromotionProcessor(
           },
           { now, logger: deps.logger, scanFailure: 'throw', skipSemanticScan },
         )
-        // U15：EVIDENCE 边必须与 L2 节点**同事务**写入（不得依赖 backfill 兜底）。
+        // 本条候选的审计引用：来源 L1 + 新 L2（下面 4 条审计共用同一清单）。
+        const auditRefs = [...l1Ids, written.id]
+        // U15：EVIDENCE 边必须与 L2 节点同事务写入（不得依赖 backfill 兜底）。
         const edges = await writeEvidenceEdges(
           connection,
           sources.map((node) => ({
@@ -657,7 +651,7 @@ export function createL2PromotionProcessor(
         if (!reach.pass) throw new L2GateFailure(reach.failingReasons)
         await insertL2Audit(
           connection,
-          [...l1Ids, written.id],
+          auditRefs,
           L2_PROMOTION_ACTION,
           verdict.outcome,
           verdict.reason,
@@ -672,7 +666,7 @@ export function createL2PromotionProcessor(
         if (edges.skipped.length > 0) {
           await insertL2Audit(
             connection,
-            [...l1Ids, written.id],
+            auditRefs,
             WRITE_EVIDENCE_SKIPPED_ACTION,
             'uncertain',
             'skipped=' + String(edges.skipped.length),
@@ -682,7 +676,7 @@ export function createL2PromotionProcessor(
         if (embedded.failure) {
           await insertL2Audit(
             connection,
-            [...l1Ids, written.id],
+            auditRefs,
             L2_PROMOTION_ACTION,
             'uncertain',
             EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
@@ -692,7 +686,7 @@ export function createL2PromotionProcessor(
         if (scanDegraded !== null) {
           await insertL2Audit(
             connection,
-            [...l1Ids, written.id],
+            auditRefs,
             L2_PROMOTION_ACTION,
             'uncertain',
             SEMANTIC_SCAN_DEGRADED_REASON + ': ' + scanDegraded,

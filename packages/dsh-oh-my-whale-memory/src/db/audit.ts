@@ -6,7 +6,7 @@
  *
  * - generation_log：溯源行（recorded_at / actor / kind / action / policy / l0_refs[] /
  *   outcome / reason）＋ 级联记账（cascade_depth / trigger_id）＋ FR-8 核实结果
- *   （question_key / probability / threshold / passed）。只 append、永不改写（与 L0 同
+ *   （question_key / probability / threshold / passed）。只 append、不改写（与 L0 同
  *   精神，AD-21）。
  * - keyed_decision：keyed 裁决记录（judge_key / new_id / old_id / action / policy /
  *   l0_refs[] / resolution_source / write_pending）＋ 失效因果（invalidated_by，
@@ -24,7 +24,7 @@
 import { randomUUID } from 'node:crypto'
 import type * as lbug from '@ladybugdb/core'
 import { runPrepared, runStatement } from './backend.js'
-import { MemoryDbError } from './errors.js'
+import { MemoryDbError, isMissingTableError } from './errors.js'
 import { uuid5 } from './id.js'
 import { collectRows, queryAll } from './rows.js'
 import {
@@ -48,7 +48,7 @@ export type KeyedDecisionAction = 'supersede' | 'merge' | 'await-confirmation'
 /** 裁决来源三档（AD-18 / A-11：v1 只加字段、不加流程）。 */
 export type ResolutionSource = 'auto' | 'review' | 'user'
 
-/** 采集写路径的 kind 取值——Epic 1 唯一接线的写路径。 */
+/** 采集写路径的 kind 取值，Epic 1 唯一接线的写路径。 */
 export const CAPTURE_KIND = 'capture'
 
 /** 采集写路径的 action 取值。 */
@@ -81,12 +81,6 @@ export const BACKFILL_EMBEDDING_ACTION = 'backfill_embedding'
  */
 export const RESURRECT_MEMORY_ACTION = 'resurrect_memory'
 
-/**
- * EVIDENCE 结构写边（Story 2.6 / AD-10）：精炼结构在写 L1 的**同一事务**内建
- * l0_raw→memory 边。EVIDENCE 的唯一写者就是这条路径（裁决 U4）。
- */
-export const WRITE_EVIDENCE_ACTION = 'write_evidence'
-
 /** X1 历史回填（Story 2.6 / 裁决 X1）：把建表前既有节点的 source_refs[] 物化为 EVIDENCE 边。 */
 export const BACKFILL_EVIDENCE_ACTION = 'backfill_evidence'
 
@@ -101,7 +95,7 @@ export const REJECT_EVIDENCE_ACTION = 'reject_evidence'
 
 /**
  * EVIDENCE 写边被跳过的边数（Story 2.6 评审 P16/T18）。原先 processor 把这行写成
- * `refine_inbox` 的 reason 文本 ⇒ 审计在库里但 `countRelatedSkips` 统计不到。
+ * `refine_inbox` 的 reason 文本，审计在库里但 `countRelatedSkips` 统计不到。
  * 独立成 action 后由 `/memory status` 的降级计数覆盖（AD-21：降级必须可见）。
  */
 export const WRITE_EVIDENCE_SKIPPED_ACTION = 'write_evidence_skipped'
@@ -114,21 +108,18 @@ export const L2_PROMOTION_ACTION = 'l2_promotion'
 
 /**
  * 来源 L1 被标 `gate-fail` 的标注行 action（Story 2.5 / epics.md:744「丢弃候选并将来源 L1 标 gate-fail」）。
- * **不是**对 L1 的作废：L1 仍可召回，这里只落一条标注行。
+ * 不是对 L1 的作废：L1 仍可召回，这里只落一条标注行。
  */
 export const GATE_FAIL_ACTION = 'gate_fail'
 
-/** 质量门策略标识（generation_log.policy）——capture 路径的 last-writer-wins 不适用。 */
+/** 质量门策略标识（generation_log.policy），capture 路径的 last-writer-wins 不适用。 */
 export const L2_PROMOTION_POLICY = 'eii-l1-l2-v1'
-
-/** 直接作废（非级联）的级联深度 = 0（AD-19）。 */
-export const DIRECT_CASCADE_DEPTH = 0
 
 /** 一条溯源 / 级联 / 核实记账行。缺省值一律落 null，不落空串。 */
 export interface GenerationLogEntry {
-  /** 缺省由本层生成 UUIDv4。崩溃重放要幂等时由调用方给**确定性** id。 */
+  /** 缺省由本层生成 UUIDv4。崩溃重放要幂等时由调用方给确定性 id。 */
   id?: string
-  /** 本次**操作**时间（UTC ISO-8601），不是节点最终 recorded_at。 */
+  /** 本次操作时间（UTC ISO-8601），不是节点最终 recorded_at。 */
   recordedAt: string
   actor: MemoryActor
   /** capture | refine | verify | cascade | redact（AD-21）。 */
@@ -145,7 +136,7 @@ export interface GenerationLogEntry {
   probability?: number | null
   threshold?: number | null
   passed?: boolean | null
-  /** 级联记账：被波及记忆的级联深度，直接作废为 DIRECT_CASCADE_DEPTH。 */
+  /** 级联记账：被波及记忆的级联深度，直接作废为 0。 */
   cascadeDepth?: number | null
   /** 级联记账：触发源 generation_log 行 id。 */
   triggerId?: string | null
@@ -172,9 +163,9 @@ export interface KeyedDecisionEntry {
 export interface InvalidationCauseInput {
   /** keyed_decision 主键（AD-18 键式）。 */
   judgeKey: string
-  /** 有向边对的 source：**新事实**（触发者）。 */
+  /** 有向边对的 source：新事实（触发者）。 */
   sourceId: string
-  /** 有向边对的 target：**被失效者**。 */
+  /** 有向边对的 target：被失效者。 */
   targetId: string
   /** 触发 id（通常是对应 generation_log 行的 id）。 */
   triggerId: string
@@ -221,11 +212,11 @@ const SET_INVALIDATED_BY = [
 ].join('\n')
 
 /**
- * v1 只读校验器口径：audit_gap 的**可计算子集**——已失效（invalid_at 或 expired_at）
+ * v1 只读校验器口径：audit_gap 的可计算子集，即已失效（invalid_at 或 expired_at）
  * 却没有 keyed 裁决记录可重建的版本写入（AC :441 / AD-21 三集之一）。另两集见
  * `computeEvidenceGap`（Story 2.6，src/db/eii.ts）：EII 违例与 EVIDENCE 边/source_refs[] 漂移。
- * 两者口径分工：**audit_gap = 缺裁决记录**（本语句，与边表无关）；
- * **evidence_gap = 缺证据链/账边不一致**（`/memory status` 里单独一行渲染）。
+ * 两者口径分工：audit_gap = 缺裁决记录（本语句，与边表无关）；
+ * evidence_gap = 缺证据链/账边不一致（`/memory status` 里单独一行渲染）。
  */
 const AUDIT_GAP_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
@@ -254,12 +245,12 @@ export function buildJudgeKey(policy: string, oldId: string, newId: string): str
 /**
  * 来源 L1 的 `gate-fail` 标注行 id（Story 2.5 / U7 选项 E）。
  *
- * 硬约束背景：generation_log 15 列**没有任何列指向 memory 节点**（无 memory_id/subject_id；
+ * 硬约束背景：generation_log 15 列没有任何列指向 memory 节点（无 memory_id/subject_id；
  * `trigger_id` 是触发源 log 行 id，不是记忆 id），memory 表也没有 log 行 id 列，且
  * `writeMemoryVersion` 丢弃 `insertGenerationLog` 的返回值 ⇒ 「L1 X 是否被标 gate-fail」
  * 今天既不能 JOIN 也不能按 L1 id 查回。
  *
- * 解法：用 uuid5 内容键造**确定性行 id**（`GenerationLogEntry.id` 已为此留口子），
+ * 解法：用 uuid5 内容键造确定性行 id（`GenerationLogEntry.id` 已为此留口子），
  * 于是判定退化为 O(1) 的点查 `MATCH (g:generation_log {id: $expected})`，
  * 且崩溃重放不产重行（与 {@link buildJudgeKey} 同一惯用法）。
  */
@@ -269,7 +260,7 @@ export function buildGateFailLogId(l1Id: string): string {
 
 /**
  * AD-18 / AD-19 的 invalidated_by 键形态，有向：source = 新事实、target = 被失效者。
- * 同一对边被多次触发时在**同一个键**下追加触发 id 列表，故键只含 id 对、不含触发 id。
+ * 同一对边被多次触发时在同一个键下追加触发 id 列表，故键只含 id 对、不含触发 id。
  */
 export function buildInvalidatedByKey(sourceId: string, targetId: string): string {
   return sourceId + '|' + targetId
@@ -288,7 +279,7 @@ export async function ensureAuditTables(connection: lbug.Connection): Promise<vo
 }
 
 /**
- * 追加一条 generation_log 行，返回其 id。只 append，绝不改写既有行。
+ * 追加一条 generation_log 行，返回其 id。只 append，不改写既有行。
  * 15 列全部显式绑定（缺省值绑 null／空列表），避免"列没出现在语句里"这种隐式行为。
  */
 export async function insertGenerationLog(
@@ -321,7 +312,7 @@ export async function insertGenerationLog(
 /**
  * 落一条 keyed 裁决记录，返回 judge_key。
  *
- * 用 MERGE 而非 CREATE：judge_key 是内容键（AD-18），崩溃重放同一裁决必须幂等——
+ * 用 MERGE 而非 CREATE：judge_key 是内容键（AD-18），崩溃重放同一裁决必须幂等，
  * CREATE 撞主键会报错并让整个写事务回滚。既有键的字段保持首次写入的值。
  */
 export async function insertKeyedDecision(
@@ -346,7 +337,7 @@ export async function insertKeyedDecision(
 }
 
 /**
- * 把 write_pending 翻回 false——崩溃恢复在「先重放 write_pending」之后调它。
+ * 把 write_pending 翻回 false，崩溃恢复在「先重放 write_pending」之后调它。
  * key 不存在时报 audit_record_missing（不静默 no-op）。
  */
 export async function markKeyedDecisionPublished(
@@ -367,14 +358,14 @@ export async function listPendingKeyedDecisions(connection: lbug.Connection): Pr
 }
 
 /**
- * 回填一次失效因果：在 (source, target) 边对的键下**追加**触发 id。
+ * 回填一次失效因果：在 (source, target) 边对的键下追加触发 id。
  *
  * 追加、不覆盖（graphiti 的 dict[str, list[str]] 形态）；同一触发 id 已在列则原样返回，
  * 使重放幂等。级联行本身由 insertGenerationLog 写（带 cascadeDepth / triggerId），
  * 与主操作同事务。
  *
- * 本函数是「读-复制-写整个 MAP 列」，自己不开事务：**必须由调用方在自己的
- * runInTransaction 内调用**（连同级联行一起提交），否则并发追加会互相覆盖。
+ * 本函数是「读-复制-写整个 MAP 列」，自己不开事务：必须由调用方在自己的
+ * runInTransaction 内调用（连同级联行一起提交），否则并发追加会互相覆盖。
  */
 export async function appendInvalidationCause(
   connection: lbug.Connection,
@@ -408,9 +399,9 @@ export async function appendInvalidationCause(
  * 疑似失效账目计数（Story 2.5 / 评审 P8-T27）：`generation_log` 里 outcome='uncertain' 的行数。
  *
  * 存在的理由：U14 要求「LLM 标疑的候选进疑似失效队列且 status 可见」（epics.md:740、NFR12），
- * 但在此之前只有**写侧**（promotion 记 uncertain）没有任何读取出口。
+ * 但在此之前只有写侧（promotion 记 uncertain）没有任何读取出口。
  *
- * 返回 null 表示算不出来（审计表不存在）——调用方渲染成「未知」，绝不静默报 0（同 computeAuditGap）。
+ * 返回 null 表示算不出来（审计表不存在），调用方渲染成「未知」，不静默报 0（同 computeAuditGap）。
  */
 export async function countUncertainAudits(connection: lbug.Connection): Promise<number | null> {
   try {
@@ -419,8 +410,7 @@ export async function countUncertainAudits(connection: lbug.Connection): Promise
     const value = rows[0]?.total
     return Number(value ?? 0)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
-    if (/does not exist/i.test(message)) return null
+    if (isMissingTableError(error)) return null
     throw error
   }
 }
@@ -428,21 +418,20 @@ export async function countUncertainAudits(connection: lbug.Connection): Promise
 /**
  * audit_gap 计数：已失效却没有 keyed 裁决记录的版本写入条数。
  *
- * 返回 null 表示**算不出来**（审计表不存在）——调用方必须显式展示「未知」，绝不静默报 0。
+ * 返回 null 表示算不出来（审计表不存在），调用方必须显式展示「未知」，不静默报 0。
  * 其它错误照抛。
  */
 export async function computeAuditGap(connection: lbug.Connection): Promise<number | null> {
   try {
-    // 账本不完整（任一张审计表缺失）时差额算不出来，绝不静默报 0。
+    // 账本不完整（任一张审计表缺失）时差额算不出来，不静默报 0。
     await queryAll(connection, GENERATION_LOG_PROBE)
     await queryAll(connection, KEYED_DECISION_PROBE)
     const rows = await queryAll(connection, AUDIT_GAP_STATEMENT)
     const value = rows[0]?.gap
     return typeof value === 'number' ? value : Number(value ?? 0)
   } catch (error) {
-    const message = error instanceof Error ? error.message : String(error)
     // 实测文案："Binder exception: Table generation_log does not exist."（T41）
-    if (/does not exist/i.test(message)) return null
+    if (isMissingTableError(error)) return null
     throw error
   }
 }

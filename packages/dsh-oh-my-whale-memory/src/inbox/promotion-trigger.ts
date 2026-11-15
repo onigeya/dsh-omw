@@ -1,10 +1,10 @@
 /**
  * L1→L2 提升触发信号（Story 2.2 / Q-3 拍板）。
  *
- * 本 story 只负责**发出信号**：阈值成立时回调一次；L2 批量提升本体是 Story 2.5。
+ * 本 story 只负责发出信号：阈值成立时回调一次；L2 批量提升本体是 Story 2.5。
  * 两个阈值（epic 原文）：
  * - L1 累计满 20 条（每次跨过 20 的整数倍触发一次）；
- * - 单会话结束（观测边界是 turn/end）满 5 条**同 kind**。
+ * - 单会话结束（观测边界是 turn/end）满 5 条同 kind。
  */
 export const L1_PROMOTION_THRESHOLD = 20
 export const SESSION_END_KIND_THRESHOLD = 5
@@ -63,8 +63,8 @@ export interface PromotionTracker {
   /** 每有一条 L1 精炼落库时调用（按会话 + kind 累计）。 */
   recordL1(input: { readonly sessionId: string; readonly kind: string }): void
   /**
-   * 会话结束（**边界 = turn/end**——宿主没有会话级结束事件，已知事件类型只有 turn/start 与
-   * turn/end，U22）时调用：检查该会话同 kind 计数并**清空**该会话计数。
+   * 会话结束（边界 = turn/end；宿主没有会话级结束事件，已知事件类型只有 turn/start 与
+   * turn/end，U22）时调用：检查该会话同 kind 计数并清空该会话计数。
    */
   recordSessionEnd(input: { readonly sessionId: string; readonly kind?: string }): void
   readonly totalL1: number
@@ -80,7 +80,7 @@ export interface PromotionTrackerOptions {
 
 /**
  * 有状态累计器：按会话 + kind 计数，L1 全局累计。
- * `recordSessionEnd` 只看该会话内**条数最多的 kind**（并列取先达到者）判定「同 kind 满 5 条」，
+ * `recordSessionEnd` 只看该会话内条数最多的 kind（并列取先达到者）判定「同 kind 满 5 条」，
  * L1 累计分支不在此参与；判完清掉该会话的计数（否则同一批条目会在之后每次 turn/end 重复触发）。
  * 「会话结束」只能按 turn/end 观测（宿主无会话级结束事件，U22），故这里的 5 条同 kind 实际是
  * 「截至该 turn 边界累计」；清空计数保证同一批条目不会在此后的每个 turn/end 重复发信号。
@@ -114,9 +114,8 @@ export function createPromotionTracker(options: PromotionTrackerOptions): Promot
     recordSessionEnd(input) {
       const kinds = sessionKinds.get(input.sessionId)
       sessionKinds.delete(input.sessionId)
-      const total = sessionTotals.get(input.sessionId) ?? 0
       sessionTotals.delete(input.sessionId)
-      if (!kinds || total === 0) return
+      if (!kinds) return
       let kind = input.kind ?? ''
       let count = kinds.get(kind) ?? 0
       if (!input.kind) {
@@ -128,7 +127,7 @@ export function createPromotionTracker(options: PromotionTrackerOptions): Promot
         }
       }
       // 只判「同 kind」分支（totalL1 传 0 即让累计分支不参与）：L1 累计信号归 recordL1。
-      // 若这里也带上 totalL1，当它正好是阈值整数倍时 l1-total 会优先命中——既对同一计数
+      // 若这里也带上 totalL1，当它正好是阈值整数倍时 l1-total 会优先命中：既对同一计数
       // 重复发信号，又吞掉本次「会话结束」信号（会话计数随即清空，信号永久丢失）。
       const sessionTrigger = evaluatePromotionTrigger({
         totalL1: 0,

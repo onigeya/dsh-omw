@@ -1,9 +1,9 @@
 /**
  * 查询结果行归一（Story 1.10 从 ./memory.ts 抽出）。
  *
- * LadybugDB 只在**多语句**时才把结果包成数组（见
+ * LadybugDB 只在多语句时才把结果包成数组（见
  * node_modules/@ladybugdb/core/lbug.d.ts:250/287），单语句返回裸 QueryResult。
- * 这条非显然规则只在本文件陈述一次——写查询与读查询各自复制一份是 bug 源头。
+ * 这条非显然规则只在本文件陈述一次，写查询与读查询各自复制一份是 bug 源头。
  *
  * 抽成独立模块的原因：审计层（./audit.ts）与记忆层（./memory.ts）都要用它，
  * 而 ./memory.ts 反过来要 import 审计层；helper 留在 ./memory.ts 会形成模块环
@@ -13,7 +13,7 @@ import type * as lbug from '@ladybugdb/core'
 import { closeQueryResult, collectResultRows } from './backend.js'
 
 /**
- * 取第一条结果集的全部行（多语句时 query() 返回结果集数组），并**释放结果对象**。
+ * 取第一条结果集的全部行（多语句时 query() 返回结果集数组），并释放结果对象。
  *
  * 取行与释放必须成对：结果对象存活即 pin 住 buffer pool 的页，泄漏会在若干次查询后把池
  * 塞满并让同连接的一切查询/写入失败（实测见 backend.ts 的 closeQueryResult）。
@@ -36,4 +36,29 @@ export async function queryAll(
   statement: string,
 ): Promise<Record<string, unknown>[]> {
   return collectRows(await connection.query(statement))
+}
+
+/**
+ * 参数化查询取全部行（prepare + execute，绑定值走参数不走字符串拼接）。
+ *
+ * 全仓唯一实现：读路径都要「取行 + 释放」，各处各抄一份就总有漏释放的风险
+ * （结果对象存活即 pin 住 buffer pool，见 backend.ts 的 closeQueryResult）。
+ */
+export async function queryRows(
+  connection: lbug.Connection,
+  statement: string,
+  params: Record<string, lbug.LbugValue> = {},
+): Promise<Record<string, unknown>[]> {
+  const prepared = await connection.prepare(statement)
+  return collectRows(await connection.execute(prepared, params))
+}
+
+/** 行值归一：NULL/undefined → null，其余 `String(value)`（列里的 null 是「未设置」，与空串不同）。 */
+export function nullishString(value: unknown): string | null {
+  return value === null || value === undefined ? null : String(value)
+}
+
+/** STRING[] 列归一：NULL → `[]`，元素逐个 `String()`。 */
+export function toStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.map(String) : []
 }

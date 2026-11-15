@@ -1,27 +1,23 @@
 /**
  * dsh-oh-my-whale-memory function 插件入口。
  *
- * 五件套命名导出形态由 PRD §14 / postmortem 0001 锁定：宿主 Loader 只识别命名导出
- * `name`/`inject`/`Config`/`apply`；default export 会让 Loader 丢弃 function 插件命名空间
- * ——本文件禁用 default export。
+ * 命名导出形态由 PRD §14 / postmortem 0001 锁定：Loader 只识别 `name`/`inject`/`Config`/`apply`，
+ * default export 会让 Loader 丢弃 function 插件命名空间，本文件禁用 default export。
  *
- * P1-R11 装配拆分：apply 的接线按域搬进 `src/wire/`（访问面 `access`、检索/配额 `retrieval`、
- * 命令 `commands`、工具 `tools`、库与写者锁回收 `lifecycle`、三钩子采集 `capture`、精炼处理器
- * 与回填 `distill`、INBOX 消费链 `inbox`、宿主事件 `events`，共享槽 `runtime`）。本文件只留
- * 导出、配置解析、依赖构造与对 wire 单元的调用。每个 wire 调用单独隔离：一个单元失败只告警，
- * 不拖垮其它单元；成功路径的注册顺序、日志与 disposer 数逐字不变。
+ * P1-R11：apply 的接线按域搬进 `src/wire/`（access/retrieval/commands/tools/lifecycle/capture/
+ * distill/inbox/events + 共享槽 runtime），本文件只留导出、配置解析、依赖构造与 wire 调用。
+ * 每个 wire 调用单独隔离，一个单元失败只告警；成功路径的注册顺序、日志与 disposer 数逐字不变。
  *
- * 既有 story 的接线约束（原样保留）：
- * - Story 1.3：inject 含 `'settings'`（AD-11），Config 填全字段（FR-18），apply 分级校验。
- * - Story 1.4/1.5：profile 专属路径建库、embedding 维度 pin、写者锁**先定角色再开库**
- *   （AD-12/AD-14；LadybugDB 只要存在只读句柄，之后同文件读写打开必失败 Error: 33）。
- * - Story 1.6/1.7：工具与命令在 profileContext 早退之前无条件注册，库未就绪时给明确错误。
- * - Story 2.1/2.2：写者实例的采集钩子与两条 INBOX 消费链；回收挂既有 db effect（closer 数不变）。
+ * 接线约束：
+ * - Story 1.3：inject 含 `'settings'`（AD-11），Config 填全字段（FR-18），apply 分级校验；
+ * - Story 1.4/1.5：profile 专属路径建库、embedding 维度 pin、写者锁先定角色再开库（AD-12/AD-14：
+ *   LadybugDB 只要有只读句柄，之后同文件读写打开必失败 Error: 33）；
+ * - Story 1.6/1.7：工具与命令在 profileContext 早退之前无条件注册，库未就绪时给明确错误；
+ * - Story 2.1/2.2：采集钩子与两条 INBOX 消费链，回收挂既有 db effect（closer 数不变）；
  * - Story 3.1/3.2：召回配额按会话键计数，`turn/start` 与 `turn/end` 双点重置。
  *
- * 契约说明：apply 收到的 config 是宿主按 Config schema resolve 出的 volatile 节点对象——顶层
- * 每个字段都是 `.get()` 可调用的 volatile 节点。resolveRuntimeConfig 用 Getter<T> 包装读取，
- * 兼容普通值与 volatile 节点两种形态（便于纯单测直接传 plain object）。
+ * apply 收到的 config 是宿主按 Config schema resolve 出的 volatile 节点对象；resolveRuntimeConfig
+ * 用 Getter<T> 读取，兼容普通值与 volatile 节点（便于纯单测传 plain object）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { resolveRuntimeConfig } from './config.js'
@@ -101,7 +97,7 @@ export const name = 'dsh-oh-my-whale-memory' as const
  * 本插件向宿主注入的能力清单。
  * `'commands'`：`/memory` 宿主命令（Story 1.7）。
  * `'settings'`：/settings 表单投影与 `/memory status` 的设置读取通道（AD-11）。
- * `'tools'`：工具注册表——memory_remember / memory_recall / memory_related（Story 1.6/3.1/3.2）。
+ * `'tools'`：工具注册表，memory_remember / memory_recall / memory_related（Story 1.6/3.1/3.2）。
  * `'sessions'`：turn/end 采集前的持久化屏障 `ctx.sessions.flush(session)`（Story 2.1 / AC③）。
  * `'llm'`：INBOX 精炼的宿主单通道 `ctx.llm`（Story 2.3 / AD-5，显式 provider+model）。
  * `'systemPrompt'`：新会话开局注入的 section + 动态 context（Story 3.3 / FR-9 / AD-23）。
@@ -131,7 +127,7 @@ export function memoryRuntimeState(): MemoryRuntimeState {
 /**
  * 插件激活函数。分级校验：硬校验失败抛错（仅阻塞本插件，宿主继续运行）；
  * 降级项（embedding token/model 缺失、写者锁被占用）走 warn。
- * config 类型用结构化占位——Loader 在运行时按 Config schema resolve 后传入，
+ * config 类型用结构化占位：Loader 在运行时按 Config schema resolve 后传入，
  * 这里保留宽松签名以避免与宿主解析器类型耦合。
  */
 export async function apply(
@@ -139,13 +135,13 @@ export async function apply(
   config: Parameters<typeof resolveRuntimeConfig>[0],
 ): Promise<void> {
   const resolved = resolveRuntimeConfig(config)
-  // warnings 只含字段名与降级说明——绝不携带凭据值（NFR9）。
+  // warnings 只含字段名与降级说明，不携带凭据值（NFR9）。
   for (const message of resolved.warnings) {
     ctx.logger.warn(message)
   }
 
   // 单次 apply 的可变装配槽：命令/工具/status 经闭包 getter 读它，teardown 在 dispose 时清回
-  // 「未就绪」。绝不放模块级——同进程第二次 apply 会覆盖前一个实例的运行态（评审 P19）。
+  // 「未就绪」。不放模块级：同进程第二次 apply 会覆盖前一个实例的运行态（评审 P19）。
   const slots = createMemoryRuntimeSlots()
   const getDb = (): MemoryDatabase | undefined => slots.db
   // Story 3.3：每 apply 一份注入状态（prompt provider / 生成编排 / status 共用；进程内、不持久化）。
@@ -153,7 +149,7 @@ export async function apply(
   const instance: { readonly: boolean; reason: string | undefined } = { readonly: false, reason: undefined }
 
   // 单元隔离：一个 wire 失败只告警（与项目既有日志同口径），不拖垮其它单元。
-  // 成功路径不产生任何告警——entry-exports 钉死 warn 调用次数。
+  // 成功路径不产生任何告警，entry-exports 钉死 warn 调用次数。
   const wireStep = async <T>(unit: string, step: () => T | Promise<T>): Promise<T | undefined> => {
     try {
       return await step()
@@ -182,7 +178,7 @@ export async function apply(
   })
 
   // Story 1.6 / 1.7：命令与工具都在 profileContext 早退之前无条件注册（注册是 effect，
-  // 自动挂 disposer），共用同一个闭包库句柄——库未就绪时命令给出明确错误、工具给出
+  // 自动挂 disposer），共用同一个闭包库句柄，库未就绪时命令给出明确错误、工具给出
   // db_unavailable，可用性不受 profile/建库问题牵连。
   await wireStep('commands', () => wireMemoryCommand(ctx, {
     writeInbox: access.writeInbox,
@@ -193,7 +189,7 @@ export async function apply(
     relatedMemories: retrieval.relatedMemories,
   }))
   // Story 3.1：每轮召回配额的双点重置（只读实例也提供召回，故在只读早退之前注册）；
-  // `ctx.on` 自动挂 disposer，**不新增 ctx.effect**（entry-exports 钉死 closer 数）。
+  // `ctx.on` 自动挂 disposer，不新增 ctx.effect（entry-exports 钉死 closer 数）。
   await wireStep('recall-quota', retrieval.wireQuotaReset)
   await wireStep('tools', () => wireMemoryTools(ctx, {
     getDb,
@@ -202,8 +198,8 @@ export async function apply(
     quota: retrieval.quota,
   }))
   // Story 3.3：注入面（section + context）与生成入口（`agent/pre-step`）同样在只读早退之
-  // **前**注册——写者与只读实例都要有注入面（纯读 + 可选 LLM）。裸 ctx 时整面/监听跳过，
-  // 不抛错；注册走宿主 systemPrompt 作用域与 `ctx.on` 的自动 disposer，**不新增 ctx.effect**
+  // 前注册，写者与只读实例都要有注入面（纯读 + 可选 LLM）。裸 ctx 时整面/监听跳过，
+  // 不抛错；注册走宿主 systemPrompt 作用域与 `ctx.on` 的自动 disposer，不新增 ctx.effect
   //（entry-exports 钉死 closer 数 3/4/6）。
   await wireStep('injection', () => wireInjection(ctx, {
     store: injectionStore,
@@ -225,31 +221,31 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
-  // AC1/AC3：先抢写者锁再开库——第二个实例拿不到锁就降级只读，不阻断宿主启动；
+  // AC1/AC3：先抢写者锁再开库，第二个实例拿不到锁就降级只读，不阻断宿主启动；
   // 陈旧锁由 withFileLock 的接管语义处理（waitMs: 0 也不会牺牲它）。
   // 锁文件是 `<dbPath>.lock`，与库同在 `<profile>/memory/`，所以目录必须先存在；
   // 只读实例走到这里说明写者尚未建库，建目录本身不产生库文件（不创建空库）。
   await ensureMemoryDbDirectory(dbPath)
   const lock = await acquireWriterLock(dbPath)
+  const readonlyMode = lock.mode === 'readonly'
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
     // 工具与命令经闭包读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
-    // 由 memory_remember / `/memory remember` 收敛为 canonical failed（绝不 throw）。
+    // 由 memory_remember / `/memory remember` 收敛为 canonical failed（不 throw）。
     slots.db = await openMemoryDatabase({
       dbPath,
       dim: embedding.dim,
       modelId: embedding.modelId,
-      readOnly: lock.mode === 'readonly',
+      readOnly: readonlyMode,
       // F-06：只读实例的扩展装载失败由此记 warn（写者路径用不到该出口）。
       logger: ctx.logger,
     })
   } catch (error) {
-    // 开库失败就不该占着写者锁——释放引用后把原始错误抛给宿主。
+    // 开库失败就不该占着写者锁，释放引用后把原始错误抛给宿主。
     await lock.release()
     throw error
   }
 
-  const readonlyMode = lock.mode === 'readonly'
   runtimeState = { readonly: readonlyMode, reason: lock.reason, dbPath }
   // 本实例状态与模块级运行态同步；导出 memoryRuntimeState() 的语义不变（仍是最近一次成功 apply）。
   instance.readonly = readonlyMode
@@ -266,7 +262,7 @@ export async function apply(
         '只读模式不修改库级元数据，请核对配置或由持有写者锁的窗口改写。',
       )
     }
-    // AC2：只读实例的标注必须完整可读——后续 story 的 /memory status 直接复用同一文案。
+    // AC2：只读实例的标注必须完整可读，后续 story 的 /memory status 直接复用同一文案。
     ctx.logger.warn(
       `记忆库以只读模式打开（readonly: true, reason: '${READONLY_REASON}'）：${dbPath}；` +
       '本窗口不采集、不精炼、拒绝写入。关闭持有写者锁的窗口后重启本窗口可恢复读写。',

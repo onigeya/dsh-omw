@@ -1,7 +1,7 @@
 /**
  * LLM 单通道精炼（Story 2.3 / FR-19 / AD-5）。
  *
- * prompt 与输出 schema **同文件**（AC:573 硬要求）：改 prompt 必须同步改 schema。
+ * prompt 与输出 schema 同文件（AC:573 硬要求）：改 prompt 必须同步改 schema。
  * 所有 LLM 调用走宿主 `ctx.llm` 单通道，显式 provider+model，插件不自带 key；
  * 路由解析失败直接降级（N5）、一次调用只有一次 provider 尝试（N1/N3/R2）。
  * 结构化输出统一加 sentinel preamble（§14 / AC:573）。
@@ -11,7 +11,7 @@ import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
 import { MEMORY_KINDS } from '../shared/memory-vocab.js'
 import { estimateTokens, splitToBudget as splitTextToBudget } from '../shared/text-budget.js'
-import { foldStream, type FoldedStream } from './stream-fold.js'
+import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 
 /** sentinel preamble（§14 / AC:573）：字段说明永远不是合法值。 */
 export const REFINE_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
@@ -138,12 +138,12 @@ export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOK
 }
 
 /**
- * 解析模型输出为原子卡片；无法解析、结构不符、或**非空数组但元素全部无用**返回 null
+ * 解析模型输出为原子卡片；无法解析、结构不符、或非空数组但元素全部无用返回 null
  * （调用方归为可重试失败，评审 T25）。
  *
  * 归一化后为空的文本（纯标点 / 纯空白，评审 T4）在此丢弃：留着它会在写库事务里由
- * `memoryNodeId` 抛 `empty_fingerprint_text`，把整条 INBOX 的**全部**合格 fact 一起回滚。
- * 检查落在**每个片段**上而不只是整条：`'甲'.repeat(150) + '。...'` 会被切成
+ * `memoryNodeId` 抛 `empty_fingerprint_text`，把整条 INBOX 的全部合格 fact 一起回滚。
+ * 检查落在每个片段上而不只是整条：`'甲'.repeat(150) + '。...'` 会被切成
  * `['甲'x150, '。...']`，tail 整条非空但归一化后为空（评审 P4 追加项）。
  */
 export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
@@ -171,7 +171,7 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
     const priorityOk = Number.isFinite(rawPriority) && rawPriority >= MEMORY_PRIORITY_MIN && rawPriority <= MEMORY_PRIORITY_MAX
     const coerced = !kindOk || !priorityOk
     for (const piece of splitToBudget(factText)) {
-      // 逐片段校验：整条可用不代表每个片段都可用（见上方 parseRefineOutput 的注释）。
+      // 逐片段校验：整条可用不代表每个片段都可用。
       if (isUnusableFactText(piece)) continue
       out.push({
         text: piece,
@@ -190,7 +190,7 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
  * 归一化后为空的文本（纯标点 / 纯空白）不是可写入的原子事实：
  * `memoryNodeId` 对它抛 `empty_fingerprint_text`，故在解析层就丢掉（评审 T4）。
  *
- * `normalizeFingerprintText` 对「归一化后为空」**抛错**、永不返回空串（db/id.ts:29-40），
+ * `normalizeFingerprintText` 对「归一化后为空」抛错、永不返回空串（db/id.ts:29-40），
  * 所以判据就是「是否抛错」，没有长度比较分支。
  */
 function isUnusableFactText(text: string): boolean {
@@ -221,7 +221,7 @@ function stringOrUndefined(value: unknown): string | undefined {
  * 把「流以外」抛出的异常映射为失败分类（评审 T8）。
  *
  * 宿主的 LlmFailure 形状（`{ message, code, status, ... }`）既可能直接抛出，也可能挂在
- * `LlmError.failure` 上。尽力取出 status/code 并复用 {@link isRetryableStatus}——否则确定性
+ * `LlmError.failure` 上。尽力取出 status/code 并复用 {@link isRetryableStatus}，否则确定性
  * 4xx（鉴权失败 / 模型不存在）会被当成瞬时错重试 4 次才进死信，违反 §14「4xx 直接降级」。
  * 提不出状态码才按可重试兜底（未知错误宁可多试）。
  */
@@ -265,7 +265,7 @@ function classifyFinish(folded: FoldedStream, signal: AbortSignal): RefineFailur
 }
 
 /**
- * 一次精炼：**单次** `ctx.llm.stream` 调用（R2：重试不在同一次尝试内），
+ * 一次精炼：单次 `ctx.llm.stream` 调用（R2：重试不在同一次尝试内），
  * 结果收敛为 ≤150 token 的原子卡片。失败分类决定调用方的记账路径。
  */
 export async function refineTranscript(input: RefineInput): Promise<RefineResult> {

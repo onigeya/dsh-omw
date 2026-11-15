@@ -1,14 +1,14 @@
 /**
- * 开局注入的**预算裁剪**（Story 3.3 / B3 / AC:932-935 · FR-9）：全仓唯一的注入裁剪点。
+ * 开局注入的预算裁剪（Story 3.3 / B3 / AC:932-935 · FR-9）。全仓唯一的裁剪点。
  *
  * 裁剪顺序（AC:932-935，优先级从高到低）：
- * 1. **单条正文 ≤1200 字符**先裁（摘要句与引用证据同口径，截断标 `…`）；
- * 2. **条数 ≤20**（按分数序逐条累加；不可删集合不占这 20 个名额）；
- * 3. **总长 ≤8000 字符**（摘要 + 引用证据合计；命中即停止追加）；
- * 4. 截断后**剩余正文 <40 字符**的条目不注入（不产生碎片行）。
+ * 1. 单条正文 ≤1200 字符先裁（摘要句与引用证据同口径，截断标 `…`）；
+ * 2. 条数 ≤20（按分数序逐条累加；不可删集合不占这 20 个名额）；
+ * 3. 总长 ≤8000 字符（摘要 + 引用证据合计；命中即停止追加）；
+ * 4. 截断后剩余正文 <40 字符的条目不注入（不产生碎片行）。
  *
- * **不可删集合（INV-2）**：`priority === -1` 或 `kind === 'instruction'` 先全部保留，
- * 不受单条/条数/总长裁剪；若因此超预算 ⇒ `overBudget: true`（由 status/观测标注）。
+ * 不可删集合（INV-2）：`priority === -1` 或 `kind === 'instruction'` 先全部保留，
+ * 不受单条/条数/总长裁剪；若因此超预算则 `overBudget: true`（由 status/观测标注）。
  *
  * 纯函数：无 I/O、无时钟、无随机；provider 只读最终文本（不裁剪）。
  */
@@ -93,7 +93,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
   let truncated = false
   let chars = 0
 
-  // ---- 1) 不可删集合：不裁剪、不占名额；单独统计字符用于 overBudget ----
+  // 1) 不可删集合：不裁剪、不占名额；单独统计字符用于 overBudget
   const inviolable = dedupeById(draft.inviolable)
   const keptInviolableItems: InjectionBudgetItem[] = inviolable.map((item) => ({
     id: item.id,
@@ -105,7 +105,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
   const inviolableChars = keptInviolableItems.reduce((sum, item) => sum + item.text.length, 0)
   const inviolableIds = new Set(inviolable.map((item) => item.id))
 
-  // ---- 2) 可删候选：摘要 → evidence → l1（去重、去掉已在不可删集合里的 id） ----
+  // 2) 可删候选：摘要 → evidence → l1（去重、去掉已在不可删集合里的 id）
   const candidates: Array<{ id: string; layer: string; text: string }> = []
   const summary = draft.summary?.trim()
   if (summary !== undefined && summary !== '') candidates.push({ id: 'summary', layer: 'summary', text: summary })
@@ -157,27 +157,22 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
   const finalChars = chars + inviolableChars
   const overBudget = finalChars > INJECTION_MAX_TOTAL_CHARS
 
-  // ---- 3) 渲染：原则开头（摘要）→ 证据跟随；不可删集合排在最前（硬规则先被看到） ----
+  // 3) 渲染：原则开头（摘要）→ 证据跟随；不可删集合排在最前（硬规则先被看到）
   const lines: string[] = []
   const summaryItem = keptDeletable.find((item) => item.id === 'summary')
+  // items = 最终注入的条目（不含摘要句本身）；chars 仍含摘要正文。
+  const items = [...keptInviolableItems, ...keptDeletable.filter((item) => item.id !== 'summary')]
   if (summaryItem !== undefined) {
     lines.push('记忆摘要（开局注入）：', summaryItem.text)
-    const evidenceLines = [
-      ...keptInviolableItems,
-      ...keptDeletable.filter((item) => item.id !== 'summary'),
-    ]
-    if (evidenceLines.length > 0) {
+    if (items.length > 0) {
       lines.push('', '相关证据：')
-      for (const item of evidenceLines) lines.push(renderLine(item))
+      for (const item of items) lines.push(renderLine(item))
     }
   } else {
     lines.push('相关记忆（开局注入）：')
-    for (const item of keptInviolableItems) lines.push(renderLine(item))
-    for (const item of keptDeletable) lines.push(renderLine(item))
+    for (const item of items) lines.push(renderLine(item))
   }
 
-  // items = 最终注入的条目（不含摘要句本身；chars 含摘要正文）。
-  const items = [...keptInviolableItems, ...keptDeletable.filter((item) => item.id !== 'summary')]
   // 零注入：既无摘要也无任何条目 ⇒ 空文本（宿主对空文本不产消息；调用方据此跳过）。
   if (summaryItem === undefined && items.length === 0) {
     return {
