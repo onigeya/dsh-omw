@@ -9,7 +9,7 @@
  * 「那次为什么失败 / 那次怎么解决」（PRD:104），所以 prompt 要求保留跨事实的因果
  * 与教训，不罗列。
  */
-import { MAX_REFINE_FACT_TOKENS, estimateTokens, type LlmPort } from './llm-refine.js'
+import { MAX_REFINE_FACT_TOKENS, estimateTokens, isUnusableFactText, type LlmPort } from './llm-refine.js'
 import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 
 /** sentinel preamble（§14）：字段说明永远不是合法值。 */
@@ -113,6 +113,11 @@ export function parseL2Output(raw: string): L2RefineResult {
   const text = typeof record?.text === 'string' ? record.text.trim() : ''
   if (text.length === 0) {
     return { ok: false, failure: { reason: 'empty-statement', message: 'L2 输出缺少非空 text', retryable: true } }
+  }
+  // 纯标点/纯空白归一化后为空：写库会抛 empty_fingerprint_text 并把可重试的解析失败
+  // 变成 DB 失败；在解析层就按 empty-statement 收敛。
+  if (isUnusableFactText(text)) {
+    return { ok: false, failure: { reason: 'empty-statement', message: 'L2 输出归一化后为空（只含标点或空白）', retryable: true } }
   }
   if (estimateTokens(text) > MAX_L2_STATEMENT_TOKENS) {
     return {

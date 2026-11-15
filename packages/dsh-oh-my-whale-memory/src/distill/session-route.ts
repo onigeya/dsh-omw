@@ -23,18 +23,26 @@ function nonEmptyString(value: unknown): string | null {
 export function routeFromSession(session: unknown): RefineRoute | null {
   const requestHeader = (session as { requestHeader?: () => unknown } | undefined)?.requestHeader
   if (typeof requestHeader === 'function') {
-    const header = requestHeader.call(session)
-    const config = (header as { config?: { provider?: unknown; model?: unknown } } | undefined)?.config
-    const provider = nonEmptyString(config?.provider)
-    const model = nonEmptyString(config?.model)
-    if (provider && model) return { provider, model }
+    try {
+      const header = requestHeader.call(session)
+      const config = (header as { config?: { provider?: unknown; model?: unknown } } | undefined)?.config
+      const provider = nonEmptyString(config?.provider)
+      const model = nonEmptyString(config?.model)
+      if (provider && model) return { provider, model }
+    } catch {
+      // 方法抛错按「取不到」处理，继续走下一级回退（本函数承诺不抛错）。
+    }
   }
   const requestContext = (session as { requestContext?: () => unknown } | undefined)?.requestContext
   if (typeof requestContext === 'function') {
-    const recorded = requestContext.call(session) as { provider?: unknown; model?: unknown } | undefined
-    const provider = nonEmptyString(recorded?.provider)
-    const model = nonEmptyString(recorded?.model)
-    if (provider && model) return { provider, model }
+    try {
+      const recorded = requestContext.call(session) as { provider?: unknown; model?: unknown } | undefined
+      const provider = nonEmptyString(recorded?.provider)
+      const model = nonEmptyString(recorded?.model)
+      if (provider && model) return { provider, model }
+    } catch {
+      // 同上：回退到 null。
+    }
   }
   return null
 }

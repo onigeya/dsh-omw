@@ -101,6 +101,14 @@ describe('parseL2Output', () => {
     const overBudget = parseL2Output(JSON.stringify({ text: '甲'.repeat(MAX_L2_STATEMENT_TOKENS + 1) }))
     expect(overBudget).toMatchObject({ ok: false, failure: { reason: 'statement-over-budget', retryable: false } })
     expect(MAX_L2_STATEMENT_TOKENS).toBe(MAX_REFINE_FACT_TOKENS)
+
+    // 纯标点/纯空白归一化后为空：在解析层按 empty-statement 收敛，不让写库事务抛 empty_fingerprint_text。
+    const punctuation = parseL2Output(JSON.stringify({ text: '。。。' }))
+    expect(punctuation).toMatchObject({ ok: false, failure: { reason: 'empty-statement', retryable: true } })
+    expect(parseL2Output(JSON.stringify({ text: '   ' }))).toMatchObject({
+      ok: false,
+      failure: { reason: 'empty-statement', retryable: true },
+    })
   })
 })
 

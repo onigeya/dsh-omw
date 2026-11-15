@@ -34,4 +34,15 @@ describe('routeFromSession（评审 T21）', () => {
       requestContext: () => ({ provider: 'p2', model: '' }),
     })).toBeNull()
   })
+
+  it('方法抛错也按「取不到」处理：继续回退，最终不抛错', () => {
+    expect(routeFromSession({
+      requestHeader: () => { throw new Error('header exploded') },
+      requestContext: () => ({ provider: 'p2', model: 'm2' }),
+    })).toEqual({ provider: 'p2', model: 'm2' })
+    expect(routeFromSession({
+      requestHeader: () => { throw new Error('header exploded') },
+      requestContext: () => { throw new Error('context exploded') },
+    })).toBeNull()
+  })
 })

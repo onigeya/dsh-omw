@@ -9,7 +9,7 @@
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
-import { MEMORY_KINDS } from '../shared/memory-vocab.js'
+import { MEMORY_KINDS, MEMORY_PRIORITY_MAX, MEMORY_PRIORITY_MIN } from '../shared/memory-vocab.js'
 import { estimateTokens, splitToBudget as splitTextToBudget } from '../shared/text-budget.js'
 import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 
@@ -30,10 +30,6 @@ export const MAX_REFINE_FACT_TOKENS = 150
 
 /** 单次精炼请求的输出预算上限（不是任务预算；任务预算由调用方 AbortSignal 收紧）。 */
 export const REFINE_MAX_OUTPUT_TOKENS = 2048
-
-/** priority 值域（memory_remember 工具描述：-1..100，-1 = 全局强规则）。 */
-export const MEMORY_PRIORITY_MIN = -1
-export const MEMORY_PRIORITY_MAX = 100
 
 /** 输出 schema（与 prompt 同文件；AC:573）。字段说明文字本身不是合法值，判定不了就填 null。 */
 export const REFINE_OUTPUT_SCHEMA = [
@@ -191,9 +187,10 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
  * `memoryNodeId` 对它抛 `empty_fingerprint_text`，故在解析层就丢掉（评审 T4）。
  *
  * `normalizeFingerprintText` 对「归一化后为空」抛错、永不返回空串（db/id.ts:29-40），
- * 所以判据就是「是否抛错」，没有长度比较分支。
+ * 所以判据就是「是否抛错」，没有长度比较分支。L2 综合陈述同样复用本判据（否则纯标点
+ * 会在写库事务里抛 empty_fingerprint_text，把可重试的解析失败变成 DB 失败）。
  */
-function isUnusableFactText(text: string): boolean {
+export function isUnusableFactText(text: string): boolean {
   try {
     normalizeFingerprintText(text)
     return false
