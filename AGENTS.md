@@ -34,6 +34,7 @@ DSH 记忆插件 v1，由 Zettelkasten 原子记忆、LLM Wiki 和 SCD-2 双时�
 - `dsh --profile <name> --dump-config` 验证 patch 层落地（不启动宿主）
 - `pnpm pack` 装进干净 profile 冒烟（PRD §14 工程纪律）
 - 测试脚本已配 `vitest run`（根统一；各包 `scripts.test = "vitest run --root ../.."` 复用同一入口），含 Windows ABI 冒烟 `packages/dsh-oh-my-whale-memory/test/abi-smoke.test.ts`
+- 端到端（Playwright）：`pnpm test:e2e`（`vitest.e2e.config.ts` + `e2e/`）。夹具在临时 `DSH_HOME` 里 `--from-default-profile web` 建独立 profile，`pnpm pack` 两包后用 `dsh plugin add <bundle.tgz>` 安装，再起真实 `dsh web`；需要本机 `dsh` 在 PATH 且已 `pnpm exec playwright install chromium`，`DSH_E2E_KEEP=1` 保留临时目录现场
 - 门禁（2026-11-14 P1 落地）：`pnpm verify` = `constraints`（包元数据/导出/依赖契约）→ `typecheck`（src；测试文件未纳入）→ `check:deps`（AD-33 分层与循环，例外清单在 `scripts/check-deps.mjs`，新增违规即红）→ `check:migrations`（AD-34：SCHEMA_VERSION 必须等于最大迁移号）→ `test`；CI（`.github/workflows/ci.yml`）另跑 `pnpm test:smoke` 与 `pnpm pack:smoke`（tarball 内容按 AD-35）；`node scripts/check-upstream.mjs` 每周一监测 LadybugDB 0.23（AD-12 触发器）
 - Windows 上 native 后端的 vector/fts 扩展需要 OpenSSL 3：LadybugDB 扩展动态链接 `libssl-3-x64.dll` / `libcrypto-3-x64.dll`，pnpm 不随 `@ladybugdb/core` 分发，且代码不再自动探测固定目录，必须由 PATH 环境变量提供（例如 Git for Windows 的 `C:\Program Files\Git\mingw64\bin`）。运行测试与纯 Node 宿主的 `INSTALL/LOAD vector|fts` 都要继承它；没配置时 step 5 以 `Failed to load library: ... libvector.lbug_extension` 失败。CI 需预装 Git for Windows，或改用会设置 OpenSSL 3 的镜像。Electron 宿主不受此限（wasm 后端扩展静态编译，AD-32）。
 - `engines.dsh` 声明兼容范围（如 `">=0.2.0 <0.3.0"`），否则宿主可能拒绝加载

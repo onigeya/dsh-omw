@@ -7,6 +7,7 @@
   "scripts": {
     "build": "pnpm -r build",
     "test": "vitest run",
+    "test:e2e": "vitest run -c vitest.e2e.config.ts",
     "test:smoke": "vitest run packages/dsh-oh-my-whale-memory/test/abi-smoke.test.ts packages/dsh-oh-my-whale-memory/test/backend-wasm.test.ts packages/dsh-oh-my-whale-memory/test/entry-exports.test.ts packages/dsh-oh-my-whale-memory/test/config-schema.test.ts",
     "typecheck": "tsc -p packages/dsh-oh-my-whale/tsconfig.json && tsc -p packages/dsh-oh-my-whale-memory/tsconfig.json",
     "constraints": "node scripts/constraints.mjs",
@@ -31,7 +32,7 @@
   },
   "type": "module",
   "devDependencies": {
-    "playwright": "^1.65.1",
+    "playwright": "1.64.1",
     "vitest": "^3.2.4"
   }
 }
