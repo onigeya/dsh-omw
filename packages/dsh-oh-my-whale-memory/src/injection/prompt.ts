@@ -1,10 +1,10 @@
 /**
  * 注入面骨架（Story 3.3 / B1）：静态引导语 section `omw-memory` + 动态 context provider。
  *
- * 载体分工（AD-23）：section 只放**常量**引导语（text 为字面量，`interpolate:false` 防记忆
+ * 载体分工（AD-23）：section 只放常量引导语（text 为字面量，`interpolate:false` 防记忆
  * 文本里的 `{{}}` 被当变量插值）；动态摘要全部走 `ctx.systemPrompt.context()`，其 provider
- * 由宿主在**每次请求前重新解析**（B1 探针已核实 `step()` 的 `refreshContext` 会重解析，
- * 见 `probe-3-3-timing.md`）——因此「pre-step 内 await 生成 → provider 读到新状态」可让摘要
+ * 由宿主在每次请求前重新解析（B1 探针已核实 `step()` 的 `refreshContext` 会重解析，
+ * 见 `probe-3-3-timing.md`），因此「pre-step 内 await 生成 → provider 读到新状态」可让摘要
  * 进入本会话首个请求。provider 从注入状态机闭包取文本，非 ready/空文本一律返回 `''`
  * （宿主对空文本不产出消息）。
  *
@@ -28,7 +28,7 @@ export const INJECTION_SECTION_ORDER = 600
 export const INJECTION_CONTEXT_ORDER = 130
 
 /**
- * 静态引导语（**常量**，AC:920；禁止函数/动态内容）。只声明「有记忆会被注入 + 用途」，
+ * 静态引导语（常量，AC:920；禁止函数/动态内容）。只声明「有记忆会被注入 + 用途」，
  * 不包含任何用户数据，保证前缀稳定性。
  */
 export const OMW_MEMORY_SECTION_TEXT = [
@@ -61,7 +61,7 @@ export function injectionSessionKeyOf(context: unknown): string {
 
 /**
  * 注册注入面（section + context）。返回宿主给的 effect disposer（由调用方 ctx 作用域管理；
- * 注册本身就是 effect，**不**再套 `ctx.effect`——避免 entry-exports 的 closer 数漂移）。
+ * 注册本身就是 effect，不再套 `ctx.effect`：避免 entry-exports 的 closer 数漂移）。
  */
 export function registerInjectionPrompt(
   host: InjectionPromptHost,

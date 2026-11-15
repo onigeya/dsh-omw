@@ -10,7 +10,7 @@
  *
  * 这些是「少一字段即静默失效」的契约，因此逐条断言，不依赖运行时验证。
  * 测试对象是仓库源文件（package.json / cordis.patch.yml / src/index.ts），
- * 与构建产物解耦——`lib/` 在 .gitignore，干净 clone 里不存在。
+ * 与构建产物解耦：`lib/` 在 .gitignore，干净 clone 里不存在。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'

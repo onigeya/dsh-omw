@@ -1,20 +1,18 @@
 /**
  * Story 2.4 评审补丁 P1–P5 / P10 / P14 的回归钉（受审 HEAD = 4e265e5）。
  *
- * 与 db-dedup.test.ts 同构（真库 + HNSW，向量按 cosine 精确构造），但**独立成文件**：
- * LadybugDB 每实例预留 8 TiB、单进程约 15 个库封顶，因此每个测试文件都要有自己的开库预算
- * （本文件 9 个用例 = 9 次开库，留在 14 次以内）。
- *
- * 覆盖：
- * - P1 路径①墓碑：被路径③作废的节点在同文本重申时**复活**；expired_at（用户 forget）**不复活**
+ * 与 db-dedup.test.ts 同构（真库 + HNSW，向量按 cosine 精确构造），独立成文件：LadybugDB
+ * 每实例预留 8 TiB、单进程约 15 个库封顶，每个测试文件都要有自己的开库预算（本文件 9 个用例
+ * = 9 次开库，留在 14 次以内）。覆盖：
+ * - P1 路径①墓碑：被路径③作废的节点在同文本重申时复活；expired_at（用户 forget）不复活
  * - P2 路径③把本次算定的 validAt 显式传给写入（旧版 invalid_at === 新节点 valid_at）
- * - P3 作废上界绝不早于旧节点自身 valid_at（调用方传入更早 validAt 时也不产生倒置区间）
+ * - P3 作废上界不早于旧节点自身 valid_at（调用方传入更早 validAt 时也不产生倒置区间）
  * - P4 路径③同事务落一条 keyed_decision ⇒ audit_gap 不因正常版本替换上涨
- * - P5 向量长度不可用时**剥离向量再写**（含指纹命中路径），绝不绑未校验长度的向量
+ * - P5 向量长度不可用时剥离向量再写（含指纹命中路径），不绑未校验长度的向量
  * - P10 ANN 扫描失败只告警、按无候选写入（不阻塞写入）
  * - P14 精确余弦差一点（≈0.9695）不算语义重复
  * - P20（Story 2.6 评审补钉）`scanFailure: 'throw'` / `skipSemanticScan`：事务内 ANN 失败必须让
- *   调用方事务**干净回滚**，而不是吞掉后继续写——LadybugDB 0.22.3 里事务内任一语句报错即中止
+ *   调用方事务干净回滚，而不是吞掉后继续写。LadybugDB 0.22.3 里事务内任一语句报错即中止
  *   整个事务，吞掉再写等于把数据写进一个已死的事务。
  */
 import { afterAll, describe, expect, it } from 'vitest'
@@ -48,7 +46,7 @@ async function openDb(prefix: string): Promise<MemoryDatabase> {
 type DedupInput = Parameters<typeof writeDeduplicatedMemory>[1]
 type DedupOptions = Parameters<typeof writeDeduplicatedMemory>[2]
 
-/** 原语不自开事务（与 writeMemoryVersion 同一契约）——测试里补一层。 */
+/** 原语不自开事务（与 writeMemoryVersion 同一契约），测试里补一层。 */
 async function writeDedup(
   store: MemoryDatabase,
   input: DedupInput,
@@ -160,7 +158,7 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
       expect(invalidated.outcome).toBe('version-invalidated')
       expect((await readNode(store, aId)).invalidAt).toBe('2026-02-01T00:00:00.000Z')
 
-      // 同文本重申 ⇒ 指纹命中那个**已作废**的节点：必须复活（否则这条事实永久留在 recall 之外）
+      // 同文本重申 ⇒ 指纹命中那个已作废的节点：必须复活（否则这条事实永久留在 recall 之外）
       const revived = await writeDedup(store, {
         layer: LAYER,
         text: '被作废的旧事实',
@@ -211,7 +209,7 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
       const node = await readNode(store, id)
       expect(node.expiredAt).toBe('2026-02-01T00:00:00.000Z')
       expect(node.validAt).toBe('2026-01-01T00:00:00.000Z')
-      // 评审 P19a（T23）：不复活（expired_at / invalid_at 都不动），但 **source_refs 必须合并**。
+      // 评审 P19a（T23）：不复活（expired_at / invalid_at 都不动），但 source_refs 必须合并。
       // processor 仍会为本次观测建 l0_raw→该节点 的 EVIDENCE 边（事实层面为真），而
       // EFFECTIVE_MEMORY_REFS / computeEvidenceDrift 都按 expired_at IS NULL 过滤 ⇒ 不合并的话
       // 两个载体（边 / source_refs）永久不一致且都不可见。
@@ -246,7 +244,7 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
       const old = await readNode(store, oldId)
       const fresh = await readNode(store, result.id)
       // 首个时钟读数 = base+1000（`++tick` 先自增）：旧版 invalid_at 与
-      // 新节点 valid_at 必须都是**同一次**读数——这正是不复用读数的可判别点。
+      // 新节点 valid_at 必须是同一次读数，这正是不复用读数的可判别点。
       expect(old.invalidAt).toBe('2026-05-01T00:00:01.000Z')
       expect(fresh.validAt).toBe(old.invalidAt)
     } finally {
@@ -432,7 +430,7 @@ describe('Story 2.4 评审补丁：墓碑复活 / 时钟对齐 / 向量剥离 / 
           conn,
         ),
       ).rejects.toThrow(SemanticScanError)
-      // 干净回滚：不留节点、不留审计——留给调用方带 skipSemanticScan 重写。
+      // 干净回滚：不留节点、不留审计，留给调用方带 skipSemanticScan 重写。
       expect(await nodeCount(store)).toBe(0)
       expect(await readAudit(store, 'merge_semantic')).toHaveLength(0)
       expect(await readAudit(store, 'invalidate_version')).toHaveLength(0)

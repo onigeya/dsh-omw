@@ -1,10 +1,10 @@
 /**
- * `memory_related` / `/memory related` 的**共享塑形与判定件**（Story 3.2 / F-02·F-04·F-05）。
+ * `memory_related` / `/memory related` 的共享塑形与判定件（Story 3.2 / F-02·F-04·F-05）。
  *
  * 两个可见面必须同口径，故 D4/D5/hint/截断只在这里实现一次：
- * - **AC:889 evidence expired**：用**截断前**的 `anyValidPath` 判定（F-02）——有效路径可能
+ * - AC:889 evidence expired：用截断前的 `anyValidPath` 判定（F-02），有效路径可能
  *   来自第 21+ 名邻居，用 20 条 `results` 判断会误报；
- * - **起点不参与判定**（F-04）：起点失效 + 仍有有效邻居 ⇒ 返回邻居 + hint「起点已失效」；
+ * - 起点不参与判定（F-04）：起点失效 + 仍有有效邻居 ⇒ 返回邻居 + hint「起点已失效」；
  *   起点失效 + 全部邻居无有效路径 ⇒ evidence expired 空结果（不是「返回邻居」）；
  * - 单条 text 走 3.1 的 256-token 截断（`recall/core.ts` 的唯一实现，不复制规则）。
  *
@@ -66,7 +66,7 @@ function toViewEntry(item: RelatedTraversalItem): RelatedViewEntry {
 
 /**
  * 由遍历结果组装成功视图（工具面与命令面共用；`partial` 只属工具面的 depth=1 降级，
- * 命令面不降级——spec D8 有意为之，调用方不传即为 false）。
+ * 命令面不降级，spec D8 有意为之，调用方不传即为 false）。
  */
 export function toRelatedSuccessView(
   result: RelatedTraversalResult,

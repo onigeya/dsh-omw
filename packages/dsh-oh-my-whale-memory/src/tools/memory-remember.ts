@@ -5,12 +5,12 @@
  * - 工具名 `memory_remember`，参数 `content`（必填）/ `context`（可选，来源引用）；
  * - Story 1.11：新增 `kind`（七类分类）与 `priority`（-1..100）两个可选入参，
  *   透传到写路径（FR-20 分类写路径）；缺省保持 kind=''/priority=0；
- * - 固定写 layer='L1'（不是 'L1_INBOX'——spine 的层枚举是 L0|L1|L2|L3，
+ * - 固定写 layer='L1'（不是 'L1_INBOX'；spine 的层枚举是 L0|L1|L2|L3，
  *   Epic 2 才引入 INBOX 精炼流水线；Story 1.11 把全仓写路径收敛为 'L1'）；
- * - 不产 embedding：三列向量保持 NULL（绝不写零向量），向量由 Epic 2 补齐；
+ * - 不产 embedding：三列向量保持 NULL（不写零向量），向量由 Epic 2 补齐；
  * - 节点 id / 归一化 / 合并语义全部复用 src/db/id.ts + src/db/memory.ts，
  *   本文件不复制第二份指纹逻辑；
- * - execute 绝不 throw：宿主把 throw 渲染成 isError，工具层失败必须走
+ * - execute 不 throw：宿主把 throw 渲染成 isError，工具层失败必须走
  *   canonical 返回值 `{ action: 'failed', error: { code, message, retryable } }`。
  *
  * 工具在 apply 阶段先于建库注册（闭包 `getDb`），因此库未就绪时插件仍能加载，
@@ -34,7 +34,7 @@ export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
 export { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, type MemoryKind }
 
 /**
- * 模型可见描述——既是能力说明，也是 FR-1 的写入护栏：
+ * 模型可见描述：既是能力说明，也是 FR-1 的写入护栏：
  * 只收长期有价值的事实，明确排除 ephemeral/transient 内容。
  */
 export const MEMORY_REMEMBER_TOOL_DESCRIPTION = [
@@ -139,7 +139,7 @@ const OUTPUT_SCHEMA = {
 } as const satisfies ValueSchemaSpec
 
 /**
- * 组装 canonical failed 值。code 锁回封闭错误码类型——这里出现新字符串时
+ * 组装 canonical failed 值。code 锁回封闭错误码类型，这里出现新字符串时
  * 编译期即报错，不会把任意文本当成错误码广播给模型。
  */
 function failed(code: MemoryDbErrorCode, message: string): MemoryRememberFailed {
@@ -149,7 +149,7 @@ function failed(code: MemoryDbErrorCode, message: string): MemoryRememberFailed 
 
 /**
  * 建工具定义。
- * @param getDb 取当前库句柄——apply 先注册工具再建库，因此这里必须是 getter 而不是句柄。
+ * @param getDb 取当前库句柄，apply 先注册工具再建库，因此这里必须是 getter 而不是句柄。
  *              返回 undefined 表示库未就绪（无 profile 归属或初始化失败）。
  */
 export function createMemoryRememberTool(getDb: () => MemoryRememberStore | undefined) {
@@ -190,7 +190,7 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
           actor: 'agent',
           text: args.content,
           sourceRefs: context === undefined || context.length === 0 ? [] : [context],
-          // Story 1.11 / FR-20：分类与优先级必须真的到达写路径——缺省仍由 db 层
+          // Story 1.11 / FR-20：分类与优先级必须真的到达写路径，缺省仍由 db 层
           // 的 `?? ''` / `?? 0` 兜底，因此 undefined 透传等价于"未分类"。
           kind: args.kind,
           priority: args.priority,
@@ -201,7 +201,7 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
         if (error instanceof MemoryDbError) {
           return failed(error.code, error.message)
         }
-        // 底层驱动错误：兜底成 db_write_failed，保留原始诊断但绝不携带凭据（此路径无凭据）。
+        // 底层驱动错误：兜底成 db_write_failed，保留原始诊断但不携带凭据（此路径无凭据）。
         return failed('db_write_failed', error instanceof Error ? error.message : String(error))
       }
     },

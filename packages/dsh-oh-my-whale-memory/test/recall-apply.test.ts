@@ -4,14 +4,14 @@
  * recallMemories 接线（不是假 dep）。
  *
  * 覆盖：
- * - **只读实例召回照常**（AC「只读实例检索照常」）：写者锁被另一进程持有 ⇒ apply 降级只读，
+ * - 只读实例召回照常（AC「只读实例检索照常」）：写者锁被另一进程持有，apply 降级只读，
  *   捕获的工具在关键词路上仍能命中真库数据（F-05/F-06）；
- * - **模型 pin 守卫**（F-02）：配置的 `embedding.model` 与库内 pin 不一致 ⇒ 跳过向量路、
- *   `degraded: true` + warn，绝不用异模型向量算余弦；
- * - **配额端到端**（F-08）：工具侧键（`exec.agent.session`）与 turn 事件监听侧键落到同一只
+ * - 模型 pin 守卫（F-02）：配置的 `embedding.model` 与库内 pin 不一致，跳过向量路、
+ *   `degraded: true` + warn，不用异模型向量算余弦；
+ * - 配额端到端（F-08）：工具侧键（`exec.agent.session`）与 turn 事件监听侧键落到同一只
  *   桶；`turn/end` 重置后可继续调用；无 session 身份时 `'unknown'` 桶同样在 turn 边界恢复；
- * - **配置装配**（F-05）：`rrfK` 由 Config 真实传入内核（同数据在 rrfK=1 / 60 下排序翻转），
- *   且 `degraded` / `hint` / `total` 由真实内核透传到工具输出——漏传会被断言直接拦住。
+ * - 配置装配（F-05）：`rrfK` 由 Config 真实传入内核（同数据在 rrfK=1 / 60 下排序翻转），
+ *   且 `degraded` / `hint` / `total` 由真实内核透传到工具输出，漏传会被断言直接拦住。
  *
  * 开库次数：4 次（只读夹具 + 写者路径 3 个独立配置各 1），低于每文件 ≤12 的限制。
  */
@@ -116,7 +116,7 @@ async function applyPlugin(
   const warn = vi.fn()
   const ctx = {
     logger: { warn, info: vi.fn() },
-    // Story 3.3：注入生成在 pre-step 里惰性取 ctx.llm——提供最小端口（本文件 L1-only 路径不调它）。
+    // Story 3.3：注入生成在 pre-step 里惰性取 ctx.llm，提供最小端口（本文件 L1-only 路径不调它）。
     llm: { stream: () => (async function* empty() {})() },
     // 注入面（section/context）：provider 文本用于断言注入链路已就绪。
     systemPrompt: {
@@ -182,7 +182,7 @@ function mergeMeta(key: string, value: string): string {
 }
 
 /**
- * 只读夹具：建 memory/meta 两表 + 一条可命中的 L1 节点，**先插节点后建索引**，
+ * 只读夹具：建 memory/meta 两表 + 一条可命中的 L1 节点，先插节点后建索引，
  * 再 LOAD 扩展并建 vector/fts 索引（只读实例靠 database.ts 的 best-effort LOAD 复用）。
  */
 function buildReadonlyStatements(dim: number): string[] {
@@ -199,7 +199,7 @@ function buildReadonlyStatements(dim: number): string[] {
     `CREATE (m:memory {id: 'ro-recall-1', layer: 'L1', kind: 'note', priority: 0, ` +
       `text: 'alpha readonly recall 夹具', valid_at: '${TS(1)}', recorded_at: '${TS(1)}', ` +
       'invalid_at: NULL, expired_at: NULL, source_refs: []})',
-    // Story 3.2 / B4：只读关联遍历夹具——两类边表 + 一个**不含 alpha** 的邻居（不污染上面的
+    // Story 3.2 / B4：只读关联遍历夹具，两类边表 + 一个不含 alpha 的邻居（不污染上面的
     // recall 断言：关键词路按 'alpha' 只命中 ro-recall-1；向量路因模型 pin 不一致被跳过）。
     createEvidenceTableStatement(),
     createRelatedTableStatement(),
@@ -267,20 +267,20 @@ describe('配额端到端（F-08 / spec D7）', () => {
       expect(blocked.error).toMatchObject({ code: 'quota_exceeded', retryable: false })
 
       // 监听侧（apply 注册的 session/event 配额重置点，listeners[0] 是最早注册的那个）收到
-      // 同形态 session 对象 ⇒ 与工具侧落到同一只桶：turn/end 后配额恢复。
+      // 同形态 session 对象，与工具侧落到同一只桶：turn/end 后配额恢复。
       applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
       expect((await applied.tool.execute({ query: 'alpha' }, exec)).action).toBeUndefined()
 
-      // Story 3.2 / B4：memory_related 与 memory_recall 共享**同一配额桶**——reset 后已用 1 次
-      // （recall）；再拼 2 次（related + recall）⇒ 满 3；第 4 次不论哪个工具都拒。
+      // Story 3.2 / B4：memory_related 与 memory_recall 共享同一配额桶，reset 后已用 1 次
+      // （recall）；再拼 2 次（related + recall），满 3；第 4 次不论哪个工具都拒。
       expect((await applied.relatedTool.execute({ id: 'absent-id' }, exec)).action).toBeUndefined()
       expect((await applied.tool.execute({ query: 'alpha' }, exec)).action).toBeUndefined()
       const sharedBlocked = await applied.relatedTool.execute({ id: 'absent-id' }, exec)
       expect(sharedBlocked.error).toMatchObject({ code: 'quota_exceeded', retryable: false })
       applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
 
-      // `/memory related` 命令面**不计配额**（与 `/memory recall` 同口径）：随后 3 次工具
-      // 调用仍全部放行；命令本身走真 deps（起点存在但无邻居 ⇒ 成功值「无匹配记忆。」）。
+      // `/memory related` 命令面不计配额（与 `/memory recall` 同口径）：随后 3 次工具
+      // 调用仍全部放行；命令本身走真 deps（起点存在但无邻居，成功值「无匹配记忆。」）。
       const startId = memoryNodeId('L1', 'quota e2e alpha')
       const relatedCommand = await applied.command!.handler({ rawInput: ` related ${startId}` })
       expect(relatedCommand.kind).toBe('success')
@@ -289,7 +289,7 @@ describe('配额端到端（F-08 / spec D7）', () => {
       }
       applied.listeners[0]!({ id: 's1' }, { type: 'turn/end' })
 
-      // exec.agent 缺失 ⇒ 'unknown' 桶；耗尽后，无 session 的 turn/end 派发也必须能恢复它
+      // exec.agent 缺失时用 'unknown' 桶；耗尽后，无 session 的 turn/end 派发也必须能恢复它
       // （否则某宿主路径缺 exec.agent 时 unknown 桶进程内永不恢复，F-08 的核心场景）。
       for (let i = 0; i < 3; i += 1) await applied.tool.execute({ query: 'alpha' })
       expect((await applied.tool.execute({ query: 'alpha' })).error).toMatchObject({ code: 'quota_exceeded' })
@@ -337,7 +337,7 @@ describe('配额端到端（F-08 / spec D7）', () => {
       expect(fromInvalid.results?.map((item) => item.id)).toEqual([invalidNeighbor])
       expect(String(fromInvalid.hint)).toContain('起点已失效')
 
-      // AC:882-884：起点不存在 ⇒ 成功值 + 未找到 hint（不抛错）。
+      // AC:882-884：起点不存在，成功值 + 未找到 hint（不抛错）。
       const missing = await applied.relatedTool.execute({ id: 'absent-id' }, relatedExec)
       expect(missing).toMatchObject({ total: 0, results: [], hint: '未找到该记忆。' })
     } finally {
@@ -352,8 +352,8 @@ describe('配置装配（F-05）：rrfK 从 Config 真实传入内核', () => {
 
   /**
    * 假 embeddings 端点：单条输入（recall 的 embedQuery）返回固定查询向量 [1,0,0,0]；
-   * 多条输入（写者后台的 NULL 向量回填批次）返回维度不符的向量 ⇒ 回填记 dim-mismatch
-   * 失败、节点三列保持 NULL——否则回填会在本测试的种子写入期间竞态地给 X/K2/K3 补上
+   * 多条输入（写者后台的 NULL 向量回填批次）返回维度不符的向量，回填记 dim-mismatch
+   * 失败、节点三列保持 NULL，否则回填会在本测试的种子写入期间竞态地给 X/K2/K3 补上
    * 查询向量，夹具的「X 只在关键词路、Y 在两路」前提就被破坏了。
    */
   beforeAll(async () => {
@@ -379,15 +379,15 @@ describe('配置装配（F-05）：rrfK 从 Config 真实传入内核', () => {
 
   /**
    * rrfK 翻转夹具（6 条 L1、同层同 priority）：
-   * - X：关键词 rank1（tf 4）、无向量 ⇒ rrf = 1/(k+1)；
-   * - Y：向量 rank3（V1/V2 更近）+ 关键词 rank4（tf 1）⇒ rrf = 1/(k+3) + 1/(k+4)；
+   * - X：关键词 rank1（tf 4）、无向量，rrf = 1/(k+1)；
+   * - Y：向量 rank3（V1/V2 更近）+ 关键词 rank4（tf 1），rrf = 1/(k+3) + 1/(k+4)；
    * - V1/V2：仅向量路 rank1/rank2；K2/K3：仅关键词路 rank2/rank3。
-   * k=1 时 X(0.5) > Y(0.45)；k=60 时 Y(≈0.0315) > X(≈0.0164)——排序随 rrfK 翻转。
+   * k=1 时 X(0.5) > Y(0.45)；k=60 时 Y(≈0.0315) > X(≈0.0164)，排序随 rrfK 翻转。
    *
-   * 种子在 apply **之前**写入（先直开建库）：apply 一启动就挂上 NULL 向量回填的
+   * 种子在 apply 之前写入（先直开建库）：apply 一启动就挂上 NULL 向量回填的
    * maintenance 钩子，若在 apply 之后播种，回填轮次可能夹在播种中间把 X 单独补上
-   * 查询向量（实测发生过），夹具前提就被竞态破坏。预播种后 3 个 NULL 节点恒定成批 ⇒
-   * 假端点按「多条输入返回维度不符」拒绝，回填只会记失败审计，绝不写向量。
+   * 查询向量（实测发生过），夹具前提就被竞态破坏。预播种后 3 个 NULL 节点恒定成批
+   * 假端点按「多条输入返回维度不符」拒绝，回填只会记失败审计，不写向量。
    */
   async function probeOrder(rrfK: number): Promise<readonly string[]> {
     const dir = await makeTempDir(`omw-recall-rrfk${rrfK}-`)
@@ -454,7 +454,7 @@ describe('只读实例召回（F-05 / F-06 / AC「只读实例检索照常」）
         expect(plugin.memoryRuntimeState().readonly).toBe(true)
         // 启动期已有一条模型不一致的 warn（只读不改写库级元数据）。
         expect(applied.warn.mock.calls.some((call) => String(call[0]).includes('embedding 模型与库内记录不一致'))).toBe(true)
-        // F-06：只读扩展 LOAD 成功（夹具已 INSTALL）⇒ 不出现装载失败 warn；
+        // F-06：只读扩展 LOAD 成功（夹具已 INSTALL），不出现装载失败 warn；
         // 该 warn 的组合面（vector/fts 逐项原因）由 backend 的 install:false 单测钉住。
         expect(applied.warn.mock.calls.some((call) => String(call[0]).includes('装载 vector/fts 扩展失败'))).toBe(false)
 
@@ -464,7 +464,7 @@ describe('只读实例召回（F-05 / F-06 / AC「只读实例检索照常」）
           { agent: { session: { id: 'ro-session' } } },
         )
 
-        // F-02：配置模型 ≠ 库内 pin ⇒ 不取查询向量、不接通向量路；degraded 必须可见。
+        // F-02：配置模型 ≠ 库内 pin，不取查询向量、不接通向量路；degraded 必须可见。
         expect(value.action).toBeUndefined()
         expect(value.degraded).toBe(true)
         expect(value.total).toBeGreaterThanOrEqual(1)
@@ -487,8 +487,8 @@ describe('只读实例召回（F-05 / F-06 / AC「只读实例检索照常」）
         expect(related.results?.map((item) => item.id)).toEqual(['ro-related-b'])
         expect(related.results?.[0]).toMatchObject({ hops: 1, edge_type: 'RELATED', reason: 'rel-ro' })
 
-        // Story 3.3 / C：只读实例的**开局注入生成链路**同样可用（纯读 + 可选 LLM）。
-        // F-01：按真实 waterfall 契约调用——监听器必须调用 `next()` 并返回其决策。
+        // Story 3.3 / C：只读实例的开局注入生成链路同样可用（纯读 + 可选 LLM）。
+        // F-01：按真实 waterfall 契约调用，监听器必须调用 `next()` 并返回其决策。
         const injectSession = {
           id: 'ro-inject',
           requestHeader: () => ({ config: { provider: 'fake-provider', model: 'fake-model' } }),

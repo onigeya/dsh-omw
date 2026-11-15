@@ -2,8 +2,8 @@
  * 记忆词汇表：FR-15 七类分类（PRD prd.md:72 / prd.md:298，SPINE:274-275 的同名列枚举）
  * 与直写层。
  *
- * 放在 shared/ 而不是 tools/：这些取值是跨层的**领域词汇**，distill（精炼 prompt / 输出
- * schema 的 kind 值域、写库 layer）和 tools（工具参数 enum）都要用；由 tools 定义会让
+ * 放在 shared/ 而不是 tools/：这些取值是跨层的领域词汇，distill（精炼 prompt / 输出
+ * schema 的 kind 值域、写库 layer）和 tools（工具参数 enum）都要用。由 tools 定义会让
  * distill import tools，与 tools → recall → distill 一起构成目录级环（AD-33）。
  * 本模块是纯常量叶子，不依赖包内任何其它目录。
  */

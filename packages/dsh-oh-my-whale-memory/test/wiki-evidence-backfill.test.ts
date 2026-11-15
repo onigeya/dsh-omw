@@ -4,13 +4,13 @@
  * 真库验证四条不变量：
  * 1. 回填后「直接入边 == source_refs」差集为空（EII 判据②/漂移 A 成立）；
  * 2. 重放（含把游标倒回原点重扫）不产重边（MERGE 幂等）；
- * 3. 同层 ref **不建边**且在审计 + audit_gap（漂移）里可见（X1×U5）；
+ * 3. 同层 ref 不建边且在审计 + audit_gap（漂移）里可见（X1×U5）；
  * 4. 游标扫完落 `done`、闸门忙则一步不走。
  *
  * 评审补钉（P1/P9③/P11/P15）在第二个库里跑（分页 / 中途转忙 / 空库首轮 / 墓碑过滤），
  * 使上面四条用例的共享状态不被污染。
  *
- * 开库次数：本文件共 2 次——LadybugDB 每进程约 15 个库封顶。
+ * 开库次数：本文件共 2 次，LadybugDB 每进程约 15 个库封顶。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
@@ -100,7 +100,7 @@ describe('X1：EVIDENCE 边历史回填', () => {
     const written = await backfill.runOnce()
     // bf-m1 ← bf-l0a、bf-l0b；bf-m2 ← bf-m1；同层 bf-m3 ← bf-other-l1 必须跳过。
     expect(written).toBe(3)
-    // 评审 P18d②（T22）：边扫描没有 ORDER BY，返回顺序不是契约 ⇒ 排序后比集合，
+    // 评审 P18d②（T22）：边扫描没有 ORDER BY，返回顺序不是契约，排序后比集合，
     // 不钉实现巧合的物理顺序。
     expect((await readEvidenceInEdgeIds(store.connection, 'bf-m1')).slice().sort()).toEqual(['bf-l0a', 'bf-l0b'])
     expect(await readEvidenceInEdgeIds(store.connection, 'bf-m2')).toEqual(['bf-m1'])
@@ -178,7 +178,7 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     const gate = createIdleGate()
     const backfill = createEvidenceBackfill({ connection: () => db.connection, gate })
     expect(await backfill.runOnce()).toBe(0)
-    // 空库 + 游标为空 ⇒ 绝不落 done（否则后续新节点永不回填）。
+    // 空库 + 游标为空，不落 done（否则后续新节点永不回填）。
     expect(await readCursor(db)).toBe(null)
 
     await seedL0(db, 'p15-l0', 'P15 原文')
@@ -206,7 +206,7 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
 
     const second = await backfill.runOnce()
     expect(second).toBe(1)
-    // 末批（不足一页且本页处理完）⇒ 落 done；再跑一轮即短路。
+    // 末批（不足一页且本页处理完），落 done；再跑一轮即短路。
     expect(await readCursor(db)).toBe(EVIDENCE_BACKFILL_DONE)
     expect(await backfill.runOnce()).toBe(0)
     expect(await readEvidenceInEdgeIds(db.connection, 'p11-c')).toEqual(['p11-l0'])
@@ -242,7 +242,7 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     expect(await backfill.runOnce()).toBe(0)
     // 不建边（未生效节点不是当前快照）……
     expect(await readEvidenceInEdgeIds(db.connection, 'fv-node')).toEqual([])
-    // ……且游标只进不退：本页唯一的行被谓词排除 ⇒ 空页 + 非空游标 = 落 done 哨兵，
+    // ……且游标只进不退：本页唯一的行被谓词排除，空页 + 非空游标 = 落 done 哨兵，
     // future-valid 行不会在生效后补边（spec D10 明示接受的代价，生产写路径不可达）。
     expect(await readCursor(db)).toBe(EVIDENCE_BACKFILL_DONE)
   })
@@ -270,11 +270,11 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     await setCursor(db, '2026-04-30T00:00:00.000Z|cursor')
     const shortPage = createEvidenceBackfill({ connection: () => db.connection, gate: flaky, batchSize: 2 })
     const written = await shortPage.runOnce()
-    // 页内第一个节点就被闸门挡下 ⇒ 一条边都没写、游标不能落 done。
+    // 页内第一个节点就被闸门挡下，一条边都没写、游标不能落 done。
     expect(written).toBe(0)
     expect(await readCursor(db)).not.toBe(EVIDENCE_BACKFILL_DONE)
 
-    // 闸门恢复 ⇒ 下一轮把两行都扫掉（尾部行没丢）。
+    // 闸门恢复后，下一轮把两行都扫掉（尾部行没丢）。
     const healthy = createIdleGate()
     const resumed = createEvidenceBackfill({ connection: () => db.connection, gate: healthy, batchSize: 2 })
     expect(await resumed.runOnce()).toBe(2)
@@ -304,7 +304,7 @@ describe('X1：回填的分页 / 中断 / 空库 / 墓碑（评审补钉）', ()
     ].join(' '))
     await setCursor(db, '2026-05-31T00:00:00.000Z|cursor')
     const backfill2 = createEvidenceBackfill({ connection: () => db.connection, gate: flaky2, batchSize: 5 })
-    // 第 1 行（m1-a）处理完后，第 2 行前复查转忙 ⇒ break：m1-a 的边已写、游标推进但绝不 done。
+    // 第 1 行（m1-a）处理完后，第 2 行前复查转忙，break：m1-a 的边已写、游标推进但不落 done。
     expect(await backfill2.runOnce()).toBe(1)
     const cursor2 = await readCursor(db)
     expect(cursor2).not.toBe(EVIDENCE_BACKFILL_DONE)

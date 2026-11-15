@@ -271,7 +271,7 @@ describe('状态计数与最近死信视图', () => {
  * - last_error 截断（INBOX_LAST_ERROR_MAX_CHARS）与非 Error 值；
  * - enqueueInboxItem 同 id 幂等（MERGE ON CREATE，不覆盖既有行）；
  * - processing 条目不再被取出（同一轮不重复精炼同一条）；
- * - P7 写者启动回收**全部** processing（lease 未过期也回收）与 reclaimExpiredLeases 的语义差。
+ * - P7 写者启动回收全部 processing（lease 未过期也回收）与 reclaimExpiredLeases 的语义差。
  */
 describe('P9-②：CLAIM_HEAD_AFTER 的同毫秒并列分支', () => {
   it('同一毫秒入队三条 → 游标严格按 id 推进，抵达队尾返回 null', async () => {
@@ -399,7 +399,7 @@ describe('P7：写者启动回收全部 processing（AC3 超集，U7）', () => 
     await claimNextInboxItem(store.connection, { now: at(901) })
     await failInboxItem(store.connection, expired, { error: new Error('第一次失败'), now: at(901) })
     await claimNextInboxItem(store.connection, { now: at(950) })
-    // fresh：lease 刻意放到 10 倍 —— 「只回收过期」的原语必须放过它。
+    // fresh：lease 刻意放到 10 倍，「只回收过期」的原语必须放过它。
     await claimNextInboxItem(store.connection, { now: at(950), leaseMs: 10 * INBOX_LEASE_MS })
     expect((await readRow(expired)).status).toBe(INBOX_STATUS_PROCESSING)
     expect((await readRow(fresh)).status).toBe(INBOX_STATUS_PROCESSING)
@@ -411,7 +411,7 @@ describe('P7：写者启动回收全部 processing（AC3 超集，U7）', () => 
     expect(expiredRow.status).toBe(INBOX_STATUS_PENDING)
     expect(expiredRow.lease_owner).toBeNull()
     expect(expiredRow.lease_until).toBeNull()
-    // R3②：启动回收把这次崩溃记成一次失败 —— 1 次普通失败 + 1 次回收 = 2。
+    // R3②：启动回收把这次崩溃记成一次失败：1 次普通失败 + 1 次回收 = 2。
     expect(Number(expiredRow.attempts)).toBe(2)
     expect(String(expiredRow.last_error)).toContain('reclaimed after crash')
     const freshRow = await readRow(fresh)

@@ -1,6 +1,6 @@
 /**
  * Story 2.4 补钉（Lead 变异审计 M8/M9）：P9① 每批独立预算、P9④ pin dim 校验。
- * 撤掉这两处修复后全量测试仍绿 ⇒ 无回归钉。单独成文件以守住「单进程约 15 个
+ * 撤掉这两处修复后全量测试仍绿，就是没有回归钉。单独成文件以守住「单进程约 15 个
  * LadybugDB 实例」的上限（test/embedding-backfill.test.ts 已有 12 条用例）。
  */
 import { afterAll, describe, expect, it } from 'vitest'
@@ -57,7 +57,7 @@ describe('Story 2.4 补钉：回填预算与 pin dim 校验', () => {
         },
       }
       expect(await makeBackfill(store, client).runOnce()).toBe(9)
-      // 9 条 × 每请求 ≤8 条 ⇒ 恰好两批
+      // 9 条 × 每请求 ≤8 条，恰好两批
       expect(signals).toHaveLength(2)
       // 撤成「整轮共享一个 signal」即变红
       expect(signals[0]).not.toBe(signals[1])
@@ -104,7 +104,7 @@ describe('Story 2.4 补钉：回填预算与 pin dim 校验', () => {
         validAt: '2999-01-01T00:00:00.000Z',
         recordedAt: '2026-01-01T00:00:00.000Z',
       })
-      // 当前时刻（2026+）：未生效 ⇒ 不计数、不扫描、不回填。
+      // 当前时刻（2026+）：未生效，不计数、不扫描、不回填。
       expect(await countUnembeddedMemories(store.connection)).toBe(0)
       expect(await listUnembeddedMemories(store.connection, 10)).toHaveLength(0)
       const client: EmbedClient = {
@@ -114,7 +114,7 @@ describe('Story 2.4 补钉：回填预算与 pin dim 校验', () => {
       }
       expect(await makeBackfill(store, client).runOnce()).toBe(0)
 
-      // 显式把 clock 推到生效之后（注入 now）⇒ 进入目标集（延后补齐，不是永久跳过）。
+      // 显式把 clock 推到生效之后（注入 now），进入目标集（延后补齐，不是永久跳过）。
       const future = '3000-01-01T00:00:00.000Z'
       expect(await countUnembeddedMemories(store.connection, future)).toBe(1)
       expect(await listUnembeddedMemories(store.connection, 10, future)).toHaveLength(1)

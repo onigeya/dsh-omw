@@ -9,7 +9,7 @@
  * - AC3：`expired_at` / `invalid_at` 非空的行在列表里隐藏，但 `show` 仍返回并展示墓碑时间；
  * - AC4：只读实例（写者锁被另一进程持有）下 list/show 照常，remember 被拒。
  *
- * 墓碑字段（expired_at / invalid_at）用 `queryAll` 直执行 SET 制造——生产写路径不含
+ * 墓碑字段（expired_at / invalid_at）用 `queryAll` 直执行 SET 制造，生产写路径不含
  * 这两个字段（Story 1.8 Design Notes 明确允许测试夹具这么做）。
  */
 import { spawn } from 'node:child_process'
@@ -131,7 +131,7 @@ beforeAll(async () => {
   }
   validIdsDesc = seeded.sort((a, b) => b.recordedAt.localeCompare(a.recordedAt)).map((row) => row.id)
 
-  // 两条墓碑：recorded_at 比所有有效行都新——若失效过滤失效，它们必然出现在列表首行。
+  // 两条墓碑：recorded_at 比所有有效行都新，若失效过滤失效，它们必然出现在列表首行。
   expiredId = (await store.upsertMemory({ layer: 'L1', text: EXPIRED_TEXT, recordedAt: TS(30) })).id
   await setTombstone('expired_at', expiredId, '2026-11-02T00:00:00.000Z')
   invalidId = (await store.upsertMemory({ layer: 'L1', text: INVALID_TEXT, recordedAt: TS(31) })).id
@@ -208,7 +208,7 @@ describe('/memory list <关键词>：字面包含匹配、大小写不敏感、l
     // 命中行含关键词；`rrf` 的命中行是库里的「rrf 小写命中」（非表头回显所致）。
     expect(upper.text).toContain('RRF')
     expect(lower.text).toContain('rrf')
-    // L1_INBOX 不是 layer 白名单外的东西——必须可见（当前库里确实有这种行）。
+    // L1_INBOX 不是 layer 白名单外的东西，必须可见（当前库里确实有这种行）。
     expect(idsFromListText(upper.text ?? '')).toContain(idsByText.get('RRF 收件箱候选'))
     const inboxRows = await queryAll(
       connection,
@@ -309,11 +309,9 @@ describe('库未就绪：无 profileContext 时只读子命令明确报错（读
   })
 })
 
-// ---------------------------------------------------------------------------
 // AC4：只读实例。跨进程是 AD-12 的真实场景（两个 DSH 窗口 = 两个进程），且
 // database.ts 禁止同进程内同路径换模式打开（createModeMismatchError），
 // 所以第二实例仍用 fixtures/hold-db-open.mjs 扮演「持锁的第一实例」。
-// ---------------------------------------------------------------------------
 
 function mergeMeta(key: string, value: string): string {
   return `MERGE (m:omw_meta {key: '${key}'}) ON CREATE SET m.value = '${value}' ON MATCH SET m.value = '${value}'`

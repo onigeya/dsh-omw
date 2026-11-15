@@ -3,9 +3,9 @@
  *
  * 放在 shared/ 而不是 distill/：distill 与 wiki 都要折叠 `ctx.llm.stream()`，
  * 而 wiki 反向 import distill 会造出 `distill ↔ wiki` 的目录级环（AD-33）。
- * 本模块是被双方共用的**纯函数叶子**，不依赖包内任何其它目录。
+ * 本模块是被双方共用的纯函数叶子，不依赖包内任何其它目录。
  *
- * 运行期不得 import `@deepseek-ai/dsh-llm` 的任何**值**：它是 devDependency，
+ * 运行期不得 import `@deepseek-ai/dsh-llm` 的任何值：它是 devDependency，
  * tsdown 会把值内联进 `lib/index.js`。所以这里自带折叠，只 `import type` 消费 chunk 联合。
  */
 import type { FinishReason, StreamChunk } from '@deepseek-ai/dsh-llm'

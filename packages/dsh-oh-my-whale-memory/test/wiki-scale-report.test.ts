@@ -1,9 +1,9 @@
 /**
  * 5k 规模只报数（Story 2.6 / 裁决 U3、spec Known Limitations #1）。
  *
- * **不设性能阈值**：CI 机器与负载差异会让毫秒断言变成 flake。本用例只做两件事——
+ * 不设性能阈值：CI 机器与负载差异会让毫秒断言变成 flake。本用例只做两件事：
  * 1. 用事实断言证明夹具真建起来了（节点/边计数），避免退出码掩盖空跑；
- * 2. 把各查询耗时打印出来，作为首周标定与后续优化的**观测记录**。
+ * 2. 把各查询耗时打印出来，作为首周标定与后续优化的观测记录。
  *
  * 规模：5000 个 L1 节点 + 1200 条 l0_raw→L1 EVIDENCE 边（brief §2 已测包线是 1500 节点/1200 边，
  * 这里按 U3 把节点量提到 5k，边量保持已测的 1200），另加 50 条带向量的节点供 KNN。
@@ -117,7 +117,7 @@ describe('U3：5k 规模只报数', () => {
       now: NOW,
     }))
 
-    // 事实断言（非阈值）：未回填的 5000-1200 条无 L0 前驱 ⇒ EII 违例；有边的 1200 条可达。
+    // 事实断言（非阈值）：未回填的 5000-1200 条无 L0 前驱，EII 违例；有边的 1200 条可达。
     expect(eii.length).toBe(NODES - EDGES)
     expect(drift.refsWithoutEdges).toHaveLength(0)
     expect(drift.edgesWithoutRefs).toHaveLength(0)

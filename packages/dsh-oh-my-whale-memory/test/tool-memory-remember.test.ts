@@ -4,12 +4,12 @@
  * 契约：
  * - 工具名 `memory_remember`，参数 `content`（必填）/ `context`（可选 → source_refs）
  *   / `kind`（可选，七类枚举）/ `priority`（可选，-1..100，-1 = 恒置顶，Story 1.11）；
- * - 固定写 layer='L1'；不产 embedding（三列向量 NULL，绝不写零向量）；
+ * - 固定写 layer='L1'；不产 embedding（三列向量 NULL，不写零向量）；
  * - 同指纹重复 → 同一 id（幂等）+ source_refs 并集去重 + recorded_at 保留最早 + 节点数不变；
  * - 库未就绪（无 profile / 无句柄）→ failed db_unavailable，retryable=false；
  * - 归一化后为空（'。…'）→ failed empty_fingerprint_text；
  * - 写入期异常 → MemoryDbError 透传其 code / 其他错误兜底 db_write_failed；
- * - execute 绝不 throw（宿主把 throw 渲染成 isError）——所有失败走 canonical failed 值；
+ * - execute 不 throw（宿主把 throw 渲染成 isError），所有失败走 canonical failed 值；
  * - description 护栏必须声明"不是 ephemeral/transient content"。
  *
  * 工具定义经 apply → ctx.tools.register 捕获（真实 defineTool 编译产物），
@@ -78,8 +78,6 @@ beforeAll(async () => {
   registered = []
   const { ctx } = fakeCtx({ dir, registered })
   await apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
-  // Story 3.1：每次 apply 注册两个工具（memory_remember + memory_recall）；
-  // 本文件只取第一个（memory_remember）。
   // apply 无条件注册三个工具（Story 1.6 remember + 3.1 recall + 3.2 related），本用例只用第一个。
   expect(registered).toHaveLength(3)
   expect(registered[0].name).toBe('memory_remember')
@@ -201,7 +199,7 @@ describe('memory_remember 工具（Story 1.6）', () => {
     const bareRegistered: CapturedTool[] = []
     const { ctx } = fakeCtx({ registered: bareRegistered })
     await apply(ctx, { embedding: { token: 'sk-test', model: 'bge-m3', dim: 4 } })
-    // Story 3.1 起每次 apply 注册两个工具；memory_remember 仍是第一个。
+    // apply 注册三个工具；memory_remember 仍是第一个。
     expect(bareRegistered).toHaveLength(3)
     expect(bareRegistered[0].name).toBe('memory_remember')
 

@@ -2,16 +2,16 @@
  * 节点 id = uuid5(layer + ':' + 归一化 text)（AD-4）。
  *
  * - 指纹只含 layer 与归一化 text：不含 source_refs、不含任何时间戳，所以同内容
- *   跨源、跨时间都命中同一 id，天生幂等（FR-15）。
- * - 归一化：NFKC（全角→半角）→ 小写 → 去标点（Unicode \p{P}）→ 空白折叠 trim。
- * - layer 不做归一化（大小写敏感），但禁止为空或含冒号——冒号是 layer 与 text 的分隔符。
+ *   跨源、跨时间都命中同一 id，天然幂等（FR-15）。
+ * - 归一化：NFKC（全角转半角）→ 小写 → 去标点（Unicode \p{P}）→ 空白折叠 trim。
+ * - layer 不做归一化（大小写敏感），但不能为空、不能含冒号（冒号是 layer 与 text 的分隔符）。
  */
 import { createHash } from 'node:crypto'
 import { MemoryDbError } from './errors.js'
 
 /**
- * uuid5 命名空间。任意固定 UUID 常量，作用只是让 id 稳定可复现；
- * 一旦改动，所有已存在节点 id 全部失效——视为破坏性变更，永不修改。
+ * uuid5 命名空间。任意固定 UUID 常量，作用只是让 id 稳定可复现。
+ * 一旦改动，所有已存在节点 id 全部失效，属破坏性变更，不能修改。
  */
 export const MEMORY_ID_NAMESPACE = 'f2f0c1b4-6c3a-5d8e-9a7b-1c2d3e4f5a6b'
 
@@ -25,7 +25,7 @@ export function uuid5(name: string, namespace: string = MEMORY_ID_NAMESPACE): st
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-/** 供指纹使用的文本归一化。空结果抛错——空指纹无法作为节点主键。 */
+/** 供指纹使用的文本归一化。空结果抛错：空指纹无法作为节点主键。 */
 export function normalizeFingerprintText(text: string): string {
   const normalized = text
     .normalize('NFKC')

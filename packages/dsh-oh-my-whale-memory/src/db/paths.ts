@@ -2,7 +2,7 @@
  * 记忆库路径（AC1 / AD-13）：`$DSH_HOME/profiles/<name>/memory/lbug.db`。
  *
  * profile 目录来自宿主注入的 `profileContext.dir`（= `$DSH_HOME/profiles/<name>`），
- * 不自行拼接 DSH_HOME——目录就是唯一事实来源，永远跟随 profile。
+ * 不自己拼 DSH_HOME：目录是唯一事实来源，跟随 profile。
  */
 import { mkdir } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'

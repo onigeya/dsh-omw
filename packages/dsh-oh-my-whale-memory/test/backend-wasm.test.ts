@@ -5,7 +5,7 @@
  *
  * 该文件守住三件事：
  * 1. 纯 Node 运行时默认选 native 后端（判据是 process.versions.electron，不是 process.type）；
- * 2. 两后端 storage version 一致 —— 同一个 lbug.db 可互换打开，切运行时不需要迁移；
+ * 2. 两后端 storage version 一致，同一个 lbug.db 可互换打开，切运行时不需要迁移；
  * 3. wasm 后端在纯 Node 下也能跑完「建表 + 向量/FTS 索引 + 写入 + 读回 + 重开」，
  *    这样 Electron 专属路径不需要 Electron 就能被 CI 守护。
  */

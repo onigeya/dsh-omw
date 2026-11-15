@@ -1,5 +1,5 @@
 /**
- * 新会话注入的**每会话状态机骨架**（Story 3.3 / B1；完整生成在 B2）。
+ * 新会话注入的每会话状态机骨架（Story 3.3 / B1；完整生成在 B2）。
  *
  * 状态语义（spec D3）：
  * - `pending`：已识别到该会话的首条真人消息、摘要生成进行中（或待 B2 接线）；
@@ -21,7 +21,7 @@ export interface InjectionRecord {
 }
 
 /**
- * 最近一次注入的**观测摘要**（进程内、不持久化；Story 3.3 / B3 → B4 的 `/memory status` 读取）。
+ * 最近一次注入的观测摘要（进程内、不持久化；Story 3.3 / B3 → B4 的 `/memory status` 读取）。
  * 只放计数与标记，不含任何记忆原文/凭据（NFR9）。
  */
 export interface LastInjectionSummary {
@@ -75,7 +75,7 @@ export function createInjectionStore(): InjectionStore {
       return records.get(sessionKey)
     },
     markPending(sessionKey) {
-      // 已有终态（ready/skipped）时不回退——「每会话一次」由状态机保证（AC:916）。
+      // 已有终态（ready/skipped）时不回退，「每会话一次」由状态机保证（AC:916）。
       if (records.has(sessionKey)) return
       records.set(sessionKey, { status: 'pending', text: '' })
     },

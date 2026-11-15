@@ -1,7 +1,7 @@
 /**
  * 并发打开同一库的回归测试（Story 1.4 / AC1、AC2）。
  *
- * 契约：同一路径的并发 openMemoryDatabase 共用一次完整初始化——底层句柄只能拿一次文件锁，
+ * 契约：同一路径的并发 openMemoryDatabase 共用一次完整初始化：底层句柄只能拿一次文件锁，
  * 且建索引不幂等（重复 CREATE_VECTOR_INDEX 抛 "Binder exception: Index ... already exists"），
  * 因此去重必须覆盖建表 + 元数据 + 建索引全过程，两个调用方拿到同一个 facade。
  * 并发但配置维度不同时，后到者拿到属于自己的 embedding_dim_mismatch，而不是被对方的错误污染。

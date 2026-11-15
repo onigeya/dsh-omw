@@ -121,7 +121,7 @@ async function waitUntil(check: () => boolean, timeoutMs = 3000): Promise<void> 
   }
 }
 
-/** 用**真正的** setTimeout 轮询：P4 用例把全局 setTimeout 换成假定时器后 waitUntil 会挂死。 */
+/** 用真正的 setTimeout 轮询：P4 用例把全局 setTimeout 换成假定时器后 waitUntil 会挂死。 */
 async function waitWithRealTimers(
   realSetTimeout: typeof setTimeout,
   check: () => boolean,

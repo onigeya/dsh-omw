@@ -1,7 +1,7 @@
 /**
  * 对话原文渲染（Story 2.1 / FR-2）：三钩子共用的「这次采集什么文本」。
  *
- * 文本源是 session.deriveMessages()——同步、缓存、Message 深冻结（宿主 session.md:654-662），
+ * 文本源是 session.deriveMessages()：同步、缓存、Message 深冻结（宿主 session.md:654-662），
  * 所以采集可以在 session/event 的同步路径里安全取用。
  */
 

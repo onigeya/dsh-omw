@@ -1,8 +1,8 @@
 /**
  * 命令面的数据访问装配（Story 1.7–1.9 / 3.1 / 3.2）。
  *
- * 全部是**惰性**依赖：命令在 profileContext 早退之前注册，闭包到 handler 被调用时才读库句柄。
- * 库未就绪时抛明确错误，由命令层收敛成 `{kind:'error'}`，绝不静默返回空列表/0 计数。
+ * 全部是惰性依赖：命令在 profileContext 早退之前注册，闭包到 handler 被调用时才读库句柄。
+ * 库未就绪时抛明确错误，由命令层收敛成 `{kind:'error'}`，不静默返回空列表/0 计数。
  * 本单元不做任何注册，只把读/写依赖与 status 快照组装成纯函数对象。
  */
 import type { MemoryDatabase } from '../db/database.js'
@@ -59,7 +59,7 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     return database
   }
 
-  // Story 1.11（AC2/AC3）：INBOX 采集写路径。层收敛为唯一枚举——写 `L1`
+  // Story 1.11（AC2/AC3）：INBOX 采集写路径。层收敛为唯一枚举，写 `L1`
   // （= MEMORY_REMEMBER_LAYER），`L1_INBOX` 从此只是 INBOX 队列标识/表名，不是 memory.layer 取值。
   // 可选分类旗标（kind / priority，含 -1）透传到落库，与 memory_remember 同一条写路径。
   const writeInbox = async (text: string, writeOptions?: MemoryInboxWriteOptions): Promise<void> => {
@@ -96,8 +96,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     const evidenceGap = await computeEvidenceGap(connection, new Date().toISOString())
     const relatedSkipped = await countRelatedSkips(connection)
     const inboxCounts = await countInboxByStatus(connection)
-    // Story 2.5 / U1：L2_INBOX 行从「memory.layer 的历史计数槽」换成 **l2_inbox 的真实队列深度**
-    // （pending + processing = 待提升条目；done/failed 不计入——failed 另有 failed 行）。
+    // Story 2.5 / U1：L2_INBOX 行从「memory.layer 的历史计数槽」换成 l2_inbox 的真实队列深度
+    // （pending + processing = 待提升条目；done/failed 不计入，failed 另有 failed 行）。
     const l2InboxCounts = await l2InboxQueue.countByStatus(connection)
     const failedEntries = inboxCounts.failed > 0
       ? await listRecentFailedInboxItems(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
@@ -113,7 +113,7 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       failedEntries,
       embeddingMode: options.resolved.embeddingMode,
       // Story 2.5 / U6 + 评审 P19：配置态优先（enabled=false ⇒ 不构造客户端），
-      // 否则读**本实例**客户端的运行态（端点持续不可达 ⇒ degraded）。
+      // 否则读本实例客户端的运行态（端点持续不可达 ⇒ degraded）。
       systemOne: !options.resolved.systemOne.enabled
         ? 'disabled-by-config'
         : (options.getSystemOneClient()?.runtimeState().degraded === true ? 'degraded' : 'enabled'),
@@ -129,7 +129,7 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       l2FailedEntries: l2InboxCounts.failed > 0
         ? await l2InboxQueue.listRecentFailed(connection, { limit: INBOX_FAILED_VIEW_LIMIT })
         : [],
-      // Story 3.3 / B4：注入可见性——进程内 lastInjection（null=未知）+ Config 开关。
+      // Story 3.3 / B4：注入可见性，进程内 lastInjection（null=未知）+ Config 开关。
       injection: options.injectionStore.readLastInjection() ?? null,
       injectionEnabled: options.resolved.injectOnNewSession,
       uncertain: await countUncertainAudits(connection),

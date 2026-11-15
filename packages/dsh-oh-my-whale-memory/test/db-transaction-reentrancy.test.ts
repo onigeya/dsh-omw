@@ -1,7 +1,7 @@
 /**
  * runInTransaction 重入守卫测试（Story 2.2 / AC8；Epic 1 复盘遗留项 A-2）。
  *
- * 契约：同一 async 链内嵌套调用**立即抛普通 Error**（不再静默挂起）；并发（非嵌套）调用
+ * 契约：同一 async 链内嵌套调用立即抛普通 Error（不再静默挂起）；并发（非嵌套）调用
  * 仍按调用顺序排队。还包含「抛错后外层回滚、连接与写链都还能继续用」。
  *
  * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 db-upsert.test.ts。

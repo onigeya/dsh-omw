@@ -2,10 +2,10 @@
  * Config schema 与设置表单投影测试（Story 1.3 / I/O 矩阵 12 行全覆盖）。
  *
  * 断言分三类：
- * 1. schema lint——凭据 role=secret（AD-9）、全字段 volatile（AD-11）、defaults 值、
+ * 1. schema lint，凭据 role=secret（AD-9）、全字段 volatile（AD-11）、defaults 值、
  *    以及 schemastery validateVolatileSchema 的「volatile 不嵌套 volatile」硬约束。
- * 2. resolveRuntimeConfig——硬校验抛错路径 + 可降级路径（FR-18）。
- * 3. 脱敏投影——按宿主 redact.ts 的 role==='secret' 判定复现，确认 token 值不入投影内容。
+ * 2. resolveRuntimeConfig，硬校验抛错路径 + 可降级路径（FR-18）。
+ * 3. 脱敏投影，按宿主 redact.ts 的 role==='secret' 判定复现，确认 token 值不入投影内容。
  *
  * 错误信息契约：硬校验错误含字段名 + 期望格式 + 当前值；凭据字段只含字段名（NFR9）。
  */
@@ -228,7 +228,7 @@ describe('ReRank 字段（第 8 行：v1 不消费不校验）', () => {
       { endpoint: 'ftp://bad', token: 'x', model: 'y' },
     ]
     for (const rerank of rerankVariants) {
-      // 把 rerank 真的放进配置——v1 不读即不影响，否则 vacuous。
+      // 把 rerank 真的放进配置：v1 不读即不影响，否则 vacuous。
       const cfg = { ...validConfig(), rerank }
       const resolved = resolveRuntimeConfig(cfg)
       expect(resolved.embeddingMode).toBe('enabled')
@@ -253,7 +253,7 @@ describe('凭据脱敏（第 11 行 / AD-9）', () => {
     const root: any = { type: 'object', dict: Config.dict, meta: Config.meta }
     const secrets: string[] = []
     collectSecrets(root, [], secrets)
-    // Story 2.5 / 评审 P3（T4）：systemOne 也可经 Config 注入 token（.role('secret')）——
+    // Story 2.5 / 评审 P3（T4）：systemOne 也可经 Config 注入 token（.role('secret')）。
     // 它必须同样被脱敏判定命中，否则凭据会明文进投影（AD-9）。
     expect(secrets.sort()).toEqual(['embedding.token', 'rerank.token', 'systemOne.token'])
 
@@ -269,12 +269,12 @@ describe('凭据脱敏（第 11 行 / AD-9）', () => {
     const cfg = validConfig()
     cfg.embedding.model = 'bge-m3'
     const withToken = resolveRuntimeConfig({ ...cfg, systemOne: { token: 'sk-systemone' } })
-    // token 只在运行时内存对象里（供调用），绝不进 warnings。
+    // token 只在运行时内存对象里（供调用），不进 warnings。
     expect(JSON.stringify(withToken)).toContain('sk-systemone')
     expect(JSON.stringify(withToken.warnings)).not.toContain('sk-systemone')
 
     // endpoint 不是凭据：与 embedding.endpoint 同约定，错误点名字段并回显当前值
-    // （见本文件既有的「消息含字段名+期望格式+当前值」用例）。
+    // （「消息含字段名+期望格式+当前值」用例）。
     expect(() => resolveRuntimeConfig({ ...cfg, systemOne: { endpoint: 'not-a-url' } }))
       .toThrowError(/systemOne\.endpoint/)
   })

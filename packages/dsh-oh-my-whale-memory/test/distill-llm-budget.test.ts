@@ -71,7 +71,7 @@ async function refineLogsFor(id: string): Promise<Record<string, unknown>[]> {
 describe('评审 P11 / P18：LLM 子预算先于总预算掐断', () => {
   it('评审 P11：LLM 子预算先于总预算掐断（撤掉子预算即变红）', async () => {
     const item = await claimFixture('sub-budget', '原文')
-    // 端口只在「传给它的 signal 中止」时结束 ⇒ 这条用例测的正是「中止的是哪个预算」：
+    // 端口只在「传给它的 signal 中止」时结束，这条用例测的正是「中止的是哪个预算」：
     // 子预算 50ms / 总预算 1500ms，正确实现 ~50ms 掐断；撤成总预算则 ~1500ms 才断（<500ms 断言即红）。
     let t0 = 0
     let abortGap = -1

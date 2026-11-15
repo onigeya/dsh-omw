@@ -1,7 +1,7 @@
 /**
  * 文本 token 估算与按预算切分（纯函数，无依赖）。
  *
- * 放在 shared/ 而不是 distill/：召回（recall）与精炼（distill）共用同一套估算/切分规则，
+ * 放在 shared/ 而不是 distill/：召回（recall）与精炼（distill）共用同一套估算与切分规则。
  * 由 distill 定义会让 recall import distill，与 distill → tools → recall 一起构成目录级环
  * （AD-33）。本模块只做本地收敛估算，不做计费。
  */
@@ -32,7 +32,7 @@ export function estimateTokens(text: string): number {
 
 /**
  * 把一段超预算文本切成 ≤budget token 的连续片段：优先在句末切，单句超预算则按字符硬切。
- * 各片段**分别 trim 后按原顺序拼接**（不等于原文逐字，首尾空白会被吃掉，评审 T16）。
+ * 各片段分别 trim 后按原顺序拼接，所以结果不等于原文逐字（首尾空白会被吃掉，评审 T16）。
  *
  * budget 必填：不同调用方的预算是各自的业务常量（精炼 150 / 召回文本预算），
  * 本模块不替调用方挑缺省值。

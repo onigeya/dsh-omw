@@ -5,7 +5,7 @@
  * 查询向量恒为 e1 = [1,0,…]，库内向量取 [c, √(1−c²), 0,…] ⇒ cosine = c。
  *   c = 0.99 → 语义重复路径（≥0.97）；c = 0.93 → 版本亲缘窗口 [0.90,0.97)；c = 0.5 → 窗口外。
  *
- * **U4 粗筛上界的钉住用例**在第 3 条：c = 0.93（distance ≈ 0.07）能被 ANN 取回并走进版本链分支。
+ * U4 粗筛上界的钉住用例在第 3 条：c = 0.93（distance ≈ 0.07）能被 ANN 取回并走进版本链分支。
  * 若有人把粗筛上界退回 0.03，该用例立刻变红（0.07 > 0.03 取不回候选 ⇒ outcome 变成 'created'）。
  */
 import { afterAll, describe, expect, it } from 'vitest'
@@ -36,7 +36,7 @@ async function openDb(prefix: string): Promise<MemoryDatabase> {
   })
 }
 
-/** 原语不自开事务（与 writeMemoryVersion 同一契约）——测试里补一层。 */
+/** 原语不自开事务（与 writeMemoryVersion 同一契约），测试里补一层。 */
 async function writeDedup(store: MemoryDatabase, input: Parameters<typeof writeDeduplicatedMemory>[1]) {
   return runInTransaction(store.connection, () => writeDeduplicatedMemory(store.connection, input))
 }
@@ -79,7 +79,7 @@ async function readAudit(store: MemoryDatabase, action: string): Promise<Array<{
 
 /**
  * 统计（或在特定语句上抛错）的代理连接：只拦截 `prepare`，其余方法一律绑回真实连接。
- * 评审 P15 / T16：只断言结果时，「把 ANN 段挪到判空之前再丢结果」仍会全绿——必须直接数查询。
+ * 评审 P15 / T16：只断言结果时，「把 ANN 段挪到判空之前再丢结果」仍会全绿，必须直接数查询。
  */
 function proxyConnection(
   real: MemoryConnection,

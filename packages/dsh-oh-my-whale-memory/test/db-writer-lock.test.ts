@@ -101,7 +101,7 @@ describe('写者锁（Story 1.5 / AC1、AC3 / AD-12）', () => {
 
     const lock = await acquireWriterLock(dbPath)
 
-    // waitMs: 0 也照样接管——atomic-write 的接管分支 `continue` 在 deadline 判断之前。
+    // waitMs: 0 也照样接管：atomic-write 的接管分支 `continue` 在 deadline 判断之前。
     expect(lock.mode).toBe('writer')
     await expect(readFile(lockPathOf(dbPath), 'utf8')).resolves.toBe(`${process.pid}\n`)
     await lock.release()
@@ -132,7 +132,7 @@ describe('写者锁（Story 1.5 / AC1、AC3 / AD-12）', () => {
     await writeFile(lockPathOf(dbPath), `${process.pid}\n`)
 
     // writer-lock.ts 靠 `/timed out waiting for the writer lock/` 区分"争用"与"I/O 故障"。
-    // 上游若改写文案，本断言先失败——而不是让第二实例把争用误报成硬错误、拒绝启动
+    // 上游若改写文案，本断言先失败，而不是让第二实例把争用误报成硬错误、拒绝启动
     // （AD-12 明确禁止的降级失败）。升级 @deepseek-ai/dsh-atomic-write 后必须跑这条。
     await expect(withFileLock(dbPath, async () => {}, { waitMs: 0 }))
       .rejects.toThrow(/timed out waiting for the writer lock/)
@@ -144,7 +144,7 @@ describe('写者锁（Story 1.5 / AC1、AC3 / AD-12）', () => {
 
     // 故意不 await：模拟宿主 dispose 后立刻 apply（锁文件还在被 rm 的窗口内）。
     // 没有 releasing 屏障的话，withFileLock 会看到尚未删除的锁文件 + 本进程 pid
-    // （holderExited 拒绝接管），waitMs:0 立即超时→降级只读，AC1 被无声破坏。
+    // （holderExited 拒绝接管），waitMs:0 立即超时，降级只读，AC1 被无声破坏。
     const release = first.release()
     const again = await acquireWriterLock(dbPath)
 

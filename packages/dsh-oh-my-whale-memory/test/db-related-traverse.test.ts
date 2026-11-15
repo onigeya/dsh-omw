@@ -1,11 +1,11 @@
 /**
  * `traverseRelated` 真库测试（Story 3.2 / FR-12）。
  *
- * 用**真实 GROUP schema**（EVIDENCE 两对端点：l0_raw→memory + memory→memory）验证：
- * - 端点显式 `(n:memory)` ⇒ 无向 EVIDENCE 不会把 l0_raw 带进结果面（探针 2b 的反例）；
+ * 用真实 GROUP schema（EVIDENCE 两对端点：l0_raw→memory + memory→memory）验证：
+ * - 端点显式 `(n:memory)`，无向 EVIDENCE 不会把 l0_raw 带进结果面（探针 2b 的反例）；
  * - 无向解释：从高层/邻居反向也能到达（RELATED 与 EVIDENCE 都无向）；
- * - 同 id 多路径去重取 **min hops**、两型在同 hops 下的确定性排序；
- * - 起点不存在 ⇒ `startFound:false` 的空结果（不抛错）；
+ * - 同 id 多路径去重取 min hops、两型在同 hops 下的确定性排序；
+ * - 起点不存在，`startFound:false` 的空结果（不抛错）；
  * - depth 夹紧 [1,3]（入参 99 → 3）。
  *
  * 开库次数：本文件共享 1 次（LadybugDB 每进程约 15 个实例封顶）。
@@ -80,7 +80,7 @@ beforeAll(async () => {
     { fromId: 'D', toId: 'C', reason: 'rel-d-c' },
   ])
 
-  // ---- B2 夹具（各场景独立连通分量，互不干扰） ----
+  // B2 夹具（各场景独立连通分量，互不干扰）
   // ① 失效中间节点可穿过：i1 → i2(失效) → i3。
   await seedMemory('i1', 'L1')
   await seedMemory('i2', 'L1', '2026-03-01T00:00:00.000Z')
@@ -104,7 +104,7 @@ beforeAll(async () => {
   await seedMemory('pi3', 'L1', '2026-03-05T00:00:00.000Z')
   await relate('p0', ['pv1', 'pv2', 'pi1', 'pi2', 'pi3'], 'rel-p0')
 
-  // ④ 结果上限：c0 有 21 个有效 + 3 个失效邻居（有效已超 20 ⇒ 失效不补位）。
+  // ④ 结果上限：c0 有 21 个有效 + 3 个失效邻居（有效已超 20，失效不补位）。
   await seedMemory('c0', 'L1')
   const capValid = Array.from({ length: 21 }, (_, index) => `cv${String(index + 1).padStart(2, '0')}`)
   for (const id of capValid) await seedMemory(id, 'L1')
@@ -122,8 +122,8 @@ beforeAll(async () => {
   await seedMemory('s1', 'L1')
   await relate('s0', ['s1'], 'rel-s0')
 
-  // ⑦ F-02：同一邻居「短失效路径 + 长有效路径」——t1 → tin(失效) → tn（2 跳、含失效中间节点）；
-  //    t1 → tb → tc → tn（3 跳、全有效）。depth=3 时 tn 必须按**跨路径 OR** 判为有效。
+  // ⑦ F-02：同一邻居「短失效路径 + 长有效路径」，t1 → tin(失效) → tn（2 跳、含失效中间节点）；
+  //    t1 → tb → tc → tn（3 跳、全有效）。depth=3 时 tn 必须按跨路径 OR 判为有效。
   await seedMemory('t1', 'L1')
   await seedMemory('tin', 'L1', '2026-03-10T00:00:00.000Z')
   await seedMemory('tn', 'L1')
@@ -135,8 +135,8 @@ beforeAll(async () => {
   await relate('tb', ['tc'], 'rel-tb')
   await relate('tc', ['tn'], 'rel-tc')
 
-  // ⑧ F-02：>20 命中——u0 有 20 个失效 RELATED 邻居（1 跳，进 invalid 组）+ 经 l0_raw 桥的有效
-  //    邻居 un（2 跳、自身有效）；入选时有效组先取 un、再由失效组补 19 条 ⇒ un 在 results 内
+  // ⑧ F-02：>20 命中，u0 有 20 个失效 RELATED 邻居（1 跳，进 invalid 组）+ 经 l0_raw 桥的有效
+  //    邻居 un（2 跳、自身有效）；入选时有效组先取 un、再由失效组补 19 条，un 在 results 内
   //    （不是「被第 21 名截断」；AI-23 的 w0 拓扑才是真正截断场景）。
   await seedMemory('u0', 'L1')
   const uiIds = Array.from({ length: 20 }, (_, index) => `ui${String(index + 1).padStart(2, '0')}`)
@@ -149,10 +149,10 @@ beforeAll(async () => {
     { fromId: 'un-l0', fromLayer: 'L0', toId: 'un', toLayer: 'L1', reason: 'ev-bridge-un' },
   ])
 
-  // ⑨ AI-23（review-3-2-rereview N-01 / epic-3 retro AI-2）：anyValidPath 的**真回归拓扑**——
-  //    w0 有 20 个 2 跳邻居 wn*（自身有效，但唯一路径经失效中间节点 wm* ⇒ pathValid=false），
-  //    按 AC:880「跳数升序」它们占满 top-20；另有 1 个 3 跳**全有效**邻居 wv（w0→wa→wb→wv），
-  //    按跳数排第 21 名被截断。此时 `results.some(pathValid)` 为 false，而截断前全量为 true——
+  // ⑨ AI-23（review-3-2-rereview N-01 / epic-3 retro AI-2）：anyValidPath 的真回归拓扑：
+  //    w0 有 20 个 2 跳邻居 wn*（自身有效，但唯一路径经失效中间节点 wm*，pathValid=false），
+  //    按 AC:880「跳数升序」它们占满 top-20；另有 1 个 3 跳全有效邻居 wv（w0→wa→wb→wv），
+  //    按跳数排第 21 名被截断。此时 `results.some(pathValid)` 为 false，截断前全量为 true；
   //    这正是 anyValidPath 必须按截断前聚合的可复现反例（旧 F-02 用例的 un 被有效优先选入，
   //    无法区分两种聚合）。
   await seedMemory('w0', 'L1')
@@ -180,7 +180,7 @@ describe('traverseRelated：无向 BFS 与结果面约束（AC:872-880）', () =
     const result = await traverseRelated(store.connection, { id: 'A', depth: 2 })
 
     expect(result).toMatchObject({ id: 'A', depth: 2, startFound: true })
-    // 命中 B/C/D 三个 memory 邻居；L0 是 EVIDENCE 的另一端点但**不是结果**（端点 `(n:memory)`）。
+    // 命中 B/C/D 三个 memory 邻居；L0 是 EVIDENCE 的另一端点但不是结果（端点 `(n:memory)`）。
     expect(result.results.map((item) => item.id)).toEqual(['B', 'C', 'D'])
     expect(result.total).toBe(3)
     expect(result.results.some((item) => item.id === 'L0')).toBe(false)
@@ -188,10 +188,10 @@ describe('traverseRelated：无向 BFS 与结果面约束（AC:872-880）', () =
     const byId = new Map(result.results.map((item) => [item.id, item]))
     // B 由 EVIDENCE 命中（1 跳）；reason 来自 relationships(p) 的末元素。
     expect(byId.get('B')).toMatchObject({ layer: 'L2', hops: 1, edgeType: 'EVIDENCE', reason: 'ev-a-b', invalid: false })
-    // C 有 A→C（1 跳）与 A→D→C（2 跳）两条路径 ⇒ 去重取 min hops=1 的那条。
+    // C 有 A→C（1 跳）与 A→D→C（2 跳）两条路径，去重取 min hops=1 的那条。
     expect(byId.get('C')).toMatchObject({ hops: 1, edgeType: 'RELATED', reason: 'rel-a-c', invalid: false })
     expect(byId.get('D')).toMatchObject({ hops: 1, edgeType: 'RELATED', reason: 'rel-a-d', invalid: false })
-    // 全有效路径 ⇒ pathValid=true（spec D4 的判定原语）。
+    // 全有效路径则 pathValid=true（spec D4 的判定原语）。
     expect(result.results.every((item) => item.pathValid)).toBe(true)
     // 文本原样带回（截断在工具面，256-token 口径）。
     expect(byId.get('B')?.text).toBe('B 的内容')
@@ -289,7 +289,7 @@ describe('失效节点分组（AC:886/888/889 / spec D3/D4）', () => {
 
     // 20 个失效邻居（1 跳）+ 经 l0_raw 桥的有效邻居 un（2 跳）= 21 命中。
     // AC:888 的「有效优先入选」保证有效路径邻居不会被 20 条上限丢弃；anyValidPath 仍按
-    // **截断前全量**聚合（不依赖 results），故不会因截断误报 evidence expired。
+    // 截断前全量聚合（不依赖 results），故不会因截断误报 evidence expired。
     expect(result.total).toBe(21)
     expect(result.results).toHaveLength(RELATED_MAX_RESULTS)
     expect(result.anyValidPath).toBe(true)
@@ -307,14 +307,14 @@ describe('失效节点分组（AC:886/888/889 / spec D3/D4）', () => {
     expect(result.results).toHaveLength(RELATED_MAX_RESULTS)
     // 唯一全有效路径的终点 wv 按跳数排第 21+ 被 20 条上限截断（不在 results）。
     expect(result.results.some((item) => item.id === 'wv')).toBe(false)
-    // anyValidPath 按**截断前**全量聚合，必须为 true。
+    // anyValidPath 按截断前全量聚合，必须为 true。
     expect(result.anyValidPath).toBe(true)
-    // 重要实测（AI-23 / N-01 更正）：全有效路径的**首跳邻居 wa（以及 wb）本身就在 results 里**
-    // 且 pathValid=true —— 因此 `results.some(pathValid)` 与 `all.some(pathValid)` 在当前
-    // 「有效优先 + 跳数升序」入选策略下**等价**，把实现改成 results.some 不会变红。
-    // 证明：任何全有效路径的首跳邻居都是有效邻居（节点未失效）⇒ 必进 valid 组且 hops 最小
-    // ⇒ 必被 top-20 选中；故 20 条截断无法丢弃「唯一有效路径」而不丢弃其首跳邻居。
-    // 结论：anyValidPath 的截断前聚合是**防御性不变量**（防未来选择策略变化），不是当前可达的
+    // 重要实测（AI-23 / N-01 更正）：全有效路径的首跳邻居 wa（以及 wb）本身就在 results 里
+    // 且 pathValid=true，因此 `results.some(pathValid)` 与 `all.some(pathValid)` 在当前
+    // 「有效优先 + 跳数升序」入选策略下等价，把实现改成 results.some 不会变红。
+    // 证明：任何全有效路径的首跳邻居都是有效邻居（节点未失效），必进 valid 组且 hops 最小，
+    // 必被 top-20 选中；故 20 条截断无法丢弃「唯一有效路径」而不丢弃其首跳邻居。
+    // 结论：anyValidPath 的截断前聚合是防御性不变量（防未来选择策略变化），不是当前可达的
     // 必要正确性；旧 spec「结构上不可达」的方向正确，N-01 提出的可复现反例经真库验证不成立。
     const visibleValid = result.results.filter((item) => item.pathValid)
     expect(visibleValid.map((item) => item.id).sort()).toEqual(['wa', 'wb'])
@@ -335,7 +335,7 @@ describe('起点语义（spec D5）', () => {
 
 describe('超时与确定性（spec D7/D8）', () => {
   it('超时 ⇒ RelatedTraversalTimeoutError（不吞成空结果/降级），为 B3 的 depth=1 重试铺路', async () => {
-    // 假连接：prepare 永不 resolve ⇒ 确定性触发预算分支（真库上 1ms 超时会随机器快慢抖动）。
+    // 假连接：prepare 永不 resolve，确定性触发预算分支（真库上 1ms 超时会随机器快慢抖动）。
     const hanging = { prepare: () => new Promise(() => {}) } as unknown as Parameters<typeof traverseRelated>[0]
     const started = Date.now()
 

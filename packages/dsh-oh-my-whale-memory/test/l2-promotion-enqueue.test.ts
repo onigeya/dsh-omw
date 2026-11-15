@@ -2,11 +2,11 @@
  * 评审 P2（T2）：apply 级「触发信号 → 提升入队」的驱动测试。
  *
  * 为什么必须在这一层：`enqueuePromotion` 是闭包内部函数，除了 apply 没有别的入口；
- * 而它是**唯一**的 L1→L2 通路（grep `enqueuePromotion` 在生产只命中 index.ts）。
+ * 而它是唯一的 L1→L2 通路（grep `enqueuePromotion` 在生产只命中 index.ts）。
  * 测试手法：mock `inbox/promotion-trigger.js` 的 `createPromotionTracker` 捕获 options，
  * 但仍旧调用真实实现（不是替身），这样 `recordL1` 的真实阈值判定也一并覆盖。
  *
- * 变异敏感度：删掉 index.ts 里 `onTrigger` 的入队接线 ⇒ 本文件用例变红。
+ * 变异敏感度：删掉 index.ts 里 `onTrigger` 的入队接线，本文件用例变红。
  */
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
@@ -109,7 +109,7 @@ describe('Story 2.5 / 评审 P2：apply 级触发信号真的把 L1 入 l2_inbox
       expect(payload.l1Ids).toHaveLength(1)
     }
 
-    // 二次触发：同批 L1 已有条目 ⇒ readStatus 非空 ⇒ 一条都不新增。
+    // 二次触发：同批 L1 已有条目，readStatus 非空，一条都不新增。
     onTrigger({ reason: 'session-end-same-kind', totalL1: 20, sessionId: 'sess-2', kind: 'work_fact', sessionKindCount: 5 })
     await drainInboxBackgroundTasks()
     const after = await queryAll(store.connection, 'MATCH (q:l2_inbox) RETURN count(q) AS total')
@@ -133,11 +133,11 @@ describe('Story 2.5 / 评审 P2：apply 级触发信号真的把 L1 入 l2_inbox
     await store.close()
   })
   /**
-   * 评审 P24（变异审计 M1）：提升候选必须**按游标分页取全部有效 L1**，不是取最新一窗。
+   * 评审 P24（变异审计 M1）：提升候选必须按游标分页取全部有效 L1，不是取最新一窗。
    *
    * 变异敏感度：把 LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT 换成旧的「无游标 + ORDER BY
    * recorded_at DESC + LIMIT 20」，本条变红（25 条里最旧 5 条永远进不了 l2_inbox）。
-   * 断言必须落在**具体 id 集合**上——只断言行数会在两条 L1 的旧用例上就已经漏掉这个缺口。
+   * 断言必须落在具体 id 集合上，只断言行数会在两条 L1 的旧用例上就已经漏掉这个缺口。
    */
   it('候选超过旧窗口（25 条 > LIMIT 20）⇒ 25 条全部入队，最旧的也在（变异审计 M1）', async () => {
     tracker.options.length = 0
@@ -169,7 +169,7 @@ describe('Story 2.5 / 评审 P2：apply 级触发信号真的把 L1 入 l2_inbox
 
   /**
    * 评审 P24（变异审计 M17）：`valid_at` 在将来的 L1 还没生效，不得进提升候选。
-   * 变异敏感度：删掉 LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT 的 `AND m.valid_at <= $now` ⇒ 本条变红。
+   * 变异敏感度：删掉 LIST_EFFECTIVE_IDS_BY_LAYER_STATEMENT 的 `AND m.valid_at <= $now`，本条变红。
    */
   it('valid_at 在将来的 L1 不进候选（变异审计 M17）', async () => {
     tracker.options.length = 0

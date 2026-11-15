@@ -2,9 +2,9 @@
  * 精炼同事务建 EVIDENCE 边的集成钉（Story 2.6 / AC2、I-O 矩阵第 21 行、裁决 U4）。
  *
  * 两件事只有在这一层才看得见：
- * 1. 写 L1 与建 `l0_raw→memory` EVIDENCE 边**在同一个事务里**——事务中途失败（这里用
- *    writeEvidenceEdges 抛错注入）必须让 L1 节点、边、条目标 done **一起回滚**；
- * 2. LLM 提议的 EVIDENCE 一律**拒绝建边**并记 `reject_evidence` 审计（唯一写者是精炼结构）。
+ * 1. 写 L1 与建 `l0_raw→memory` EVIDENCE 边在同一个事务里，事务中途失败（这里用
+ *    writeEvidenceEdges 抛错注入）必须让 L1 节点、边、条目标 done 一起回滚；
+ * 2. LLM 提议的 EVIDENCE 一律拒绝建边并记 `reject_evidence` 审计（唯一写者是精炼结构）。
  *
  * 真库 dim=4 + 脚本化 llm 端口；开库 1 次（LadybugDB 每进程约 15 库封顶）。
  */
@@ -122,7 +122,7 @@ function makeProcessor(llm: unknown, relations?: unknown) {
     now: () => NOW,
     embedding: embed as never,
     embeddingModel: 'test-embed',
-    // 评审 P2/T11：把**真**关系跑者注入进来，钉住 processor→relations 这条接线。
+    // 评审 P2/T11：把真关系跑者注入进来，钉住 processor→relations 这条接线。
     relations: relations as never,
   })
 }
@@ -156,13 +156,13 @@ describe('F3：精炼写 L1 同事务建 EVIDENCE 边（AC2）', () => {
     expect(await inboxStatus(item.id)).toBe('processing')
 
     // 回收重放：只产一份节点 + 一条边。回收把条目打回 pending，消费者按正常路径重新取队头
-    // （markInboxItemDone 带 processing 守卫，直接拿旧 item 会 marked=false ⇒ 什么都不写）。
+    // （markInboxItemDone 带 processing 守卫，直接拿旧 item 会 marked=false，什么都不写）。
     edgeState.mode = 'real'
     expect(await reclaimProcessingInboxItems(store.connection, { now: NOW })).toBe(1)
     const reclaimed = await claimNextInboxItem(store.connection, { owner: 'test-owner', now: NOW })
     expect(reclaimed?.id).toBe(item.id)
     // 回滚带向量的节点会让 HNSW 索引留下指向已回滚行的 offset（LadybugDB 0.22.3 实测），
-    // 所以这次重放的 ANN 扫描**必然失败**：事务被引擎中止 ⇒ 处理器应整段重试（跳过语义去重），
+    // 所以这次重放的 ANN 扫描必然失败：事务被引擎中止，处理器应整段重试（跳过语义去重），
     // 靠这次成功提交把索引一并修好。降级事实必须留痕（AD-21）。
     await makeProcessor(scriptedLlm(factsJson([{ text: '事务内崩溃事实', kind: 'work_fact', priority: 0 }])))(reclaimed!)
     expect(await queryAll(store.connection, 'MATCH (m:memory) RETURN count(m) AS c')).toEqual([{ c: 1 }])
@@ -284,7 +284,7 @@ describe('P2/T11：processor→关系跑者接线（AC4 一次性决定 / AC3 �
       recordedAt: NOW.toISOString(),
       actor: 'system',
     })
-    // 库里再放一个**邻居**（不同指纹、同 E1）——这条是变异审计 M5 的钉子关键：
+    // 库里再放一个邻居（不同指纹、同 E1），这条是变异审计 M5 的钉子关键：
     // 若 processor 把「指纹合并命中的既有节点」也交给关系跑者（M5 = 用 writtenL1 替 relationEntries），
     // 它就会为此跑一次 recallNeighbors + LLM（llmCalls 变 1、落 write_related 审计）；
     // 只有 relationEntries 只含新节点时，才真的「一次 LLM 都不发」。
@@ -319,7 +319,7 @@ describe('P2/T11：processor→关系跑者接线（AC4 一次性决定 / AC3 �
     const item = await claimWithL0('merge')
     await makeProcessor(scriptedLlm(factsJson([{ text, kind: 'work_fact', priority: 0 }])), runner)(item)
 
-    // 命中既有节点 ⇒ relationEntries 为空 ⇒ 关系跑者一次 LLM 都不发。
+    // 命中既有节点，relationEntries 为空，关系跑者一次 LLM 都不发。
     expect(llmCalls).toBe(0)
     expect(await relatedEdges()).toEqual([])
     expect(await audits('write_related')).toEqual([])

@@ -8,7 +8,7 @@
  * - `recallNeighbors`（relations 的 RECALL_STATEMENT）：被排除节点不进邻接候选。
  *
  * 真库单一临时库、beforeAll 播种（LadybugDB 每进程约 15 个实例封顶，本文件 1 个）。
- * 时间口径：PAST = 2026-01-01、FUTURE = 2999-01-01，测试期真实时刻必然落在两者之间——
+ * 时间口径：PAST = 2026-01-01、FUTURE = 2999-01-01，测试期真实时刻必然落在两者之间；
  * listMemories 用真实 now（无注入点），dedup/relations/eii 显式传 NOW=2026-06-01。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'

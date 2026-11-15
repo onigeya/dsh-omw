@@ -1,7 +1,7 @@
 /**
  * L0 原始流水原语真库测试（Story 2.1 / AC①④、AD-4、NFR10）。
  *
- * 覆盖 spec 的 I/O Matrix 中「step 阈值达成」落库形态所需的两条地基：写一行（时间列 UTC
+ * 覆盖 spec 的 I/O Matrix 中「step 阈值达成」落库形态所需的两条行为：写一行（时间列 UTC
  * ISO-8601、actor = 会话 id）与同 id 重放不覆盖（append-only）。
  *
  * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 db-inbox-queue.test.ts。

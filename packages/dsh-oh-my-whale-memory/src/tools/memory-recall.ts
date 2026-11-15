@@ -3,11 +3,11 @@
  *
  * 契约（spec 3.1）：
  * - 参数 `query`（必填）/ `limit`（可选 integer，夹紧 [1,20]，缺省 5）/
- *   `layer`（可选，枚举只含 L1/L2——L3 已退役，宿主侧 parameters schema 拒绝其它值）；
+ *   `layer`（可选，枚举只含 L1/L2，L3 已退役，宿主侧 parameters schema 拒绝其它值）；
  * - 成功值 `{ query, total, results, hint, degraded? }`（degraded 仅在降级检索时出现）；
- * - 失败值 `{ action: 'failed', error: { code, message, retryable } }`——工具**绝不 throw**，
+ * - 失败值 `{ action: 'failed', error: { code, message, retryable } }`，工具不 throw，
  *   出错/配额超限/库不可用一律走失败信封（宿主把 throw 渲染成 isError）；
- * - execute 顺序：先判库（未就绪 ⇒ `db_unavailable`，**不消耗**配额——探测性调用不该吃掉
+ * - execute 顺序：先判库（未就绪 ⇒ `db_unavailable`，不消耗配额，探测性调用不该吃掉
  *   整轮配额，也避免配额把根因盖住），再 `consume()` 配额（同轮召回族工具合计 3 次，
  *   超出即拒），然后 embed 查询向量（失败/不可用 ⇒ 降级为关键词单路，degraded: true），
  *   最后调 src/recall/core.ts 的混合检索内核；
@@ -166,7 +166,7 @@ const OUTPUT_SCHEMA = {
 
 /**
  * 建工具定义。
- * @param options.getRecallStore 取当前检索能力——apply 先注册工具再建库，故必须是 getter；
+ * @param options.getRecallStore 取当前检索能力，apply 先注册工具再建库，故必须是 getter；
  *                              返回 undefined 表示库未就绪（execute 返回 db_unavailable）。
  * @param options.quota         每轮配额；由 index.ts 创建并在 `turn/start` 重置（两种模式都注册）。
  */
@@ -202,7 +202,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
       },
     },
     async execute(args, exec) {
-      // 0) F-13：空白 query 是**参数错误**，不是「无匹配」——向量路会拿空白文本取向量
+      // 0) F-13：空白 query 是参数错误，不是「无匹配」：向量路会拿空白文本取向量
       //    并返回任意近邻，且照常吃掉配额。先拒：不耗配额、不检索、不 embed。
       if (args.query.trim() === '') {
         return failedEnvelope(
@@ -229,11 +229,11 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
         )
       }
       // F-09/F-03：宿主 ToolExecutionInput.signal 是必填取消信号（用户中断 / turn 终止），
-      // 统一经共享件 `toolSignalOf` 读取后透传给 embed 与内核——中断后不再白等 embed 超时、
+      // 统一经共享件 `toolSignalOf` 读取后透传给 embed 与内核，中断后不再白等 embed 超时、
       // 也不再继续跑查询。
       const signal = toolSignalOf(exec)
       // 4) 查询向量：配置齐全才 embed；失败/异常一律降级为关键词单路（degraded: true），
-      //    绝不因网络错误让整次检索失败（spec I/O 矩阵「召回查询 embed 失败」行）。
+      //    不因网络错误让整次检索失败（spec I/O 矩阵「召回查询 embed 失败」行）。
       const limit = clampRecallLimit(args.limit)
       let queryVector: readonly number[] | null = null
       if (store.embeddingEnabled) {
@@ -243,7 +243,7 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           queryVector = null
         }
       }
-      // 5) 调内核；检索错误收敛为失败信封（绝不 throw）。signal 只在有值时入参，
+      // 5) 调内核；检索错误收敛为失败信封（不 throw）。signal 只在有值时入参，
       //    保持既有调用形态（无 exec 的单测）逐字不变。
       try {
         const core = await store.recall({

@@ -1,12 +1,11 @@
 /**
  * apply 级接线测试（Story 2.2 评审补丁 P7 / P9-①③）。
  *
- * 两条只有在这一层才看得见的路径：
- * - P7：写者 apply 启动回收**全部** processing（不论 lease 是否过期，U7）——回收原语的
- *   单测证明不了 apply 真的调了它，这里预置 processing 行再跑真 apply；
- * - ③（V3）：apply 交给消费者的 gate 与 session/event 监听器驱动的是**同一实例**。把监听器
- *   接到另一个 createIdleGate() 上，消费者就永远不会被闸门挡住（宿主级测试看不出来），
- *   所以这里拦下 createInboxConsumer 的 options，回放 turn/start / turn/end 直接看那个 gate。
+ * - P7：写者 apply 启动回收全部 processing（不论 lease 是否过期，U7）。回收原语的单测
+ *   证明不了 apply 真的调了它，这里预置 processing 行再跑真 apply；
+ * - ③（V3）：apply 交给消费者的 gate 与 session/event 监听器驱动的是同一实例。把监听器接到
+ *   另一个 createIdleGate() 上，消费者不会被闸门挡住（宿主级测试看不出来），所以这里
+ *   拦下 createInboxConsumer 的 options，回放 turn/start / turn/end 直接看那个 gate。
  */
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
@@ -31,8 +30,8 @@ const at = (seconds: number): Date => new Date(Date.UTC(2026, 10, 11, 0, 0, seco
 /**
  * createInboxConsumer 的捕获点：证明 apply 把哪个 gate 交给了消费者（V3）。
  *
- * Story 2.5 起 apply 会建**两条**消费链（L1 主路径 + L2 提升慢路径），故这里持续累积；
- * `options`/`consumer` 只跟随**不传 queue 的那一条**（即 L1 主路径）——本文件所有断言
+ * Story 2.5 起 apply 会建两条消费链（L1 主路径 + L2 提升慢路径），故这里持续累积；
+ * `options`/`consumer` 只跟随不传 queue 的那一条（即 L1 主路径）。本文件所有断言
  * 说的都是它；L2 慢路径的接线由 test/l2-promotion-apply.test.ts 单独钉。
  */
 const captured = vi.hoisted(() => ({
@@ -106,8 +105,8 @@ function makeCtx(profileDir: string, options: { readonly flush?: () => Promise<u
 }
 
 /**
- * 回放一个 `session/event`：Story 3.1 起 apply 在写者模式注册**两个**监听器
- * （召回配额重置 + 闸门/L1 提升/三钩子采集）。事件应派发给全部监听器——按数组下标
+ * 回放一个 `session/event`：Story 3.1 起 apply 在写者模式注册两个监听器
+ * （召回配额重置 + 闸门/L1 提升/三钩子采集）。事件应派发给全部监听器；按数组下标
  * 取单个会把断言绑死在注册顺序上。
  */
 function replay(harn: Pick<Harness, 'listeners'>, session: unknown, event: unknown): void {
@@ -181,7 +180,7 @@ describe('③：消费者与 session/event 监听器共享同一 gate 实例（V
     expect(gate!.isIdle()).toBe(true)
 
     replay({ listeners }, { id: 'sess-gate' }, { type: 'turn/start' })
-    // 若 index.ts 把监听器接到**另一个** gate 实例，这里仍是 true——消费者永远不会被挡住。
+    // 若 index.ts 把监听器接到另一个 gate 实例，这里仍是 true，消费者不会被挡住。
     expect(gate!.isIdle()).toBe(false)
     expect(gate!.depthFor('sess-gate')).toBe(1)
 
@@ -263,7 +262,7 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
     await ensureMemoryDbDirectory(dbPath)
     const store: MemoryDatabase = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL_ID })
 
-    // 注意：这里必须真的把 sessions.flush 接进 ctx —— 若 index.ts 查错服务名（例如只查 ctx.get('sessions')），
+    // 这里必须真的把 sessions.flush 接进 ctx：若 index.ts 查错服务名（例如只查 ctx.get('sessions')），
     // 闭包会静默退化成 no-op，本用例就会在“结算后才有行”这一步之外失败。
     const { ctx, listeners } = makeCtx(dir, { flush })
     await plugin.apply(ctx, EMBEDDING_CONFIG)
@@ -283,17 +282,17 @@ describe('Story 2.1：apply 把三钩子采集器接进 session/event（AC①③
   }, 60_000)
 
 /**
- * Story 2.6 契约演进（Lead F1）：maintenance 从「embedding 回填（可选）」变成**恒存在的组合
- * 函数**——`embedding 回填（有客户端才跑）+ EVIDENCE 回填（不依赖任何配置，X1 义务）`。
+ * Story 2.6 契约演进（Lead F1）：maintenance 从「embedding 回填（可选）」变成恒存在的组合
+ * 函数：`embedding 回填（有客户端才跑）+ EVIDENCE 回填（不依赖任何配置，X1 义务）`。
  * 故 embedding disabled 时不再是 undefined；更强的新断言保证 disabled 下只跑 EVIDENCE 回填：
- * 真跑一轮 maintenance，必须写下游标哨兵且**不产生任何 backfill_embedding 审计行**。
+ * 真跑一轮 maintenance，必须写下游标哨兵且不产生任何 backfill_embedding 审计行。
  */
 describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => {
   /**
-   * 评审 P12（T13）：光断言 `maintenance` 是函数，把 index.ts 里的向量回填整段删掉也全绿——
-   * Story 2.4 的 U5 义务会静默停摆。这里在 **enabled** 分支真跑一轮：种一条无向量的存量节点，
+   * 评审 P12（T13）：光断言 `maintenance` 是函数，把 index.ts 里的向量回填整段删掉也全绿。
+   * Story 2.4 的 U5 义务会静默停摆，所以这里在 enabled 分支真跑一轮：种一条无向量的存量节点，
    * 跑 maintenance，必须落一条 `backfill_embedding` 审计行（本夹具的 endpoint 指向死端口，
-   * 故落的是聚合 **失败** 行——正好也钉住「失败要可见、不静默」）。
+   * 故落的是聚合失败行，也钉住「失败要可见、不静默」）。
    */
   it('enabled ⇒ maintenance 真跑向量回填并落 backfill_embedding 审计行', async () => {
     const enabledDir = await makeTempDir('omw-bf-wire-on-')
@@ -340,9 +339,9 @@ describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => 
     const connection = captured.options?.connection() ?? null
     expect(connection).not.toBeNull()
     const conn = connection as Parameters<typeof queryAll>[0]
-    // 评审 P15（T17）改了空库语义：游标为空 + 页为空 ⇒ 直接 return 0、**不写 done 哨兵**
+    // 评审 P15（T17）改了空库语义：游标为空 + 页为空 ⇒ 直接 return 0、不写 done 哨兵
     //（done 是「扫完了」的断言，空库给不出这个结论；先写 done 会让后续新增的存量节点永远
-    // 不被回填）。所以这里先造一条**建表前就存在、source_refs 指向真 L0 行**的节点，
+    // 不被回填）。所以这里先造一条建表前就存在、source_refs 指向真 L0 行的节点，
     // 让回填真的扫到一页并写边，才能断言扫描跑完。
     await queryAll(conn, "CREATE (l:l0_raw {id: 'wire-l0', raw_text: '原文', recorded_at: '2026-01-01T00:00:00.000Z', actor: 'system'})")
     await queryAll(
@@ -356,7 +355,7 @@ describe('P11/VG-3 + Story 2.6：组合 maintenance 的 apply 级接线', () => 
     expect(Number(edges[0]?.c ?? 0)).toBe(1)
     const cursor = await queryAll(conn, "MATCH (m:omw_meta {key: 'evidence_backfill_cursor'}) RETURN m.value AS v")
     expect(cursor[0]?.v).toBe('done')
-    // 且**没有**任何 embedding 回填副作用（disabled ⇒ 不接 embeddingBackfill）。
+    // 且没有任何 embedding 回填副作用（disabled ⇒ 不接 embeddingBackfill）。
     const embeddingRuns = await queryAll(
       connection as Parameters<typeof queryAll>[0],
       "MATCH (g:generation_log) WHERE g.action = 'backfill_embedding' RETURN count(*) AS c",

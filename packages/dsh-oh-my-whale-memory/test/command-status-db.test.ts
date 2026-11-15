@@ -4,11 +4,11 @@
  * 沿用 command-browse-db.test.ts 范式（mkdtemp → 真实库 dim=4，
  * 裸 ctx 驱动 apply 捕获 commands.register 的定义），在最外层表面验证：
  * - AC1：四层计数来自 `memory.layer` 的真实分布（含 0 层的显式呈现；夹具含一条 L1 墓碑，
- *   钉住「全行计数、不套失效过滤」的口径——status 回答系统规模，不是 list 的有效快照）；
+ *   钉住「全行计数、不套失效过滤」的口径，status 回答系统规模，不是 list 的有效快照）；
  * - AC2：embedding 配置缺 token / 缺 model → `disabled（降级检索）`；
  * - AC3：只读实例（写者锁被另一进程持有）标注 `readonly: true` + 逐字原因，计数照常；
  * - AC4：空库返回四层与 failed 全 0（不是「记忆库未就绪」）；
- * - AC5：status 全程本地——不发起任何 fetch。
+ * - AC5：status 全程本地，不发起任何 fetch。
  *
  * 库未就绪（无 profileContext）的真实路径也在此覆盖：命令层假 dep 的同类断言在
  * command-status.test.ts，这里证明的是真实 `getStatus` 读依赖抛出的文案。
@@ -36,7 +36,7 @@ import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
 const MODEL_ID = 'bge-m3'
-// P6 起 endpoint 也是 enabled 的必要项：本夹具的本意是「配置齐全 ⇒ status 打印 embedding: enabled」。
+// P6 起 endpoint 也是 enabled 的必要项：本夹具的本意是「配置齐全，status 打印 embedding: enabled」。
 const EMBEDDING_CONFIG = {
   embedding: { endpoint: 'http://127.0.0.1:1/v1', token: 'sk-test', model: MODEL_ID, dim: DIM },
 }
@@ -55,7 +55,7 @@ const SEEDS: Array<{ layer: string; text: string }> = [
 
 /**
  * 口径钉死夹具：一条 invalid_at 置位的 L1 墓碑。status 是全行计数（系统规模），
- * 与 list 的「有效快照」不同——若聚合语句被误加上失效过滤，AC1 的整段 toBe 会变红。
+ * 与 list 的「有效快照」不同，若聚合语句被误加上失效过滤，AC1 的整段 toBe 会变红。
  */
 const TOMBSTONE_TEXT = '状态夹具 L1 墓碑（已失效）'
 
@@ -92,7 +92,7 @@ function makeCtx(
   } as unknown as Parameters<typeof plugin.apply>[0]
 }
 
-/** 各层真实行数（不依赖分组合聚合，逐层 count——被测实现的主路径才用分组聚合）。 */
+/** 各层真实行数（不依赖分组合聚合，逐层 count，被测实现的主路径才用分组聚合）。 */
 async function countLayer(layer: string): Promise<number> {
   const rows = await queryAll(connection, `MATCH (m:memory {layer: '${layer}'}) RETURN count(m) AS total`)
   return Number(rows[0]?.total)
@@ -127,7 +127,7 @@ function statusText(
     'systemOne: enabled',
     'readonly: false',
   ]
-  // Story 2.6 / F2：边侧差额与关系降级——与 command.ts 同一渲染口径。
+  // Story 2.6 / F2：边侧差额与关系降级，与 command.ts 同一渲染口径。
   if (evidenceGap === null) {
     lines.push('evidence_gap: 未知（边表缺失）')
   } else if (evidenceGap.total > 0) {
@@ -135,7 +135,7 @@ function statusText(
   }
   if (relatedSkipped === null) lines.push('related_skipped: 未知（审计表缺失）')
   else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
-  // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入 ⇒ 未知）。
+  // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入，未知）。
   lines.push('injection: 未知（本实例尚未触发开局注入）')
   return lines.join('\n')
 }
@@ -186,7 +186,7 @@ describe('AC1：层计数来自 memory.layer 的真实分布', () => {
 
     expect(result.kind).toBe('success')
     // Story 2.4 / U5：6 条种子全无向量（那条 L1 墓碑已失效，不计入）。
-    // Story 2.6 / F2：6 条种子经 upsertMemory 直写、既无 source_refs 也无 L0 前驱 ⇒
+    // Story 2.6 / F2：6 条种子经 upsertMemory 直写、既无 source_refs 也无 L0 前驱
     // 全部构成 EII 违例，边侧差额追加一行；漂移为 0（无 source_refs 可漂）。
     expect(result.text).toBe(statusText({}, 1, 6, { total: 6, eiiViolations: 6, drift: 0 }))
   })
@@ -263,7 +263,7 @@ describe('Story 2.5 / 评审 P13（T12）：L2_INBOX 是队列深度，不是 me
     await plugin.apply(makeCtx(p13Dir, registeredDefs), EMBEDDING_CONFIG)
 
     const store = await openMemoryDatabase({ dbPath: resolveMemoryDbPath(p13Dir), dim: DIM, modelId: MODEL_ID })
-    // memory 层的历史口径行：Story 1.7 存量形状，**不该**被算进 L2_INBOX。
+    // memory 层的历史口径行：Story 1.7 存量形状，不该被算进 L2_INBOX。
     await store.upsertMemory({ layer: 'L2_INBOX', text: 'P13 历史 L2_INBOX 一', recordedAt: TS(1) })
     await store.upsertMemory({ layer: 'L2_INBOX', text: 'P13 历史 L2_INBOX 二', recordedAt: TS(2) })
     // 真实队列深度：1 条 pending。
@@ -290,11 +290,9 @@ describe('库未就绪：无 profileContext 时 status 明确报错（读 dep �
   })
 })
 
-// ---------------------------------------------------------------------------
 // AC3：只读实例。跨进程是 AD-12 的真实场景（两个 DSH 窗口 = 两个进程），且
 // database.ts 禁止同进程内同路径换模式打开，所以用 fixtures/hold-db-open.mjs
 // 扮演「持锁的第一实例」（同 command-browse-db.test.ts）。
-// ---------------------------------------------------------------------------
 
 function mergeMeta(key: string, value: string): string {
   return `MERGE (m:omw_meta {key: '${key}'}) ON CREATE SET m.value = '${value}' ON MATCH SET m.value = '${value}'`
@@ -383,13 +381,13 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'embedding: enabled（未嵌入 4 条）',
         'systemOne: enabled',
         `readonly: true, reason: '${READONLY_REASON}'`,
-        // Story 2.6 / F2：只读夹具既不建边表也不建审计表 ⇒ 两个差额都算不出来，
-        // 与 audit_gap 同一约定显式渲染「未知」，绝不静默报 0。
+        // Story 2.6 / F2：只读夹具既不建边表也不建审计表，两个差额都算不出来，
+        // 与 audit_gap 同一约定显式渲染「未知」，不静默报 0。
         'evidence_gap: 未知（边表缺失）',
         'related_skipped: 未知（审计表缺失）',
-        // Story 2.5 / 评审 P8：疑似失效账目同样缺审计表 ⇒ 渲染「未知」（同一约定）。
+        // Story 2.5 / 评审 P8：疑似失效账目同样缺审计表，渲染「未知」（同一约定）。
         'uncertain: 未知（审计表缺失）',
-        // Story 3.3 / B4：只读夹具未触发开局注入 ⇒ 末行「未知」（恒打印，便于断言三态）。
+        // Story 3.3 / B4：只读夹具未触发开局注入，末行「未知」（恒打印，便于断言三态）。
         'injection: 未知（本实例尚未触发开局注入）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)

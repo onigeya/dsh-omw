@@ -1,7 +1,7 @@
 {
   "name": "dsh-oh-my-whale-memory",
   "version": "0.1.0",
-  "description": "DSH 记忆插件 function 插件（cordis 模块名 dsh-oh-my-whale-memory，AD-2）",
+  "description": "DSH 记忆插件的 function 插件（cordis 模块名 dsh-oh-my-whale-memory，AD-2）",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

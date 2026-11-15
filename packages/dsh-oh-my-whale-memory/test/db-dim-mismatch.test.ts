@@ -1,10 +1,10 @@
 /**
  * 维度不符 fail-loud 测试（Story 1.4 / AC5 / AD-14）。
  *
- * 场景：库已按 1024 维建好，用户把 embedding 模型换成 768 维后启动 →
- * 必须拒绝启动并提示"全量重嵌入 / 迁移新库"，绝不静默降级、绝不自动重建。
+ * 场景：库已按 1024 维建好，用户把 embedding 模型换成 768 维后启动时必须拒绝启动，
+ * 并提示"全量重嵌入 / 迁移新库"，不静默降级、不自动重建。
  *
- * 建库放在**子进程**里：LadybugDB 0.22.3 在 Windows 上 close() 后同进程立刻重开
+ * 建库放在子进程里：LadybugDB 0.22.3 在 Windows 上 close() 后同进程立刻重开
  * 同一库文件会拿到 "IO exception: Could not set lock on file ... (Error: 33)"
  * （句柄要等 GC 才释放）。子进程退出后父进程打开则正常。
  *
@@ -100,7 +100,7 @@ describe('omw_meta 与表列维度不一致（schema_mismatch 分支）', () => 
       `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'})`
       + ` ON CREATE SET m.value = '8' ON MATCH SET m.value = '8'`,
     )
-    // 表列仍是 FLOAT[4]，与 meta 的 8 冲突 → 抛 schema_mismatch 而非 dim_mismatch
+    // 表列仍是 FLOAT[4]，与 meta 的 8 冲突，抛 schema_mismatch 而非 dim_mismatch
     await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))
       .rejects.toMatchObject({ code: 'schema_mismatch' })
     await expect(openMemoryDatabase({ dbPath: dbPath2, dim: 4, modelId: 'test-embed' }))

@@ -26,7 +26,7 @@ export interface SnapshotRecord {
 
 /**
  * 文件名 = stableKey 的 SHA-1：把 ':' 之类分隔符替换成 '_' 不是单射（'a:b' 与 'a_b' 撞名），
- * 撞名会让后写的标记覆盖先写的 ⇒ 那条采集永远不会入队。stableKey 在文件内容里，仍可人工定位。
+ * 撞名会让后写的标记覆盖先写的，那条采集永远不会入队。stableKey 在文件内容里，仍可人工定位。
  */
 function snapshotFileName(stableKey: string): string {
   return createHash('sha1').update(stableKey, 'utf8').digest('hex') + SNAPSHOT_SUFFIX
@@ -45,7 +45,7 @@ export function writeSnapshot(dir: string, record: SnapshotRecord): string {
 
 /**
  * 形状校验（评审 P8）：L0 是 append-only，畸形记录一旦写进去就永久留下垃圾行，
- * 所以重放前必须逐字段验；不合格的记录一律「跳过 + 保留文件」，绝不写库。
+ * 所以重放前必须逐字段验；不合格的记录一律「跳过 + 保留文件」，不写库。
  * 返回 null 表示合格，否则返回人类可读的不合格原因。
  */
 function snapshotInvalidReason(record: SnapshotRecord): string | null {

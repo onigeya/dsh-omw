@@ -100,7 +100,7 @@ describe('记忆写入与 ON CONFLICT 合并（AC6）', () => {
       sourceRefs: ['msg-1'],
       recordedAt: '2026-11-09T00:00:00.000Z',
     })
-    // 同指纹变体：大小写不同 + 多余标点/空白——归一化后命中同一 id。
+    // 同指纹变体：大小写不同 + 多余标点/空白，归一化后命中同一 id。
     const second = await store.upsertMemory({
       layer: 'L1',
       text: '  No Vec Fact!!! ',
@@ -119,7 +119,7 @@ describe('记忆写入与 ON CONFLICT 合并（AC6）', () => {
     expect(rows[0]['layer']).toBe('L1')
     // text 不被 ON MATCH 改写：保留首次写入的原文。
     expect(rows[0]['text']).toBe('no vec fact')
-    // 三列向量全 NULL（绝不写零向量），embedding 由 Epic 2 补齐。
+    // 三列向量全 NULL（不写零向量），embedding 由 Epic 2 补齐。
     expect(rows[0]['embedding']).toBeNull()
     expect(rows[0]['model_id']).toBeNull()
     expect(rows[0]['dim']).toBeNull()

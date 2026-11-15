@@ -3,10 +3,10 @@
  *
  * 本文件不碰 LadybugDB（无开库），因此不受每进程约 15 个实例的上限约束。
  * 上游契约按 `_bmad-output/implementation-artifacts/brief-2-5-readiness.md` §1 与
- * Jev 客户端 `_validateQuestions` 实测：`questions` 必须是 key→question 的**对象**
+ * Jev 客户端 `_validateQuestions` 实测：`questions` 必须是 key→question 的对象
  * （数组会被上游 400 拒绝），noul 返回 [0,1] 浮点。
  *
- * 评审 P19 后运行态槽是**实例级**的（原为模块级，同进程第二次 apply 会把已构造 client
+ * 评审 P19 后运行态槽是实例级的（原为模块级，同进程第二次 apply 会把已构造 client
  * 的 enabled 改掉）⇒ 本文件的断言一律读 `client.runtimeState()`，不再有全局复位接缝。
  */
 import { describe, expect, it, vi } from 'vitest'
@@ -73,7 +73,7 @@ describe('createSystemOneClient', () => {
     await noToken.judge('s', QUESTIONS, signal)
     expect(calls[1]!.headers.Authorization).toBeUndefined()
 
-    // 凭据绝不进 status：运行态里没有任何字段承载它。
+    // 凭据不进 status：运行态里没有任何字段承载它。
     expect(JSON.stringify(withToken.runtimeState())).not.toContain('sk-secret-value')
   })
 

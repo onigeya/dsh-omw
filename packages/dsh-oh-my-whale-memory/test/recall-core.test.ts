@@ -105,7 +105,7 @@ beforeAll(async () => {
     modelId: MODEL,
   })
 
-  // ---- alpha 组：双路命中 + 层权重 + priority=-1 + evidence + 快照排除 ----
+  // alpha 组：双路命中 + 层权重 + priority=-1 + evidence + 快照排除
   await seed('alpha recall l2 primary', { layer: 'L2', embedding: A, sourceRefs: ['src-l2'] })
   await seed('alpha recall l1 secondary', { embedding: A })
   await seed('alpha pinned rule', { embedding: A, priority: -1, sourceRefs: ['src-pin'] })
@@ -113,23 +113,23 @@ beforeAll(async () => {
   await seed('alpha future valid excluded', { embedding: A, validAt: FUTURE })
   await seed('alpha future recorded excluded', { embedding: A, recordedAt: FUTURE })
 
-  // ---- 其它关键词/向量节点（参与但不在 alpha 断言内） ----
+  // 其它关键词/向量节点（参与但不在 alpha 断言内）
   await seed('beta only keyword path', { embedding: B })
   await seed('gamma model mismatch', { embedding: C, embeddingModelId: OTHER_MODEL })
   // 超长文本：1200 个拉丁字符 ≈ 300 token（`estimateTokens` 按 4 字符/token 折算）
   // ⇒ 超过 RECALL_TEXT_TOKEN_BUDGET(256)，触发真截断。
   await seed(`omega ${'x'.repeat(1200)}`, { embedding: D })
 
-  // ---- priority 二次加权隔离组（查询串 'boostprio' 只在下面两条出现） ----
+  // priority 二次加权隔离组（查询串 'boostprio' 只在下面两条出现）
   // 词频 3 的噪声条在 weight=0 时靠 BM25 排第一；priority=90 的规则条在 weight=50 时反超。
   await seed('boostprio rule', { priority: 90 })
   await seed('boostprio boostprio boostprio noise')
 
-  // ---- 层权重隔离组（唯一 token + 唯一向量） ----
+  // 层权重隔离组（唯一 token + 唯一向量）
   await seed('layerweight principle statement', { layer: 'L2', embedding: [0.5, 0.5, 0, 0] })
   await seed('layerweight evidence statement', { embedding: [0.5, 0.5, 0, 0] })
 
-  // ---- 同分稳定次级键：各由单路 rank1 命中 ⇒ rrf 相同 ----
+  // 同分稳定次级键：各由单路 rank1 命中 ⇒ rrf 相同
   await seed('zeta keyword only', { recordedAt: '2026-02-01T00:00:00.000Z' })
   await seed('no shared words here', { embedding: [0, 0, 0.5, 0.5], recordedAt: '2026-02-01T00:00:00.000Z' })
   await seed('yota keyword earlier', { recordedAt: '2026-02-01T00:00:00.000Z' })
@@ -354,7 +354,7 @@ describe('runRecallCore：稳定次级键与标注', () => {
   })
 
   it('含 NUL/控制字符的 query（F-03）：净化后不抛错、与空白分隔同义', async () => {
-    // 未净化时内联 NUL 会让语句级解析直接失败——现在先剥离控制字符再内联。
+    // 未净化时内联 NUL 会让语句级解析直接失败，现在先剥离控制字符再内联。
     const result = await recall({ query: 'alpha\u0000beta', queryVector: null })
     const spaced = await recall({ query: 'alpha beta', queryVector: null })
     expect(result.total).toBe(spaced.total)

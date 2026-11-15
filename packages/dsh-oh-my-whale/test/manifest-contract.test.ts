@@ -7,10 +7,9 @@
  * 三处锁定为同一身份，任何一处漂移（改名、版本手误、patch 引用错模块名）
  * 都在此 fail-fast。
  *
- * 测试对象是**源文件**：本文件 import 两包 `src/index.ts` 而非包名入口——
- * 包名入口解析到 `lib/index.js`，而 `lib/` 在 .gitignore:6，干净 clone 里
- * 不存在。这与兄弟测试 entry-exports.test.ts:8-11 的策略一致：
- * `pnpm test` 不依赖先跑 `pnpm -r build`。
+ * 测试对象是源文件：本文件 import 两包 `src/index.ts` 而非包名入口。
+ * 包名入口解析到 `lib/index.js`，而 `lib/` 在 .gitignore:6，干净 clone 里不存在。这与兄弟
+ * 测试 entry-exports.test.ts:8-11 的策略一致：`pnpm test` 不依赖先跑 `pnpm -r build`。
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -29,7 +28,7 @@ const patchNames = parsePatch(patchRaw)
 describe('bundle 命名契约（AD-2：发布名永不重命名）', () => {
   it('package.json name === BUNDLE_NAME', () => {
     expect(pkg.name).toBe(BUNDLE_NAME)
-    // 名字按 AD-2 永不重命名，因此字面量在这里是有效守卫（版本号不是）。
+    // 名字按 AD-2 不重命名，因此字面量在这里是有效守卫（版本号不是）。
     expect(BUNDLE_NAME).toBe('dsh-oh-my-whale')
   })
 

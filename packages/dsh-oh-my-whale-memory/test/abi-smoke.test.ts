@@ -1,7 +1,6 @@
 /**
  * Windows ABI 冒烟测试（Story 1.1 / AD-13）。
- *
- * 实测通过的参数（锁定源——后续建库参数以本注释为准，AD-3）：
+ * 实测通过的参数（建库参数以此处为准，AD-3）：
  * - LadybugDB 版本：0.22.3（`@ladybugdb/core` ~0.22.x 锁定）
  * - 实测日期：2026-11-08
  * - 运行环境：Windows 11 x64 / Node v24.21.0
@@ -10,7 +9,7 @@
  * - 扩展：`vector`（HNSW cosine 磁盘索引）+ `fts`（Okapi BM25）
  * - Windows 前置条件：OpenSSL 3 的 DLL 目录须在 PATH 中（见 README「构建与测试」）
  *
- * 五步流程：open → CREATE NODE TABLE → INSERT → QUERY → CREATE_VECTOR_INDEX
+ * 五步流程：open → CREATE NODE TABLE → INSERT → QUERY → CREATE_VECTOR_INDEX。
  * 任一步失败则测试 fail，Story 1.1 须标 blocked 上报，不迁就失败。
  */
 import { join } from 'node:path'
@@ -36,7 +35,7 @@ let dir: string
 
 beforeAll(async () => {
   // Windows 上 vector/fts 扩展加载依赖 OpenSSL 3 DLL（libssl-3-x64.dll /
-  // libcrypto-3-x64.dll）——运行测试前必须把它们所在目录放进 PATH（见 README
+  // libcrypto-3-x64.dll），运行测试前必须把它们所在目录放进 PATH（见 README
   // 「构建与测试」前置条件），否则 step 5 的 INSTALL vector 会以
   // "Failed to load library: ... libvector.lbug_extension" 失败。
   dir = await makeTempDir('omw-abi-smoke-')
@@ -62,7 +61,7 @@ describe('LadybugDB Windows ABI 冒烟', () => {
   })
 
   it('step 2: CREATE NODE TABLE 建节点表', async () => {
-    // 建两张表：`memory`（业务记忆）与 `l0_raw`（append-only 原始层）——
+    // 建两张表：`memory`（业务记忆）与 `l0_raw`（append-only 原始层），
     // 仅验证 ABI，schema 细节留给 Story 1.4。
     await conn.query(
       'CREATE NODE TABLE memory(id STRING, text STRING,'

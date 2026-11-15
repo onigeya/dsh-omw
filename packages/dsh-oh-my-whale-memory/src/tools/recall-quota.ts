@@ -1,11 +1,11 @@
 /**
  * 召回配额（Story 3.1 / FR-10：同一回合内召回族工具合计最多 3 次）。
  *
- * **按会话键计数**（`Map<string, number>`，键复用 `inboxSessionKey`，idle-gate.ts:40）：
+ * 按会话键计数（`Map<string, number>`，键复用 `inboxSessionKey`，idle-gate.ts:40）：
  * 多会话并存时各自的回合各算各的，谁也不吃掉别人的额度；拿不到 session 身份时归
  * `'unknown'` 桶（保守取向与 idle-gate 一致）。
  *
- * 重置点（spec D7）：`turn/start` **与** `turn/end` 双点重置——turn/start 开新一轮、
+ * 重置点（spec D7）：`turn/start` 与 `turn/end` 双点重置，turn/start 开新一轮、
  * turn/end 收尾即释放；任一到达都不会把上一轮的计数带进下一轮。命令面（`/memory recall`）
  * 是用户手动触发，不计入本配额。
  *
@@ -51,11 +51,11 @@ export function createRecallTurnQuota(limit: number = RECALL_TURN_QUOTA): Recall
 }
 
 /**
- * `session/event` 监听器：`turn/start` 与 `turn/end` **双点**重置该会话的配额（spec D7）。
+ * `session/event` 监听器：`turn/start` 与 `turn/end` 双点重置该会话的配额（spec D7）。
  * 其它事件（`step/end`、`compaction/start`、未知/缺 `type`）一律忽略。
  * 裸 ctx 下 `on` 不存在时由调用方降级为不监听（与 index.ts 既有 session 监听同款）。
  *
- * F-08：**turn 边界同时清 `'unknown'` 桶**——工具侧 owner 取 `exec.agent.session`，某些宿主
+ * F-08：turn 边界同时清 `'unknown'` 桶，工具侧 owner 取 `exec.agent.session`，某些宿主
  * 路径缺它时归 `'unknown'`；若只清事件里的真实 session 键，混合场景（工具调用缺 owner、
  * turn 事件带 session）下该桶进程内用满 3 次后永不恢复。turn 边界是全局事件，
  * 「跨 turn 重置」对未认领会话的桶同样成立。

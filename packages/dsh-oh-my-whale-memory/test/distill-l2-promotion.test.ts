@@ -1,10 +1,9 @@
 /**
- * L1→L2 提升与忠实性门的集成钉（Story 2.5 / epics.md:710-755、裁决 U3/U7/U14/U15）。
+ * L1→L2 提升与忠实性门（Story 2.5 / epics.md:710-755、裁决 U3/U7/U14/U15）。
  *
- * 只有在这一层才看得见的三件事：
- * 1. 三项外部信号的**执行序**——判据①③ 写前（失败即根本不写库）、判据② 写事务内（不过则
+ * 1. 三项外部信号的执行序：判据①③ 写前（失败即根本不写库）、判据② 写事务内（不过则
  *    连候选带边一起回滚）；
- * 2. 两类失败的分野——调用失败抛 InboxRefineError（条目不标 done、候选留队列重试），判定失败
+ * 2. 两类失败的分野：调用失败抛 InboxRefineError（条目不标 done、候选留队列重试），判定失败
  *    正常结束（丢弃候选 + 来源 L1 标 gate-fail）；
  * 3. LLM 判定只标注不丢弃（faithful=false ⇒ outcome='uncertain'，节点照常落库）。
  *
@@ -43,7 +42,7 @@ const NOW_ISO = NOW.toISOString()
 /**
  * 注入点：
  * - 'drop-l2' ⇒ 丢掉终点为 L2 的边（模拟判据② 无法成立）；
- * - 'skip-l2' ⇒ 边照写，但**回报一条 skipped**（评审 P14① T19：edges.skipped>0 的降级审计分支
+ * - 'skip-l2' ⇒ 边照写，但回报一条 skipped（评审 P14① T19：edges.skipped>0 的降级审计分支
  *   在真库里需要端点缺失/层序错误才可达，端到端造不稳定，故在返回值上补一条）。
  */
 const edgeState = vi.hoisted(() => ({ mode: 'real' as 'real' | 'drop-l2' | 'skip-l2' }))
@@ -121,7 +120,7 @@ const IDLE_RUNTIME: SystemOneRuntimeState = {
 const delta = (text: string): StreamChunk => ({ type: 'text-delta', index: 0, text }) as StreamChunk
 const finish = (reason: unknown): StreamChunk => ({ type: 'finish', reason }) as StreamChunk
 
-/** 假 llm：按消息文本分流——含「忠实」的走核实 schema，否则走 L2 综合 schema。 */
+/** 假 llm：按消息文本分流。含「忠实」的走核实 schema，否则走 L2 综合 schema。 */
 function makeLlm(options: { readonly refine?: string; readonly verify?: string } = {}) {
   const calls: string[] = []
   const refine = options.refine ?? JSON.stringify({ text: 'L2 综合陈述', kind: 'work_fact', priority: 9 })
@@ -301,7 +300,7 @@ describe('LLM 判定只标注、不丢弃（AC:662）', () => {
     expect(l2).not.toBeNull()
     const rows = await audits('l2_promotion', l1)
     expect(rows[0]).toMatchObject({ outcome: 'uncertain', passed: false })
-    // 只标注，绝不标 gate-fail。
+    // 只标注，不标 gate-fail。
     expect(await audits('gate_fail', l1)).toHaveLength(0)
   })
 
@@ -333,8 +332,8 @@ describe('LLM 判定只标注、不丢弃（AC:662）', () => {
 
 describe('判据①③ 写前失败 ⇒ 丢弃候选（AC:742-745）', () => {
   it('判据①（L0 引用不可达）⇒ 不写 L2、条目标 done、来源 L1 标 gate-fail、不调 LLM', async () => {
-    // 有 L1 节点但**没有** L0→L1 的 EVIDENCE 边 ⇒ checkReachableToL0 失败。
-    // 评审 P18（T44）：no-evidence-edge 在「证据回填已跑完」之前是**暂时**的 ⇒ 这里把游标
+    // 有 L1 节点但没有 L0→L1 的 EVIDENCE 边 ⇒ checkReachableToL0 失败。
+    // 评审 P18（T44）：no-evidence-edge 在「证据回填已跑完」之前是暂时的 ⇒ 这里把游标
     // 钉成 'done'，才轮到终局丢弃（暂时那一支另有一条用例）。
     await setEvidenceCursor('done')
     const { l1 } = await seedL1('unreach', { withEdge: false })
@@ -353,7 +352,7 @@ describe('判据①③ 写前失败 ⇒ 丢弃候选（AC:742-745）', () => {
   })
 
   // 评审 P18（T44）主路径：2.6 边表之前的 L1 没有边，而回填按 recorded_at ASC 每轮 ≤50，
-  // 可能还没跑到它。此时候选**改期重试**（不标 gate-fail、不丢），等回填补上边再提升。
+  // 可能还没跑到它。此时候选改期重试（不标 gate-fail、不丢），等回填补上边再提升。
   it('判据① 遇 no-evidence-edge 且回填未跑完 ⇒ 抛 InboxRefineError(fatal:false)、不标 gate-fail', async () => {
     await setEvidenceCursor('2026-11-10T00:00:00.000Z|l1-x')
     const { l1 } = await seedL1('pending-edge', { withEdge: false })
@@ -445,7 +444,7 @@ describe('调用失败 ≠ 判定失败（AD-15 / brief §3.5）', () => {
     const rows = await audits('l2_promotion', l1)
     expect(rows[0]).toMatchObject({ outcome: 'uncertain' })
     expect(String(rows[0]!.reason)).toBe('http-503')
-    // 调用失败绝不标 gate-fail（那是判定失败的记号）。
+    // 调用失败不标 gate-fail（那是判定失败的记号）。
     expect(await audits('gate_fail', l1)).toHaveLength(0)
   })
 
@@ -642,7 +641,7 @@ describe('as-most-once 守卫', () => {
 
 describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
   /**
-   * 变异审计 M5：运行态**已降级**时不得再打一次 System One（否则每条候选白等完整超时）。
+   * 变异审计 M5：运行态已降级时不得再打一次 System One（否则每条候选白等完整超时）。
    * 变异敏感度：把 judgeStatement 的分支缩回 `if (client !== null)` ⇒ 本条变红（judgeCalls 从 0 变 1）。
    */
   it('已降级 ⇒ 不再调用 System One，直接回落 ctx.llm 单次检查（M5）', async () => {
@@ -664,7 +663,7 @@ describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
   })
 
   /**
-   * 变异审计 M11：gate-fail 只标**真正失败**的来源，不连坐同批其它来源。
+   * 变异审计 M11：gate-fail 只标真正失败的来源，不连坐同批其它来源。
    * 变异敏感度：把 sourceNotFound 分支的 `[l1Id]` 退回整批 `l1Ids` ⇒ 本条变红（合法来源也挨一刀）。
    */
   it('来源部分缺失 ⇒ 只标缺失的那个，合法来源不挨 gate-fail（M11）', async () => {
@@ -678,7 +677,7 @@ describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
   })
 
   /**
-   * 变异审计 M20：核实用**任务级** signal，不与 LLM 的 20s 子预算共用（否则综合吃掉 19s 时核实只剩 1s）。
+   * 变异审计 M20：核实用任务级 signal，不与 LLM 的 20s 子预算共用（否则综合吃掉 19s 时核实只剩 1s）。
    * 变异敏感度：把 judgeStatement 的 `input.systemOneSignal` 换回 `input.signal` ⇒ 本条变红（两个 signal 变成同一个对象）。
    */
   it('核实与 LLM 综合用不同预算的 signal（M20）', async () => {
@@ -717,13 +716,13 @@ describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
   })
 
   /**
-   * 变异审计 M21：去重原语命中**已 forget（expired）**的既有节点时软丢弃 —— 不产出 L2、不连坐来源。
+   * 变异审计 M21：去重原语命中已 forget（expired）的既有节点时软丢弃，不产出 L2、不连坐来源。
    * 变异敏感度：把 expired-target 守卫改成 `if (false)` ⇒ 本条变红（走回滚路径，来源被永久 gate-fail）。
    */
   it('候选指纹命中已 expired 节点 ⇒ 软丢弃：不标 gate-fail、账目记 expired-target（M21）', async () => {
     const statement = 'M21 综合 ' + String(seq++)
     const expiredId = memoryNodeId(L2_LAYER, statement)
-    // 先落一个**已 forget** 的同指纹 L2（用户主动遗忘的语义，2.4 的 writeDeduplicatedMemory 会返回它）。
+    // 先落一个已 forget 的同指纹 L2（用户主动遗忘的语义，2.4 的 writeDeduplicatedMemory 会返回它）。
     await store.connection.query(
       "CREATE (m:memory {id: '" + expiredId + "', layer: '" + L2_LAYER + "', kind: 'work_fact', priority: 3, " +
       "text: '" + statement + "', valid_at: '" + NOW_ISO + "', recorded_at: '" + NOW_ISO + "', " +
@@ -737,12 +736,12 @@ describe('评审 P24：变异审计补钉（M5/M11/M20/M21/M22）', () => {
     const rows = await audits('l2_promotion', l1)
     expect(String(rows[0]!.reason)).toContain('expired-target')
     expect(rows[0]!.outcome).toBe('uncertain')
-    // 软丢弃绝不连坐来源。
+    // 软丢弃不连坐来源。
     expect(await audits('gate_fail', l1)).toHaveLength(0)
   })
 
   /**
-   * 变异审计 M22：gate-fail 标注行写**完整原因串**（多因时用 '+' 拼），不只取第一条。
+   * 变异审计 M22：gate-fail 标注行写完整原因串（多因时用 '+' 拼），不只取第一条。
    * 变异敏感度：把 markGateFail 的 reason 退回 `reasons[0] ?? reason` ⇒ 本条变红（只剩 no-evidence-edge）。
    */
   it('多因失败 ⇒ 标注行与账目用同一个完整原因串（M22）', async () => {

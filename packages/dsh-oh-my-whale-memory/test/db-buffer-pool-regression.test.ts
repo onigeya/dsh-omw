@@ -3,22 +3,22 @@
  *
  * 背景（实测基线，@ladybugdb/core 0.22.3，native 后端，Windows 11 x64 / Node 24）：
  * LadybugDB 的 `QueryResult` 在存活期间持有 native 结果对象、持续 pin 住 buffer pool 的页。
- * 未释放的 `await connection.query(...)` 在 **bufferManagerSize = 64MB** 下第 **195** 次左右
+ * 未释放的 `await connection.query(...)` 在 bufferManagerSize = 64MB 下第 195 次左右
  * 即抛 `Buffer manager exception: Unable to allocate memory! The buffer pool is full and no
  * memory could be freed!`（本机复测「query + getAll 但不 close」在第 174 次失败，阈值随语句
- * 形态与池内页分布小幅浮动）；一旦池满，**同连接的所有查询与写入**都抛该异常（上层 catch 会把
+ * 形态与池内页分布小幅浮动）；一旦池满，同连接的所有查询与写入都抛该异常（上层 catch 会把
  * 它吞成静默失败/数据丢失）。修复后同一配置可跑上万次。
  *
  * 修复面（本文件保护的行为）：
  * - `src/db/backend.ts`：`closeQueryResult` / `runStatement` / `runPrepared` 成对释放结果；
- * - `src/db/rows.ts`：`collectRows`（`queryAll` 的实现）在 **finally** 里释放结果，取行抛错
+ * - `src/db/rows.ts`：`collectRows`（`queryAll` 的实现）在 finally 里释放结果，取行抛错
  *   的错误路径也不泄漏。
  *
- * 本测试**直接建库**（不经 openMemoryDatabase），以便显式把 buffer pool 压到 64MB —— 插件
+ * 本测试直接建库（不经 openMemoryDatabase），以便显式把 buffer pool 压到 64MB：插件
  * 生产路径用默认池，泄漏要更久才爆；64MB 让「不释放」在 ~195 次就失败，回归才有意义。
  *
  * Windows/LadybugDB 约束：同一进程内 `close()` 后不能重开同一库文件
- * （`IO exception: Could not set lock on file ... (Error: 33)`），所以**只开一次库**；
+ * （`IO exception: Could not set lock on file ... (Error: 33)`），所以只开一次库；
  * 数据行与表都留在这个库内。临时目录清理失败可忽略（句柄由进程退出回收）。
  */
 import { join } from 'node:path'
@@ -28,7 +28,7 @@ import { runPrepared, runStatement } from '../src/db/backend'
 import { queryAll } from '../src/db/rows'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
-/** 修复前实测 ~195 次即耗尽的池大小（见文件头）。 */
+/** 修复前实测 ~195 次即耗尽的池大小（64MB）。 */
 const BUFFER_POOL_BYTES = 64 * 1024 * 1024
 
 /**

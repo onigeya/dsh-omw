@@ -4,7 +4,7 @@
  * 契约：
  * - 参数 `id`（必填 string）/ `depth`（可选 integer；缺省 2、夹紧 [1,3]，AC:875）；
  * - 成功值 `{ id, depth, total, results:[{id,layer,hops,edge_type,reason?,text,truncated?,invalid?,invalid_at?,expired_at?}], hint?, partial? }`；
- * - 失败值 `{ action:'failed', error:{code,message,retryable} }`——**绝不 throw**（宿主把 throw 渲染成 isError）；
+ * - 失败值 `{ action:'failed', error:{code,message,retryable} }`，不 throw（宿主把 throw 渲染成 isError）；
  * - execute 顺序：空白 id 参数错误（不耗配额）→ 判库（db_unavailable，不耗配额）→ 配额（与
  *   memory_recall 同一实例/同一桶）→ 遍历（含 depth=1 超时降级）→ 失败信封。
  *
@@ -30,8 +30,8 @@ import type { RecallQuota } from './recall-quota.js'
 export const MEMORY_RELATED_TOOL_NAME = 'memory_related'
 
 /**
- * 单次遍历预算（spec D8 / NFR6：300ms 为**软目标**观测口径，非硬 SLA）。
- * depth=1 重试使用**独立预算**（同一 timeoutMs）⇒ 最坏总预算 ≤ 2×本值。
+ * 单次遍历预算（spec D8 / NFR6：300ms 为软目标观测口径，非硬 SLA）。
+ * depth=1 重试使用独立预算（同一 timeoutMs）⇒ 最坏总预算 ≤ 2×本值。
  */
 export const RELATED_TRAVERSAL_TIMEOUT_MS = 300
 
@@ -203,7 +203,7 @@ function toFailure(error: unknown): MemoryRelatedFailed {
 
 /**
  * 建工具定义。
- * @param options.getRelatedStore 取当前遍历能力——apply 先注册工具再建库，故必须是 getter。
+ * @param options.getRelatedStore 取当前遍历能力，apply 先注册工具再建库，故必须是 getter。
  * @param options.quota          与 memory_recall 共享的每轮配额。
  */
 export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
@@ -269,7 +269,7 @@ export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
           result = await store.traverse({ id, depth, timeoutMs: RELATED_TRAVERSAL_TIMEOUT_MS })
         } catch (error) {
           if (!(error instanceof RelatedTraversalTimeoutError)) throw error
-          // AC:891-893 / spec D8：超时 → depth=1 另发一次（**独立预算**，总 ≤2×timeoutMs）。
+          // AC:891-893 / spec D8：超时 → depth=1 另发一次（独立预算，总 ≤2×timeoutMs）。
           partial = true
           result = await store.traverse({ id, depth: 1, timeoutMs: RELATED_TRAVERSAL_TIMEOUT_MS })
           if (result.results.length === 0) {

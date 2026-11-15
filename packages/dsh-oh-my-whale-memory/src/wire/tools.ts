@@ -1,7 +1,7 @@
 /**
  * 模型工具注册（Story 1.6 / 3.1 / 3.2）。
  *
- * 三个工具都在建库**之前**注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
+ * 三个工具都在建库之前注册，闭包 getter 在库未就绪时返回 undefined → 调用得到
  * `db_unavailable`，因此工具可用性不受 profile/建库问题牵连。
  * 注册顺序被 `test/entry-exports.test.ts` 钉死：remember → recall → related。
  */

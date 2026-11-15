@@ -2,7 +2,7 @@
  * L2 提升队列与队列泛化（Story 2.5 / U1）。
  *
  * U1 裁决走路线 A：新增 `l2_inbox` 表，把 queue.ts 泛化为「表名参数化的同一套状态机」，
- * **默认实例仍是 l1_inbox**（2.2 起的所有调用点与测试零改动——那由既有的 db-inbox-queue /
+ * 默认实例仍是 l1_inbox（2.2 起的所有调用点与测试零改动，那由既有的 db-inbox-queue /
  * inbox-consumer 等文件继续覆盖）。
  *
  * 本文件钉住泛化本身的三件事：
@@ -78,7 +78,7 @@ describe('队列泛化与 l2_inbox（U1）', () => {
 
     const l2Id = nextId('iso')
     await l2InboxQueue.enqueue(store.connection, { payload: 'L2 提升任务', kind: 'l1-promotion', now: at(1) })
-    // 上面一次入队用的是缺省 id，这里再钉一条显式 id 的条目做读回。
+    // 前一次入队用的是缺省 id，这里再钉一条显式 id 的条目做读回。
     await l2InboxQueue.writeItem(store.connection, { id: l2Id, payload: 'L2 任务二', kind: 'l1-promotion', now: at(2) })
 
     // ① l2 的行不进 l1：l1 队列的取件看不见它。
@@ -98,7 +98,7 @@ describe('队列泛化与 l2_inbox（U1）', () => {
     const claimed = await l2InboxQueue.claimNext(store.connection, { now: at(11) })
     expect(claimed?.id).toBe(id)
 
-    // 第 1..3 次失败回 pending（带退避截止），第 4 次进 failed —— 与 l1 同一口径。
+    // 第 1..3 次失败回 pending（带退避截止），第 4 次进 failed，与 l1 同一口径。
     const first = await l2InboxQueue.fail(store.connection, id, { error: new Error('boom-1'), now: at(12) })
     expect(first).toEqual({ status: INBOX_STATUS_PENDING, attempts: 1 })
     let last = first
@@ -111,7 +111,7 @@ describe('队列泛化与 l2_inbox（U1）', () => {
     }
     expect(last.status).toBe(INBOX_STATUS_FAILED)
     expect(last.attempts).toBe(INBOX_MAX_RETRIES + 1)
-    // 评审 P14⑤（T24）：此处原是空断言（投影不含该列 ⇒ String(undefined ?? '') 恒为 ''，
+    // 评审 P14⑤（T24）：此处原是空断言（投影不含该列，String(undefined ?? '') 恒为 ''，
     // 与 ``toBeUndefined()`` 永不相交，永远不可能变红）。改为真的钉住末次失败原因。
     expect(String((await readL2(id)).last_error)).toContain('boom-' + String(INBOX_MAX_RETRIES + 1))
   })
@@ -120,7 +120,7 @@ describe('队列泛化与 l2_inbox（U1）', () => {
     const id = nextId('reclaim')
     await l2InboxQueue.writeItem(store.connection, { id, payload: 'L2 崩溃条目', now: at(20) })
     await l2InboxQueue.claimNext(store.connection, { now: at(21) })
-    // 仍在 processing（模拟进程崩溃留下的行）⇒ 启动回收把它记成一次失败并回 pending。
+    // 仍在 processing（模拟进程崩溃留下的行），启动回收把它记成一次失败并回 pending。
     const reclaimed = await l2InboxQueue.reclaimProcessing(store.connection, { now: at(22) })
     expect(reclaimed).toBeGreaterThanOrEqual(1)
     const row = await readL2(id)

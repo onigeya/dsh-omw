@@ -1,11 +1,11 @@
 /**
  * 类型化边表与 EII 校验（Story 2.6）。
  *
- * 真库（LadybugDB）验证，因为本模块的正确性全压在几条**未文档化或易错**的查询语义上：
+ * 真库（LadybugDB）验证，因为本模块的正确性全压在几条未文档化或易错的查询语义上：
  * GROUP 的跨表对递归、`label(x)` 动态属性谓词、零行上的 count 聚合、MERGE 重放幂等。
  * 层序取 L0 → L1 → L2（L3 已退役 AD-17），故现实证据链最长 2 跳。
  *
- * 开库次数：本文件共 2 次（共享 store 1 次 + 边表缺失场景 1 次）——LadybugDB 每进程约 15 个库封顶。
+ * 开库次数：本文件共 2 次（共享 store 1 次 + 边表缺失场景 1 次），LadybugDB 每进程约 15 个库封顶。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
@@ -272,7 +272,7 @@ describe('边表缺失与 DB 异常', () => {
       expect(await hasEdgeTables(bare.connection)).toBe(false)
       expect(await computeEvidenceGap(bare.connection, NOW)).toBeNull()
       // brief §5.2 的硬要求：DB 异常不得吞成「不合格」，必须冒泡让 2.5 走重试路径。
-      // 先给一个**存在且有效**的节点，否则第一条查询就以 not-found 短路、根本碰不到边表。
+      // 先给一个存在且有效的节点，否则第一条查询就以 not-found 短路、根本碰不到边表。
       await seedMemory(bare, { id: 'bare-m1', layer: 'L1' })
       await expect(checkReachableToL0(bare.connection, 'bare-m1', NOW)).rejects.toThrow(/EVIDENCE/)
     } finally {

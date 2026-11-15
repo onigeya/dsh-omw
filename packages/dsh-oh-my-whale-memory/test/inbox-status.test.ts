@@ -2,7 +2,7 @@
  * `/memory status` 的 failed 死信视图测试（Story 2.2 / AC4）。
  *
  * 两层证据：
- * - 渲染层（纯函数）：没有 failedEntries 时既有逐行输出**逐字不变**；有死信时追加
+ * - 渲染层（纯函数）：没有 failedEntries 时既有逐行输出逐字不变；有死信时追加
  *   `failed 最近条目:` 与最近条目行（stale 标注、lastError 单行化）；
  * - 集成层（真库 + 真 apply）：造两条真死信（一条 25h 前更新的 stale），经命令 handler
  *   断言 `failed: 2`、最近条目行、顺序（新在前）与 stale 标注。
@@ -126,7 +126,7 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
     })
     const lines = text.split('\n')
     // 10 行基准 + 「failed 最近条目:」+ 1 行条目：id/kind 里的换行不得裂成更多行。
-    // Story 3.3：末行注入状态行 ⇒ 12 → 13。
+    // Story 3.3：末行注入状态行，12 → 13。
     expect(lines).toHaveLength(13)
     expect(lines[11]).toContain('i-1')
     expect(lines[11]).toContain('kind=work_fact')

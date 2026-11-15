@@ -84,7 +84,7 @@ describe('prompt 与 schema 同文件 + sentinel（AC:573 的 L2 延续）', () 
 describe('parseL2Output', () => {
   it('合法输出：只取 text（评审 P16①：分类不再由模型给）', () => {
     const result = parseL2Output(JSON.stringify({ text: '复合经验', kind: 'work_fact', priority: 7 }))
-    // 即使模型硬塞 kind/priority，也只保留 text —— 分类恒由调用方从来源继承。
+    // 即使模型硬塞 kind/priority，也只保留 text，分类恒由调用方从来源继承。
     expect(result).toEqual({ ok: true, statement: { text: '复合经验' } })
   })
 

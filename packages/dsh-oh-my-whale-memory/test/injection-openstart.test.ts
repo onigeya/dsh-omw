@@ -4,7 +4,7 @@
  * 钉住的行为（spec D2/D3/D9/D10）：
  * - 成功：recall(top-8) → LLM 单通道（显式 provider/model、maxTokens=512）→ `{summary, evidence_ids}`
  *   → ready 文本含摘要与证据；evidence_ids 越界/编造被过滤；
- * - 降级阶梯：摘要超时 ⇒ 仅 L1 原文；摘要不可解析 ⇒ 仅 L1；L1 也为空 ⇒ skipped；
+ * - 降级阶梯：摘要超时则仅 L1 原文；摘要不可解析则仅 L1；L1 也为空则 skipped；
  * - 零注入：召回命中为空 / Config 关闭（零 recall、零 LLM）/ 无 llm / 非真人首条消息；
  * - 每会话一次（第二次不生成）、多会话隔离、首条消息按 1000 字符截断、embedding disabled 走关键词单路。
  */
@@ -250,7 +250,7 @@ describe('createOpenstartGenerator：降级阶梯（D2）', () => {
 
     await generate(payload('s-no-llm'))
 
-    // 有命中 ⇒ 必须走 L1-only；recall 仍执行（F-03 顺序：只有召回空才零注入）。
+    // 有命中就必须走 L1-only；recall 仍执行（F-03 顺序：只有召回空才零注入）。
     expect(recallCalls).toHaveLength(1)
     expect(store.read('s-no-llm')).toMatchObject({ status: 'ready' })
     const text = store.textFor('s-no-llm')
@@ -275,7 +275,7 @@ describe('createOpenstartGenerator：降级阶梯（D2）', () => {
 
     await generate(payload('s-no-route'))
 
-    // 有 llm 但无路由 ⇒ 不调 LLM，走仅 L1（与超时/失败同一阶梯）。
+    // 有 llm 但无路由时不调 LLM，走仅 L1（与超时/失败同一阶梯）。
     expect(calls).toHaveLength(0)
     expect(store.read('s-no-route')).toMatchObject({ status: 'ready' })
     const text = store.textFor('s-no-route')

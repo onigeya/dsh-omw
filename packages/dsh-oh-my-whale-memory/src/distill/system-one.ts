@@ -3,33 +3,34 @@
  *
  * 契约（ARCHITECTURE-SPINE.md:135，2026-11-08 本机直连实测）：
  * - `POST {base}/v1/systemone`（非 OpenAI 兼容端点）；
- * - 请求体 `{ model, state, questions }`——**字段名是 `state` 不是 `content`**；
- * - `questions` 是 **key → 问题 的对象映射**（不是数组）：上游对数组直接判无效
+ * - 请求体 `{ model, state, questions }`，字段名是 `state` 不是 `content`；
+ * - `questions` 是 key → 问题的对象映射（不是数组）：上游对数组直接判无效
  *   （`Array.isArray(questions)` 即报 `JEV_INVALID_QUESTIONS`，"必须是非空对象"）；
  * - 每项 `{ type, instructions, criteria? }`，`type ∈ noul | choice | score`；
  * - 响应 `{ model, answers: { <key>: { type: 'noul', noul: number } }, usage }`，
- *   **answers 键严格回显请求的 question key**；
- * - `noul` 返回 **[0,1] 浮点概率，不是布尔**；阈值判定在**插件侧**做。
+ *   answers 键严格回显请求的 question key；
+ * - `noul` 返回 [0,1] 浮点概率，不是布尔；阈值判定在插件侧做。
  *
- * 本通道**独立于 ctx.llm**：不走宿主 LLM 抽象、不带 chat 重试策略。
+ * 本通道独立于 ctx.llm：不走宿主 LLM 抽象、不带 chat 重试策略。
  *
  * 失败语义（AD-15 原文「调用失败 ≠ 判定失败」）：网络 / 5xx / 超时 / 响应畸形一律
- * **不抛错**，返回 `ok: false`（与 embedding 客户端同一形态，便于单测注入假 fetch）。
- * 调用方（L2 提升处理器）据此 **throw**，由 INBOX 队列重试——**绝不**当成「判定不通过」。
+ * 不抛错，返回 `ok: false`（与 embedding 客户端同一形态，便于单测注入假 fetch）。
+ * 调用方（L2 提升处理器）据此 throw，由 INBOX 队列重试，不当成「判定不通过」。
  *
  * 降级（AC:674 / 裁决 U12）：连续 N=3 次失败打开降级开关，随后一次成功立即复原。
- * 「端点持续不可达」是**运行态**，故用运行态槽记录、由 /memory status 读取——
- * 不照抄 embeddingMode 那种「只在校验期 resolve 一次」的静态形态。该槽是**每个 client 实例
- * 一份**（闭包内的 `RuntimeSlot`，见 `createRuntimeSlot`），不是模块级：模块级槽会被同进程里
- * 第二次 apply 的配置同步覆盖，让第一实例的候选收到 `disabled-by-config` 而进死信（评审 P19/T45）。
+ * 端点持续不可达是运行态，故用运行态槽记录、由 /memory status 读取，不照抄
+ * embeddingMode 那种「只在校验期 resolve 一次」的静态形态。该槽是每个 client 实例一份
+ * （闭包内的 `RuntimeSlot`，见 `createRuntimeSlot`），不是模块级：模块级槽会被同进程里
+ * 第二次 apply 的配置同步覆盖，让第一实例的候选收到 `disabled-by-config` 而进死信
+ * （评审 P19/T45）。
  *
  * v1 不做调用层退避（裁决 U5）：单次尝试，`≤4 次` 预算全归任务层（INBOX attempts）。
  *
  * 证据等级（裁决 U9，必须随实现承接）：端点形状 / state 字段名 / noul ∈ [0,1] / RTT 均为
- * 2026-11-08 本机直连实测；但**供应商归属与型号（硅基流动 / Kev-4b）在仓库内无一手底稿**
- * ——本地仅存第三方 Jev 的 `https://api.typesafe.ai/v1/systemone` + model `jev-latest`
+ * 2026-11-08 本机直连实测；但供应商归属与型号（硅基流动 / Kev-4b）在仓库内无一手底稿，
+ * 本地仅存第三方 Jev 的 `https://api.typesafe.ai/v1/systemone` + model `jev-latest`
  * （digests/d2-injection-scoring-r1-1.md:7-8 已复核）。故两个常量都做成可注入选项、
- * 缺省走 AD-15 的硅基流动口径，**换机器 / 换账号 / 重新标定前必须重验并回填出处**。
+ * 缺省走 AD-15 的硅基流动口径，换机器 / 换账号 / 重新标定前必须重验并回填出处。
  */
 
 /** 判定阈值（AD-15：缺省 0.5，阈值判定在插件侧；首周冒烟后锁代码注释）。 */
@@ -37,11 +38,11 @@ export const SYSTEMONE_NOUL_THRESHOLD = 0.5
 
 /**
  * 默认端点（AD-15 口径：硅基流动 `POST /v1/systemone`）。
- * 证据等级见文件头——替换过一次的第三方实测端点是 api.typesafe.ai。
+ * 证据等级：替换过一次的第三方实测端点是 api.typesafe.ai。
  */
 export const DEFAULT_SYSTEMONE_ENDPOINT = 'https://api.siliconflow.cn/v1/systemone'
 
-/** 默认模型（AD-15 逐字 `Kev-4b`；供应商归属无一手底稿，见文件头）。 */
+/** 默认模型（AD-15 逐字 `Kev-4b`；供应商归属无一手底稿）。 */
 export const DEFAULT_SYSTEMONE_MODEL = 'Kev-4b'
 
 /**
@@ -80,7 +81,7 @@ export type SystemOneResult =
 
 export interface SystemOneClient {
   /**
-   * 一次判定调用（**单次尝试**，不做内部退避）。失败返回 ok:false，不抛错。
+   * 一次判定调用（单次尝试，不做内部退避）。失败返回 ok:false，不抛错。
    * `signal` 是调用方的任务预算；与客户端自己的超时取并集。
    */
   judge(state: string, questions: SystemOneQuestions, signal: AbortSignal): Promise<SystemOneResult>
@@ -103,7 +104,7 @@ export interface SystemOneClientOptions {
   readonly model?: string
   /**
    * 可选凭据（评审 P3）：配了就带 `Authorization: Bearer <token>`，没配就不带。
-   * 值是秘密，绝不写日志 / 审计 / status（NFR9）。
+   * 值是秘密，不写日志 / 审计 / status（NFR9）。
    */
   readonly token?: string
   readonly fetch?: typeof fetch
@@ -128,8 +129,8 @@ export interface SystemOneRuntimeState {
 /**
  * 运行态槽的构造与读写（评审 P19）。
  *
- * **必须是实例级**：原实现放在模块级，而 apply 每次启动都会同步配置态（且在只读早退之前），
- * 于是同一进程里第二次 apply 会把已构造 client 的 enabled 置成新配置——第一实例的候选因此
+ * 必须是实例级：原实现放在模块级，而 apply 每次启动都会同步配置态（且在只读早退之前），
+ * 于是同一进程里第二次 apply 会把已构造 client 的 enabled 置成新配置，第一实例的候选因此
  * 收到 `disabled-by-config` 并被当作普通调用失败抛出，4 次退避后进死信（T45）。
  * 收进闭包后，每个 apply 的 client 各自独立，跨实例不再串味。
  */
@@ -204,7 +205,7 @@ function readAnswers(
   return { ok: true, answers: out }
 }
 
-/** 组装客户端（结构化端口，fetch 可注入假实现——运行期不 import 宿主值）。 */
+/** 组装客户端（结构化端口，fetch 可注入假实现，运行期不 import 宿主值）。 */
 export function createSystemOneClient(options: SystemOneClientOptions = {}): SystemOneClient {
   const url = resolveUrl(options.endpoint ?? DEFAULT_SYSTEMONE_ENDPOINT)
   const model = options.model ?? DEFAULT_SYSTEMONE_MODEL
@@ -239,7 +240,7 @@ export function createSystemOneClient(options: SystemOneClientOptions = {}): Sys
         })
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error)
-        // 评审 P4（T23）：调用方预算耗尽（abort）不是端点故障——LLM 慢会把健康的 System One
+        // 评审 P4（T23）：调用方预算耗尽（abort）不是端点故障：LLM 慢会把健康的 System One
         // 推进降级，只要 3 次候选都超预算即可。只有真正的端点不可达才记失败。
         if (!signal.aborted) markFailure(slot, 'request-failed', degradeAfter, now)
         return { ok: false, reason: signal.aborted ? 'aborted-by-caller' : 'request-failed', message }

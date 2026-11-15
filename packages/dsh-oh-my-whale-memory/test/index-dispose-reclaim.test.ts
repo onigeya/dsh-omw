@@ -1,29 +1,22 @@
 /**
- * 插件 dispose 资源回收回归测试（2026-11-14 修复）。
+ * 插件 dispose 资源回收回归测试（2026-11-14 修复），钉 `src/index.ts` 的 `omw-memory-db` /
+ * `omw-memory-writer-lock` 两个 effect：
  *
- * 保护的行为（`src/index.ts` 的 `omw-memory-db` / `omw-memory-writer-lock` 两个 effect）：
- *
- * 1. **回收顺序与 disposer 执行顺序解耦**：cordis 对同一 fiber 的兄弟 effect 是「逆注册序
- *    启动 + Promise.all 并发完成」，没有完成顺序保证（harness `vendor/cordis/src/utils.ts`、
- *    `fiber.ts`；cordis-tutorial/02-lifecycle-and-effects.md:94）。写者锁 effect 注册在后 ⇒
- *    它的 disposer 会先启动。修复前它直接 `lock.release()`：写者锁可能在库句柄还开着时就被
- *    释放，另一个实例拿到锁却在 open 阶段撞上 LadybugDB 自己的文件锁（`Error: 33`），把
- *    「第二实例降级只读」变成启动失败。修复后两个 disposer 都走**同一个记忆化 teardown**：
- *    停消费者 → `drainInboxBackgroundTasks()` → 按后端回收 DB 句柄 → 才 `lock.release()`。
- *    所以**先 await writer-lock closer 之后**，teardown 必须已经跑完。
- *
- * 2. **幂等**：宿主 disable→enable 会重新 apply（新 fiber、同进程、ESM 缓存不逐出 ⇒ 模块级
- *    Map 复用），重复 dispose 不得抛错、不得把重启打死。
- *
- * 3. **dispose 后可重新 apply**：Node 测试环境是 native 后端，teardown 只关 facade、保留
- *    进程内句柄（native close 后同进程重开必失败 `IO exception: Could not set lock on file
- *    ... (Error: 33)`）。本文件**不断言** native 下句柄被真正 close，只钉「重新 apply 成功」。
- *
- * 4. **dispose 后无残留后台任务**：drainInboxBackgroundTasks() 立即结算。
- *
- * fake ctx 构造参考 test/inbox-apply-lifecycle.test.ts（记录 ctx.effect 注册的
- * `{name, dispose}`、tools.register、commands.register、on 等；profileContext.dir 指向临时目录）。
- * 每个测试用独立临时目录，避免跨测试共享 DB 路径（同进程同路径会被句柄缓存复用，串味）。
+ * 1. 回收顺序与 disposer 执行顺序解耦：cordis 对同一 fiber 的兄弟 effect 逆注册序启动 +
+ *    Promise.all 并发完成，没有完成顺序保证（harness `vendor/cordis/src/utils.ts`、`fiber.ts`；
+ *    cordis-tutorial/02-lifecycle-and-effects.md:94）。写者锁 effect 注册在后，它的 disposer
+ *    先启动。修复前它直接 `lock.release()`：写者锁可能在库句柄还开着时就被释放，另一个实例
+ *    拿到锁却在 open 阶段撞上 LadybugDB 自己的文件锁（`Error: 33`），把「第二实例降级只读」
+ *    变成启动失败。修复后两个 disposer 走同一个记忆化 teardown：停消费者 →
+ *    `drainInboxBackgroundTasks()` → 按后端回收 DB 句柄 → 才 `lock.release()`。先 await
+ *    writer-lock closer 之后，teardown 必须已经跑完。
+ * 2. 幂等：宿主 disable→enable 会重新 apply（新 fiber、同进程、ESM 缓存不逐出 ⇒ 模块级 Map
+ *    复用），重复 dispose 不得抛错、不得把重启打死。
+ * 3. dispose 后可重新 apply：native 后端 teardown 只关 facade、保留进程内句柄（native close 后
+ *    同进程重开必失败 `IO exception: Could not set lock on file ... (Error: 33)`）。本文件不断言
+ *    句柄被真正 close，只钉「重新 apply 成功」。
+ * 4. dispose 后无残留后台任务：drainInboxBackgroundTasks() 立即结算。fake ctx 同
+ *    test/inbox-apply-lifecycle.test.ts，每个测试用独立临时目录（同路径句柄缓存会串味）。
  */
 import { access } from 'node:fs/promises'
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -52,7 +45,7 @@ const CONFIG = {
 /**
  * 捕获 apply 创建的两条消费链（L1 主路径 + L2 提升慢路径）。
  *
- * 「先跑 writer-lock closer 后消费者已停」是「锁释放必须等库 teardown」在测试里**可观测**的
+ * 「先跑 writer-lock closer 后消费者已停」是「锁释放必须等库 teardown」在测试里可观测的
  * 信号：修复前 writer-lock disposer 只 release 锁、不碰消费者，这个断言会红。
  */
 const captured = vi.hoisted(() => ({ consumers: [] as InboxConsumer[] }))
@@ -154,7 +147,7 @@ describe('dispose 回收顺序：写者锁必须等库 teardown 完成', () => {
     await expect(access(lockPathOf(dbPath))).resolves.toBeUndefined()
     expect(consumers.map((consumer) => consumer.isRunning())).toEqual([true, true])
 
-    // 宿主会**先启动** writer-lock 的 disposer（逆注册序）。这里单独 await 它，观察锁释放阶段。
+    // 宿主会先启动 writer-lock 的 disposer（逆注册序）。这里单独 await 它，观察锁释放阶段。
     await closer(harness, 'omw-memory-writer-lock')()
 
     // 修复核心：writer-lock closer 完成 ⇒ teardown 已跑完（消费者已停）。

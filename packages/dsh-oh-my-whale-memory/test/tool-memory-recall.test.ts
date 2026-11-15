@@ -9,7 +9,7 @@
  * - 库未就绪：db_unavailable；
  * - limit 夹紧 [1,20]（缺省 5）；
  * - 内核抛错：failed 信封（MemoryDbError 透传 code，其它兜底 db_read_failed）；
- * - execute 绝不 throw。
+ * - execute 不 throw。
  */
 import { describe, expect, it, vi } from 'vitest'
 import { MemoryDbError } from '../src/db/errors'
@@ -233,7 +233,7 @@ describe('memory_recall execute（假 store）', () => {
       layer?: string
     }) => ({ total: 0, results: [], degraded: false, hint: '无匹配记忆。' }))
     const store = makeStore({ recall })
-    // 4 次调用会超出缺省配额 3——这里取大配额，只测 limit 夹紧。
+    // 4 次调用会超出缺省配额 3，这里取大配额，只测 limit 夹紧。
     const tool = makeTool(store, createRecallTurnQuota(10))
 
     await tool.execute({ query: 'a' })

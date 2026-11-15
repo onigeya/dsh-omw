@@ -3,13 +3,13 @@
  *
  * 评审 P1：`agent/pre-step` 是宿主 waterfall，监听器签名 `(payload, next) => PreStepDecision`；
  * 不调用 `next()` 即有意短路（docs/cordis-tutorial/04-events.md:138、
- * docs/subsystems/core.md:1014-1031），宿主 `agent.ts:302-313` 随后读 `decision.kind`——
+ * docs/subsystems/core.md:1014-1031），宿主 `agent.ts:302-313` 随后读 `decision.kind`。
  * 返回 `undefined` 会让每个会话首个 step 抛 TypeError。
  *
  * 本文件钉死三条不变量（无论生成成功/失败/超时/抛错）：
- * 1. `next` **恰好调用 1 次**，监听器返回的决策就是 `next()` 的决策（消息不被吞）；
+ * 1. `next` 恰好调用 1 次，监听器返回的决策就是 `next()` 的决策（消息不被吞）；
  * 2. generator 抛错时 `next` 仍被调用、决策照常返回；
- * 3. generator 挂起（模拟超时）时，监听器在硬预算内返回 `next()`，绝不永久阻塞宿主。
+ * 3. generator 挂起（模拟超时）时，监听器在硬预算内返回 `next()`，不永久阻塞宿主。
  */
 import { describe, expect, it, vi } from 'vitest'
 import type { Context } from '@deepseek-ai/cordis'
@@ -127,7 +127,7 @@ describe('wireInjection / agent/pre-step waterfall（F-01）', () => {
   })
 
   it('generator 抛错时 next 仍被调用、决策照常返回（异常不放大到宿主）', async () => {
-    // 让 generator 的第一次 store 读取抛错 ⇒ generator promise reject；监听器必须吞掉并 next()。
+    // 让 generator 的第一次 store 读取抛错，generator promise reject；监听器必须吞掉并 next()。
     const store = createInjectionStore()
     store.read = () => {
       throw new Error('store broken')

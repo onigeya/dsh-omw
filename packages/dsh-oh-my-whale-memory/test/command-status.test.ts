@@ -93,7 +93,7 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
       'embedding: enabled',
       'systemOne: enabled',
       'readonly: false',
-      // Story 3.3 / B4：注入状态恒打印一行（夹具未注入 ⇒ 未知）。
+      // Story 3.3 / B4：注入状态恒打印一行（夹具未注入，未知）。
       'injection: 未知（本实例尚未触发开局注入）',
     ].join('\n'))
   })

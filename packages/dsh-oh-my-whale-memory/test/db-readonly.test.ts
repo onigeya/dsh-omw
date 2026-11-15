@@ -201,7 +201,7 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
     const writer = await startWriterInstance(dbPath, 8)
     await writer.kill()
 
-    // 进程已消失但锁文件还在、且记录着已退出的 pid —— 这就是 AC3 的陈旧锁。
+    // 进程已消失但锁文件还在、且记录着已退出的 pid，这就是 AC3 的陈旧锁。
     await expect(readFile(`${dbPath}.lock`, 'utf8')).resolves.toBe(`${writer.pid}\n`)
     expect(() => process.kill(writer.pid, 0)).toThrow()
 
@@ -296,7 +296,7 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
     // 这正是"两个窗口几乎同时启动"的真实窗口：写者已持锁，但 new Database() 是惰性打开，
     // 库文件还没落盘；只读方若立刻判 db_open_failed，就失去了降级只读的机会（AC1）。
     // delayMs 只负责撑开窗口，须给写者的 DDL（INSTALL/LOAD 扩展 + 建表）在
-    // READONLY_SCHEMA_WAIT_MS（2s）等待窗内留足余量——700ms 曾在满载机器上超窗（flaky）。
+    // READONLY_SCHEMA_WAIT_MS（2s）等待窗内留足余量，700ms 曾在满载机器上超窗（flaky）。
     const writer = await startWriterInstance(dbPath, 8, { delayMs: 300, readyEarly: true })
     try {
       const db = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true })

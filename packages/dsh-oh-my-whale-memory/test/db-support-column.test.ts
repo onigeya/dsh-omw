@@ -4,9 +4,9 @@
  * AD-4 Rule（ARCHITECTURE-SPINE.md:90）与 epics.md:328 都把 support 列在 memory 列清单里，
  * 但 Epic 1 的 createMemoryTableStatement 漏落；Story 2.5 的质量门判据③ 要写入它
  * （support := 候选 source_refs 中命中存活 L0 的条数，≥1）。照 Story 2.4 / U1 的 parent_id
- * 同一模式补：新库直接带列、旧库由唯一迁移点幂等 ALTER、只读实例绝不 ALTER。
+ * 同一模式补：新库直接带列、旧库由唯一迁移点幂等 ALTER、只读实例不 ALTER。
  *
- * 旧库/新库都在**子进程**里建（Windows 上 close() 后同进程重开同一库文件报 Error: 33，
+ * 旧库/新库都在子进程里建（Windows 上 close() 后同进程重开同一库文件报 Error: 33，
  * 与 test/db-parent-id.test.ts 同一手法）。
  */
 import { spawnSync } from 'node:child_process'
@@ -141,11 +141,11 @@ describe('memory.support 加列与旧库迁移（U16）', () => {
     await store.close()
   })
   /**
-   * 评审 P24（变异审计 M9）：ON MATCH 的 support 必须**并集取大、单调不减**。
+    * 评审 P24（变异审计 M9）：ON MATCH 的 support 必须并集取大、单调不减。
    *
    * 变异敏感度：把 UPSERT_ON_MATCH_CLAUSE 的 support CASE 换成 `m.support = m.support`
    * （即 ON MATCH 完全不合并）⇒ 本条变红（第二次写入的 7 被丢掉，仍读到 3）。
-   * 现有用例只在**新节点**上写一次 support（走 ON CREATE），从不执行 ON MATCH 分支。
+    * 现有用例只在新节点上写一次 support（走 ON CREATE），从不执行 ON MATCH 分支。
    */
   it('同指纹二次写入：support 取较大者，且不被更小的新值拉低（变异审计 M9）', async () => {
     const store = await openMemoryDatabase({

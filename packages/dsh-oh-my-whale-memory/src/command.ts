@@ -1,29 +1,24 @@
 /**
- * `/memory` 宿主命令（Story 1.7 `remember` / Story 1.8 `list` + `show` / Story 1.9 `status`
- * / Story 3.1 `recall`）。
+ * `/memory` 宿主命令（Story 1.7 `remember` / 1.8 `list` + `show` / 1.9 `status` / 3.1
+ * `recall` / 3.2 `related`）。
  *
  * 命令定义是可脱离宿主单测的纯工厂：解析与错误收敛不依赖 ctx。handler 只读
- * `invocation.rawInput`，把任何读/写库异常收敛为 `{ kind: 'error', text }`——命令
- * 永不抛出（宿主契约：thrown handler 会以 `kind: 'error'` 收尾，见 commands.md:172）。
+ * `invocation.rawInput`，把读/写库异常收敛为 `{ kind: 'error', text }`；命令不抛异常，
+ * 宿主对 thrown handler 以 `kind: 'error'` 收尾（commands.md:172）。
  *
- * 五个子命令共用一个 definition（`ctx.commands.register` 仍只有一处）：
- * - `remember [--kind=..] [--priority=..] <内容>`：写入 L1（Story 1.7 + 1.11 层收敛）；
- * - `list [关键词]`：最近的记忆（文本包含匹配、`recorded_at` 倒序、默认 20 条）；
- * - `show <id>`：一条记忆的完整字段（含已失效墓碑——「列表隐藏、详情可见」是有意的）；
- * - `status`：层计数 + failed + embedding 降级 + 只读降级（Story 1.9，无参、纯读、无 LLM/网络）；
- * - `recall <query>`：混合检索（向量 + 关键词 RRF 融合，Story 3.1；**不计入** turn 配额，
- *   用户手动触发；渲染同 memory_recall 工具摘要）。
+ * 六个子命令共用一个 definition（`ctx.commands.register` 仍只有一处），代码看不出的约束：
+ * - `remember [--kind=..] [--priority=..] <内容>` 写 L1（Story 1.7 + 1.11）；FR-20 / AC2：
+ *   手动写路径也产出非空 kind / 非 0 priority（含 -1）；
+ * - `list [关键词]`：文本包含匹配、`recorded_at` 倒序、默认 20 条；
+ * - `show <id>` 含已失效墓碑，「列表隐藏、详情可见」是有意的；
+ * - `status` 无参、纯读、无 LLM/网络（Story 1.9）；
+ * - `list` 是字面包含匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；语义检索走
+ *   `recall`（db 侧 src/recall/core.ts）。过滤、排序、截断在 db 层完成，命令层只做渲染；
+ * - 手动 `recall` / `related` 不计入 turn 配额，配额只作用于对应的工具面。
  *
- * `list [关键词]` 是**字面包含匹配**（两侧小写化），不是语义检索 / 向量 / FTS / RRF；
- * 语义检索走 `recall`（db 侧 src/recall/core.ts）。过滤、排序、截断都由 db 层在库侧完成，
- * 命令层只做渲染。
- *
- * `@deepseek-ai/dsh-commands` 在本工作区不可解析，故这里只用本地结构化类型描述
- * 命令定义 / 调用 / 结果——运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
+ * `@deepseek-ai/dsh-commands` 在本工作区不可解析，故只用本地结构化类型描述命令定义 /
+ * 调用 / 结果，运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
  * `CommandResult` 一致（D:\workspace\deepseek-harness\docs\subsystems\commands.md）。
- *
- * Story 1.11：`remember` 新增可选分类旗标 `--kind=<分类>` / `--priority=<整数>`
- * （FR-20 分类写路径，AC2——手动写路径也能产出非空 kind / 非 0 priority，含 -1）。
  */
 import { MEMORY_KINDS } from './tools/memory-remember.js'
 import { summarizeMemoryText } from './shared/summarize.js'
@@ -48,9 +43,9 @@ export const MEMORY_RELATED_SUBCOMMAND = 'related'
 /**
  * `list` 默认返回条数。
  *
- * 无既有常量可复用（`src/config.ts` 无列表条数字段，PRD FR-14 / FR-11 也没给数字）；
- * 取 20 是与 FR-12 已存在的「结果上限 20 条」同量级，避免同一产品里 20/50 两种口径
- * 并存。**这是本 story 的取舍，不是 PRD 要求**（见 spec Design Notes）。
+ * 无既有常量可复用（`src/config.ts` 无列表条数字段，PRD FR-14 / FR-11 也没给数字）。取 20
+ * 与 FR-12 的「结果上限 20 条」同量级，避免同一产品里 20/50 两种口径并存。这是本 story 的
+ * 取舍，不是 PRD 要求（见 spec Design Notes）。
  */
 export const MEMORY_LIST_DEFAULT_LIMIT = 20
 
@@ -80,14 +75,13 @@ export const MEMORY_SHOW_USAGE = [
 /** `status` 子命令的 usage（spec 钉死值：`/memory status`）。
  *
  * `status` 无参数：解析到多余 payload 时返回本常量作为错误正文（不静默忽略输入），
- * 但**不回显**用户输入的 payload——错误正文恒为命令形态本身。
+ * 但不回显用户输入的 payload，错误正文恒为命令形态本身。
  */
 export const MEMORY_STATUS_USAGE = '/memory status'
 
 /**
- * `recall` 子命令的缺省条数（F-10）：直接复用内核的 `RECALL_DEFAULT_LIMIT`，
- * **不再自己写字面量**——命令面与工具面的缺省条数从此只有一个来源（此前两份 5
- * 只能靠测试的 drift-guard 兜住，注释还谎称「取自内核」）。
+ * `recall` 子命令的缺省条数（F-10）：直接复用内核的 `RECALL_DEFAULT_LIMIT`，不再自己写
+ * 字面量，命令面与工具面的缺省条数只有一个来源（此前两份 5 只能靠测试的 drift-guard 兜住）。
  */
 export const MEMORY_RECALL_DEFAULT_LIMIT = RECALL_DEFAULT_LIMIT
 
@@ -216,12 +210,12 @@ export interface MemoryCommandDetail {
 }
 
 /**
- * `/memory status` 的运行态快照（Story 1.9）。命令层不 import db 模块，形状在此镜像——
+ * `/memory status` 的运行态快照（Story 1.9）。命令层不 import db 模块，形状在此镜像，
  * 计数事实源是 `memory` 表的 `layer` 列（db 层 `countMemoriesByLayer`）。
  *
  * `failed` 在 Epic 1 恒为 0：库内没有任何失败存储（`schema.ts` 只有 memory / l0_raw /
  * omw_meta），PRD 的条目状态机属 Epic 2 Story 2.2。本 story 只放占位，2.2 建队列后由
- * 真实计数替换——别把这个字段读成「系统健康」。
+ * 真实计数替换，别把这个字段读成「系统健康」。
  */
 export interface MemoryStatusSnapshot {
   /** L1 / L2 计数（按全部行聚合，不套失效过滤）。 */
@@ -231,7 +225,7 @@ export interface MemoryStatusSnapshot {
   /** 失败条目计数（Story 2.2 起读 `l1_inbox` 的 failed 计数；表缺失照抛，不静默报 0）。 */
   readonly failed: number
   /**
-   * 最近失败条目明细（最近 5 条，Story 2.2 / AC4）。空或缺省时**不追加任何行**，
+   * 最近失败条目明细（最近 5 条，Story 2.2 / AC4）。空或缺省时不追加任何行，
    * 既有 status 逐行输出保持不变。
    */
   readonly failedEntries?: readonly MemoryFailedEntry[]
@@ -239,13 +233,13 @@ export interface MemoryStatusSnapshot {
   readonly embeddingMode: 'enabled' | 'disabled'
   /**
    * System One 忠实性通道的状态（Story 2.5 / AC:674、U6）：
-   * - `enabled`：配置开启且未运行态降级（核实走 System One）；
+   * - `enabled`：配置开启且未运行态降级，核实走 System One；
    * - `disabled-by-config`：`systemOne.enabled=false`，整体回落 ctx.llm 单次检查；
    * - `degraded`：端点持续不可达（连续失败达阈值），整体回落 ctx.llm 单次检查。
    */
   readonly systemOne: SystemOneStatusMode
   /**
-   * 仍有效但**没有向量**的节点数（Story 2.4 / U5）：这些节点进不了 HNSW，对语义去重与
+   * 仍有效但没有向量的节点数（Story 2.4 / U5）：这些节点进不了 HNSW，对语义去重与
    * 语义检索隐形。仅在 embedding enabled 且该值 > 0 时追加渲染，0 时输出逐字不变。
    */
   readonly unembedded: number
@@ -257,7 +251,7 @@ export interface MemoryStatusSnapshot {
   readonly auditGap: number | null
   /**
    * 边侧差额（Story 2.6 / EII + 漂移合计）：null = 边表缺失、算不出来（渲染成未知，
-   * 绝不静默报 0，与 auditGap 同一约定）。仅 total > 0 或为 null 时追加渲染。
+   * 不静默报 0，与 auditGap 同一约定）。仅 total > 0 或为 null 时追加渲染。
    */
   readonly evidenceGap: EvidenceGapCounts | null
   /**
@@ -291,13 +285,13 @@ export interface MemoryStatusSnapshot {
 
 /**
  * System One 通道的状态枚举（Story 2.5 / U6）。命令层不 import db/distill 模块，
- * 故在此重复声明形状——与 `distill/system-one.ts` 的运行态槽语义必须一致。
+ * 故在此重复声明形状，与 `distill/system-one.ts` 的运行态槽语义必须一致。
  */
 export type SystemOneStatusMode = 'enabled' | 'disabled-by-config' | 'degraded'
 
 /**
  * 边侧差额计数（命令层镜像 `db/eii.ts` 的 `EvidenceGapSummary`）。命令层不 import db 模块，
- * 形状在此重复声明——两个字段名与语义必须与 db 侧一致（`eii.ts` 的 `EvidenceGapSummary`）。
+ * 形状在此重复声明，两个字段名与语义必须与 db 侧一致（`eii.ts` 的 `EvidenceGapSummary`）。
  */
 export interface EvidenceGapCounts {
   /** EII 违例（有效节点但无有效路径到 L0）。 */
@@ -309,7 +303,7 @@ export interface EvidenceGapCounts {
 
 /**
  * 死信明细（Story 2.2 / AC4）：只给计数不够定位，`/memory status` 追加最近的失败摘要。
- * `stale` 由读侧（src/index.ts 的 getStatus，24h 基准）判定——渲染层保持纯函数。
+ * `stale` 由读侧（src/index.ts 的 getStatus，24h 基准）判定，渲染层保持纯函数。
  */
 export interface MemoryFailedEntry {
   readonly id: string
@@ -340,12 +334,12 @@ export interface MemoryCommandDependencies {
   /** 读层计数与运行态（Story 1.9）；抛错由 handler 收敛为 error 结果。 */
   getStatus(): Promise<MemoryStatusSnapshot>
   /**
-   * 混合检索（Story 3.1；渲染层只消费结果）。手动 `recall` **不计入** turn 配额——
+   * 混合检索（Story 3.1；渲染层只消费结果）。手动 `recall` 不计入 turn 配额，
    * 配额在 memory_recall 工具面消耗；抛错由 handler 收敛为 error 结果。
    */
   recallMemories(input: { readonly query: string; readonly limit: number }): Promise<MemoryCommandRecallResult>
   /**
-   * 关联遍历（Story 3.2；渲染层只消费结果）。手动 `related` 同样**不计入** turn 配额；
+   * 关联遍历（Story 3.2；渲染层只消费结果）。手动 `related` 同样不计入 turn 配额；
    * 抛错由 handler 收敛为 error 结果。
    */
   relatedMemories(input: { readonly id: string; readonly depth?: number }): Promise<MemoryCommandRelatedResult>
@@ -367,7 +361,7 @@ const MEMORY_REMEMBER_KIND_FLAG = '--kind='
 const MEMORY_REMEMBER_PRIORITY_FLAG = '--priority='
 
 /**
- * 旗标值的结束偏移：`flag` 之后首个**空白字符**（空格与制表符同等对待，与子命令切分
+ * 旗标值的结束偏移：`flag` 之后首个空白字符（空格与制表符同等对待，与子命令切分
  * 用的 `\s+` 保持一致）；-1 表示旗标一直延伸到串尾（如 `--kind=persona` 无正文）。
  */
 function flagValueEnd(rest: string, flag: string): number {
@@ -448,19 +442,19 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
 }
 
 /**
- * 异常转可读文本：Error 取 message，其它取字符串。绝不携带凭据（只含用法/字段名）。
+ * 异常转可读文本：Error 取 message，其它取字符串。不携带凭据（只含用法/字段名）。
  */
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-// 列表/召回共用的文本摘要（60 code point 截断）已抽到 ./summarize.ts（Story 3.1：
-// memory_recall 工具 presenter 也要同一规则，命令层不 import db 模块故单独成模块）。
+// 列表/召回共用的文本摘要（60 code point 截断）在 ./summarize.ts（Story 3.1：memory_recall
+// 工具的 presenter 也要同一规则，命令层不 import db 模块故单独成模块）。
 
 /**
  * 解析 `related` 的 payload：`<id> [depth]`（Story 3.2）。
  * - 缺 id → usage；超过两个 token → usage（不静默忽略多余输入）；
- * - depth 必须是**正整数**（非整数/0/负数 → usage；>3 由遍历层夹紧到 3，与工具面同口径）。
+ * - depth 必须是正整数（非整数/0/负数 → usage；>3 由遍历层夹紧到 3，与工具面同口径）。
  */
 function parseRelatedPayload(payload: string): MemoryCommandParseResult {
   if (!payload) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
@@ -475,7 +469,7 @@ function parseRelatedPayload(payload: string): MemoryCommandParseResult {
   return { kind: 'related', id, depth }
 }
 
-/** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，绝不出现 `undefined`。 */
+/** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，不出现 `undefined`。 */
 function renderValue(value: unknown): string {
   if (value === null || value === undefined) return '(空)'
   const text = String(value)
@@ -496,9 +490,9 @@ function renderRefs(refs: readonly string[] | null | undefined): string {
 /**
  * 列表渲染（spec 钉死格式）：
  * - 空库（无关键词）→ `暂无记忆。`；有关键词但无命中 → `没有匹配「<关键词>」的记忆。`；
- * - 有命中的首行恒为 `记忆列表（共 N 条，最近优先）：`——spec 的「输出格式钉死（可断言）」
- *   枚举了列表首行的三种形态，其中不带关键词的变体，故不回显关键词；
- *   命中行本身都含该关键词（大小写不敏感匹配的后果），「成功文案含该关键词」由命中内容满足。
+ * - 有命中的首行恒为 `记忆列表（共 N 条，最近优先）：`，不回显关键词：spec 的「输出格式
+ *   钉死（可断言）」枚举的列表首行形态里，不带关键词的变体就是这一种；命中行本身都含该
+ *   关键词（大小写不敏感匹配的后果），「成功文案含该关键词」由命中内容满足。
  *   其后每行 `- <id> [<layer>] <text摘要>`。
  */
 function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: string | undefined): string {
@@ -514,7 +508,7 @@ function renderMemoryList(entries: readonly MemoryCommandListEntry[], query: str
 /**
  * 关联渲染（Story 3.2）：首行 `记忆关联（共 total 条，显示 N 条）：`（total = 20 条截断前），
  * 其后每行 `- <id> <hops>跳 [<edge_type>] <text摘要>`，失效邻居追加「（已失效）」；
- * 末行展示 hint（evidence expired / partial / 起点已失效）。无命中是**成功值**。
+ * 末行展示 hint（evidence expired / partial / 起点已失效）。无命中是成功值。
  */
 function renderMemoryRelated(result: MemoryCommandRelatedResult): string {
   if (result.results.length === 0) return result.hint ?? '无匹配记忆。'
@@ -530,11 +524,11 @@ function renderMemoryRelated(result: MemoryCommandRelatedResult): string {
 }
 
 /**
- * 召回渲染（Story 3.1）：与 memory_recall 工具的 presenter 同形摘要——
- * 首行 `记忆召回（共 <total> 条，显示 <N> 条，按 RRF 排序）：`（**total 是 limit 截断前**
- * 的融合命中数，D6：用户据此看到「还有多少没显示」），其后每行 `- <id> [<layer>] <text摘要>`；
- * 末行展示内核 `hint`（降级/无命中的说明**只有 hint 一个来源**，两个渲染面不再各拼文案）。
- * 无命中是**正常成功值**，直接返回 hint（`无匹配记忆。` / 降级版），不是错误。
+ * 召回渲染（Story 3.1）：与 memory_recall 工具的 presenter 同形摘要。
+ * 首行 `记忆召回（共 <total> 条，显示 <N> 条，按 RRF 排序）：`，total 是 limit 截断前的
+ * 融合命中数（D6：用户据此看到「还有多少没显示」），其后每行 `- <id> [<layer>] <text摘要>`；
+ * 末行展示内核 `hint`（降级/无命中的说明只有 hint 一个来源，两个渲染面不再各拼文案）。
+ * 无命中是正常成功值，直接返回 hint（`无匹配记忆。` / 降级版），不是错误。
  */
 function renderMemoryRecall(result: MemoryCommandRecallResult): string {
   if (result.results.length === 0) return result.hint
@@ -568,7 +562,7 @@ function renderMemoryDetail(detail: MemoryCommandDetail): string {
 
 /**
  * 追加一块死信明细（标题 + 每条一行）。L1 的 `failed` 与 L2 的 `l2_failed` 逐字段同形，
- * 故共用同一段渲染——两处都必须让 id/kind 过 `renderSingleLine`（值内换行会伪造出额外行，
+ * 故共用同一段渲染，两处都必须让 id/kind 过 `renderSingleLine`（值内换行会伪造出额外行，
  * 破坏「逐行钉死」的输出格式，P5）。entries 为空时不追加任何行。
  */
 function appendFailedEntryLines(
@@ -590,7 +584,7 @@ function appendFailedEntryLines(
  * 状态渲染（spec「输出格式钉死（可断言）」逐行照抄）：
  * 首行 `记忆状态`，其后固定顺序的 `键: 值` 行，计数为十进制。
  *
- * 非降级也显式打印 `embedding: enabled` 与 `readonly: false`——「不静默 no-op」要求降级
+ * 非降级也显式打印 `embedding: enabled` 与 `readonly: false`，「不静默 no-op」要求降级
  * 可见，显式打印非降级态让两种模式都可断言，也避免把「字段缺失」误读成健康。
  */
 export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
@@ -607,7 +601,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
       : snapshot.unembedded > 0
         ? `embedding: enabled（未嵌入 ${snapshot.unembedded} 条）`
         : 'embedding: enabled',
-    // Story 2.5 / U6：恒打印一行（与 embedding 行同一取向）——非降级也显式打印，
+    // Story 2.5 / U6：恒打印一行（与 embedding 行同一取向），非降级也显式打印，
     // 让「配置关闭」与「运行态降级」两种降级都可断言，且不与 enabled 混淆。
     snapshot.systemOne === 'disabled-by-config'
       ? 'systemOne: disabled-by-config（已降级回 ctx.llm）'
@@ -616,7 +610,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
         : 'systemOne: enabled',
     snapshot.readonly ? `readonly: true, reason: '${snapshot.readonlyReason ?? ''}'` : 'readonly: false',
   ]
-  // Story 2.6 / D7：边侧差额（EII + 漂移）与关系降级——都只在需要时追加，gap=0 时既有
+  // Story 2.6 / D7：边侧差额（EII + 漂移）与关系降级都只在需要时追加，gap=0 时既有
   // 逐行输出逐字不变。边表缺失（null）与审计表缺失一样渲染成未知，不静默报 0。
   if (snapshot.evidenceGap === null) {
     lines.push('evidence_gap: 未知（边表缺失）')
@@ -631,7 +625,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   } else if (snapshot.relatedSkipped > 0) {
     lines.push(`related_skipped: ${snapshot.relatedSkipped}`)
   }
-  // Story 2.5 / 评审 P8：L2 死信与疑似失效账目——都只在**需要时**追加，0/缺省时既有
+  // Story 2.5 / 评审 P8：L2 死信与疑似失效账目都只在需要时追加，0/缺省时既有
   // 逐行输出逐字不变；算不出来（null）照 2.6 的范式渲染「未知」，不静默报 0。
   if (snapshot.l2Failed !== undefined && snapshot.l2Failed > 0) {
     lines.push(`l2_failed: ${snapshot.l2Failed}`)
@@ -642,9 +636,9 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     lines.push(`uncertain: ${snapshot.uncertain}`)
   }
   appendFailedEntryLines(lines, 'l2_failed 最近条目:', snapshot.l2FailedEntries ?? [])
-  // AC4：仅当真有失败条目时追加死信明细——没有失败时既有逐行输出逐字不变。
+  // AC4：仅当真有失败条目时追加死信明细，没有失败时既有逐行输出逐字不变。
   appendFailedEntryLines(lines, 'failed 最近条目:', snapshot.failedEntries ?? [])
-  // Story 3.3 / B4：开局注入的可见性（**末尾追加**，既有行逐字不动）。恒打印一行，
+  // Story 3.3 / B4：开局注入的可见性（末尾追加，既有行逐字不动）。恒打印一行，
   // 让「Config 关闭」「从未注入」「已注入」三态都可断言；预算超限再追加一行（INV-2 提示）。
   lines.push(...renderInjectionStatusLines(snapshot))
   return lines.join('\n')

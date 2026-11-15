@@ -238,7 +238,7 @@ describe('memory_related execute（假 store）', () => {
         anyValidPath: true,
         results: [{ ...VALID_ITEM, hops: 1 }],
       })
-    // 注意：只有 RelatedTraversalTimeoutError 触发重试，故用真实错误类替换首个 rejection。
+    // 只有 RelatedTraversalTimeoutError 触发重试，故用真实错误类替换首个 rejection。
     const { RelatedTraversalTimeoutError } = await import('../src/db/edges')
     traverse.mockReset()
     traverse

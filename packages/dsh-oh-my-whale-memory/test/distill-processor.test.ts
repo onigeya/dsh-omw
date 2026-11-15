@@ -1,7 +1,6 @@
 /**
- * INBOX 精炼处理器集成测试（Story 2.3 / R1、R2、N4、N5、N9、N10）。
- *
- * 真库（dim=4）+ 脚本化 ctx.llm 端口 + 假 embeddings 客户端。覆盖：
+ * INBOX 精炼处理器集成测试（Story 2.3 / R1、R2、N4、N5、N9、N10）。真库（dim=4）+ 脚本化
+ * ctx.llm 端口 + 假 embeddings 客户端。覆盖：
  * - 成功路径：单次 llm.stream → 每条 fact 一个 L1 节点、条目同事务标 done、refine success 记账；
  * - ① 事务内抛错 ⇒ 节点数/审计行数/条目状态三不变，回收重放只产一份；
  * - ② 同条目成功路径跑两次 ⇒ 节点与记账行数不增（R1 at-most-once）；
@@ -102,10 +101,10 @@ const failingEmbed = (reason: string): EmbedClient => ({
 /**
  * 造一条「可精炼」的 INBOX 条目。
  *
- * **必须同时写 l0_raw 行且 id 相同**（Story 2.3 的 P1：capture 侧 L0 行与 INBOX 行同一身份）。
+ * 必须同时写 l0_raw 行且 id 相同（Story 2.3 的 P1：capture 侧 L0 行与 INBOX 行同一身份）。
  * 否则精炼建 EVIDENCE 边时 l0_raw 端点缺失 ⇒ writeEvidenceEdges 记 endpoint-missing ⇒
  * processor 再补一条 write_evidence_skipped 的 uncertain 审计（P6/P16 的降级可见），
- * 于是「refine 审计 = 1 条」这类断言会被这条**正确**的降级行打破。
+ * 于是「refine 审计 = 1 条」这类断言会被这条正确的降级行打破。
  *
  * 生产路径把两条写在同一事务里；这里是测试夹具，两个原语各自开事务即可（被测对象是 processor）。
  */
@@ -215,7 +214,7 @@ describe('评审补钉（T3 / T7 / T20 / P4 追加项）', () => {
   it('评审 T20：facts 超过单请求上限时按 EMBEDDING_MAX_BATCH 分批（客户端被调 2 次）', async () => {
     const item = await claimFixture('embed-batch', '原文')
     const batches: number[] = []
-    // Story 2.4 起写入去重按 cosine 合并节点：本用例必须给 9 条事实**互不相似**的向量，
+    // Story 2.4 起写入去重按 cosine 合并节点：本用例必须给 9 条事实互不相似的向量，
     // 否则同向量事实会合并成 1 个节点。取 4 维超立方体的 9 个顶点：两两 |cos| ≤ 0.5
     // ⇒ distance ≥ 0.5 > ANN 粗筛上界 0.1001，既不合并也不触发版本链，且每条都带向量。
     const cube = (index: number): number[] => {
@@ -282,7 +281,7 @@ describe('评审补钉（T3 / T7 / T20 / P4 追加项）', () => {
   })
   it('评审 T12/T13：不返回的 LLM 被 LLM 子预算截断 ⇒ llm-timeout 可重试，第 4 次进死信', async () => {
     const item = await claimFixture('llm-timeout', '原文')
-    // 永不产出 chunk、只在 signal 中止时 reject 的端口：模拟 provider 卡住。
+    // 不产出 chunk、只在 signal 中止时 reject 的端口：模拟 provider 卡住。
     const hanging: LlmPort = {
       stream(options) {
         return (async function* generate() {
@@ -373,7 +372,7 @@ describe('R1 + R4① 端到端：消费者 + 处理器', () => {
     expect(await consumer.runOnce()).toBe(1)
     consumer.stop()
 
-    // R4①：记的是**精炼后的节点 kind**（persona/work_fact），不是采集来源标签 turn。
+    // R4①：记的是精炼后的节点 kind（persona/work_fact），不是采集来源标签 turn。
     expect(recorded).toEqual(['persona', 'work_fact'])
     expect(calls).toHaveLength(1)
     expect(await inboxStatus(id)).toBe('done')

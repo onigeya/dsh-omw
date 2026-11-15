@@ -1,6 +1,6 @@
 /**
  * 召回配额纯单测（Story 3.1 / FR-10 + spec D7）：按会话键隔离计数、3 次放行第 4 次拒、
- * `turn/start` 与 `turn/end` **双点**重置、其它事件不误重置、缺 session 归 `'unknown'` 桶。
+ * `turn/start` 与 `turn/end` 双点重置、其它事件不误重置、缺 session 归 `'unknown'` 桶。
  *
  * 键与 `inboxSessionKey`（inbox/idle-gate.ts:40）同名实现：监听器收 `session` 对象，
  * 工具面收 `exec.agent.session`，两边经同一个键落到同一只桶。

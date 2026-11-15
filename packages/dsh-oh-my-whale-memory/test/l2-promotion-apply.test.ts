@@ -3,10 +3,10 @@
  *
  * 只有在这一层才看得见的四件事：
  * ① 第二条消费链真的绑在 l2_inbox 上、intervalMs 是 30s 慢节律（AC:721 不与 L1 争资源）；
- * ② 让路闸门真的按「L1 有待处理条目」为假（brief §5.4）——闸门接反了宿主级测试看不出来；
+ * ② 让路闸门真的按「L1 有待处理条目」为假（brief §5.4），闸门接反了宿主级测试看不出来；
  * ③ L2 队列的启动回收真的在 apply 里跑了（U7 口径）；
  * ④ /memory status 的 systemOne 行取自配置态与运行态两个来源（U6/U12）；
- * ⑤ 评审 P15（T14）：dispose 时**两条**消费链都被停掉（此前只断言到 L1 那条）；
+ * ⑤ 评审 P15（T14）：dispose 时两条消费链都被停掉（此前只断言到 L1 那条）；
  * ⑥ 评审 P14⑥（T26）：注入 L2 处理器的 systemOne 客户端真的跟着配置开关为 null / 非 null。
  */
 import { afterAll, describe, expect, it, vi } from 'vitest'
@@ -25,8 +25,7 @@ const MODEL_ID = 'bge-m3'
 const EMBEDDING_CONFIG = { embedding: { token: 'sk-test', model: MODEL_ID, dim: DIM } }
 const at = (seconds: number): Date => new Date(Date.UTC(2026, 10, 11, 0, 0, seconds))
 
-/** createInboxConsumer 的捕获点：按创建顺序留下每次 options（L1 先、L2 后）。 */
-/** createInboxConsumer / createL2PromotionProcessor 的捕获点（评审 P15、P14⑥）。 */
+/** createInboxConsumer / createL2PromotionProcessor 的捕获点（评审 P15、P14⑥）；options 按创建顺序留下（L1 先、L2 后）。 */
 const captured = vi.hoisted(() => ({
   all: [] as unknown[],
   /** dispose 断言用：每次 createInboxConsumer 的 stop 都被包一层。 */
@@ -97,7 +96,7 @@ function makeCtx(profileDir: string): Harness {
   return { ctx, registeredDefs, info }
 }
 
-/** 每个用例独立库 + 独立 apply ⇒ 捕获点也要清干净（否则跨用例累积）。 */
+/** 每个用例独立库 + 独立 apply，捕获点也要清干净（否则跨用例累积）。 */
 function resetCaptured(): void {
   captured.all.length = 0
   captured.stops.length = 0
@@ -133,7 +132,7 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
     expect(typeof l2Options.process).toBe('function')
     expect(typeof l2Options.claimGuard).toBe('function')
 
-    // 让路闸门：L1 无 pending ⇒ 放行；插一条 L1 pending ⇒ 挡下（慢路径给主路径让路）。
+    // 让路闸门：L1 无 pending，放行；插一条 L1 pending，挡下（慢路径给主路径让路）。
     expect(await l2Options.claimGuard?.()).toBe(true)
     await enqueueInboxItem(store.connection, { payload: 'L1 待处理', kind: 'work_fact', now: at(1) })
     expect(await l2Options.claimGuard?.()).toBe(false)
@@ -161,8 +160,8 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
     await store.close()
   })
 
-  // 评审 P15（T14）：dispose 顺序的**两条链**都必须被停。此前 makeCtx 丢弃了 closer，
-  // 且捕获点只在 options.queue === undefined 时记录 consumer ⇒ L2 的 dispose 无断言。
+  // 评审 P15（T14）：dispose 顺序的两条链都必须被停。此前 makeCtx 丢弃了 closer，
+  // 且捕获点只在 options.queue === undefined 时记录 consumer，L2 的 dispose 无断言。
   it('dispose 时 L1 与 L2 两条消费链都被 stop（且先于关库）', async () => {
     resetCaptured()
     const { store, dir } = await openStore('omw-l2-dispose-')
@@ -173,7 +172,7 @@ describe('Story 2.5：apply 装配第二条消费链', () => {
     expect(captured.closers.length).toBeGreaterThan(0)
     expect(captured.stops[1]!.mock.calls).toHaveLength(0)
 
-    // 宿主 await 每一个 closer（entry-exports 同款用法）⇒ 第二条（db）closer 内停两条消费者。
+    // 宿主 await 每一个 closer（entry-exports 同款用法），第二条（db）closer 内停两条消费者。
     for (const closer of captured.closers) {
       try { await closer() } catch { /* 锁释放等其它 closer 的失败与本用例无关 */ }
     }
@@ -192,7 +191,7 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, EMBEDDING_CONFIG)
 
-    // 评审 P14⑥（T26）：配置开启 ⇒ 真客户端被注入提升处理器（此前无任何断言）。
+    // 评审 P14⑥（T26）：配置开启时，真客户端被注入提升处理器（此前无任何断言）。
     expect(captured.processorDeps.at(-1)).toMatchObject({ systemOne: expect.anything() })
     expect((captured.processorDeps.at(-1) as { systemOne?: unknown } | undefined)?.systemOne).not.toBeNull()
 
@@ -210,7 +209,7 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
     const harness = makeCtx(dir)
     await plugin.apply(harness.ctx, { ...EMBEDDING_CONFIG, systemOne: { enabled: false } })
 
-    // 评审 P14⑥（T26）：配置关闭 ⇒ 处理器拿到的是 null（整体回落 ctx.llm）。
+    // 评审 P14⑥（T26）：配置关闭时，处理器拿到的是 null（整体回落 ctx.llm）。
     expect((captured.processorDeps.at(-1) as { systemOne?: unknown } | undefined)?.systemOne).toBeNull()
 
     const result = await harness.registeredDefs[0]!.handler({ rawInput: ' status' })
@@ -221,11 +220,11 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
     await store.close()
   })
   /**
-   * 评审 P24（变异审计 M6）：让路闸门必须按**「现在就能干的活」**作答，不是按 pending 计数。
+   * 评审 P24（变异审计 M6）：让路闸门必须按「现在就能干的活」作答，不是按 pending 计数。
    *
    * 变异敏感度：把 index.ts 的 `(await l1InboxQueue.countBusy(connection)) === 0` 换回
-   * `.countByStatus(connection)).pending === 0` ⇒ 本条变红。
-   * 关键状态：退避中的 pending（lease_until 在未来，最长 120s）**不算忙** —— 它现在取不出来，
+   * `.countByStatus(connection)).pending === 0`，本条变红。
+   * 关键状态：退避中的 pending（lease_until 在未来，最长 120s）不算忙，它现在取不出来，
    * 让 L2 慢循环停摆纯属浪费；现有断言只覆盖「无 pending」与「有 pending 且可立即取」。
    */
   it('L1 只有退避中的 pending（lease_until 在未来）⇒ 不算忙，闸门放行（变异审计 M6）', async () => {
@@ -240,7 +239,7 @@ describe('Story 2.5 / U6：status 的 systemOne 行', () => {
       "MATCH (q:l1_inbox {id: 'l1-backoff'}) SET q.lease_until = '2099-01-01T00:00:00.000Z'",
     )
 
-    // 反面前提：按 pending **计数**确实是 1（故变异实现会误判为「忙」），而按 countBusy 是 0。
+    // 反面前提：按 pending 计数确实是 1（故变异实现会误判为「忙」），而按 countBusy 是 0。
     expect(await l1InboxQueue.countByStatus(store.connection)).toMatchObject({ pending: 1 })
     expect(await l1InboxQueue.countBusy(store.connection)).toBe(0)
     expect(await l2Options.claimGuard?.()).toBe(true)

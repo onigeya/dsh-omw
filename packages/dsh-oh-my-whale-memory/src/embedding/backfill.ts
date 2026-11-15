@@ -1,27 +1,27 @@
 /**
  * NULL 向量有界回填（Story 2.4 / U5；deferred-work.md 的 Story 1.6 遗留项）。
  *
- * Epic 1 的直写路径（memory_remember / 手动写入）不产向量，节点三列保持 NULL；
- * 这些节点进不了 HNSW 索引，等于对路径②（语义去重）与 2.5 的语义检索隐形。
- * 本模块在**写者空闲窗口**把它们补齐：
+ * Epic 1 的直写路径（memory_remember / 手动写入）不产向量，节点三列保持 NULL。
+ * 这些节点进不了 HNSW 索引，对路径②（语义去重）和 2.5 的语义检索都不可见。
+ * 本模块在写者空闲窗口把它们补齐：
  *
  * - 只在 `embeddingMode === 'enabled'` 且维度已 pin 时接线（由 src/index.ts 决定）；
- * - 受空闲闸门约束：入口查一次 `gate.isIdle()`，**每个批次迭代前再复查一次**
- *   （评审 P9⑥ / EC-4）——为假立即 break，一轮绝不跨 turn 边界继续发网络或写库；
- * - 每轮至多 `BACKFILL_BATCH_SIZE`（50）条，按 `EMBEDDING_MAX_BATCH`（8）切请求；
- *   每个批次各自拿一个 `AbortSignal.timeout(BACKFILL_RUN_TIMEOUT_MS)` 预算
+ * - 受空闲闸门约束：入口查一次 `gate.isIdle()`，每个批次迭代前再复查一次
+ *   （评审 P9⑥ / EC-4）。为假立即 break，一轮不会跨 turn 边界继续发网络或写库；
+ * - 每轮至多 `BACKFILL_BATCH_SIZE`（50）条，按 `EMBEDDING_MAX_BATCH`（8）切请求。
+ *   每个批次各拿一个 `AbortSignal.timeout(BACKFILL_RUN_TIMEOUT_MS)` 预算
  *   （评审 P9①：整轮共用一个 signal 时，首批耗尽预算会让余批全部 abort）；
- * - 每轮起始读一次库内 pin 的 dim：未 pin 或条目向量长度不符 ⇒ 不写
- *   （评审 P9④：绝不把未校验长度绑进 FLOAT[dim]）；
- * - 每条写入走 `runInTransaction(setMemoryEmbedding + 成功审计)`：DB 写失败只记失败并
- *   continue，**不再中止整轮**（评审 P9② / BH-12）；审计与写入同事务（评审 P9②/ BH-06：
+ * - 每轮起始读一次库内 pin 的 dim。未 pin 或条目向量长度不符就不写
+ *   （评审 P9④：不把未校验长度的向量绑进 FLOAT[dim]）；
+ * - 每条写入走 `runInTransaction(setMemoryEmbedding + 成功审计)`。DB 写失败只记失败并
+ *   continue，不中止整轮（评审 P9② / BH-12）；审计与写入同事务（评审 P9② / BH-06：
  *   事务外写审计可能落进别人未结算的连接级事务）；
- * - 失败审计改为**每轮至多一条聚合行**（失败条数 + 首个 reason），替代逐条/逐批
- *   （评审 P9③ / EC-3）——端点故障时不再每分钟灌数十行；审计 reason 只写机器 reason，
- *   完整 message 只进 logger（评审 P9⑦ / EC-6，与 processor.ts 的记账口径统一）；
- * - `setMemoryEmbedding` 的 `WHERE embedding IS NULL` 让重复/并发调用幂等，绝不覆盖已有向量。
+ * - 失败审计改成每轮至多一条聚合行（失败条数 + 首个 reason），替代逐条或逐批
+ *   （评审 P9③ / EC-3）：端点故障时不再每分钟灌数十行。审计 reason 只写机器 reason，
+ *   完整 message 只进 logger（评审 P9⑦ / EC-6，与 processor.ts 的记账口径一致）；
+ * - `setMemoryEmbedding` 的 `WHERE embedding IS NULL` 让重复或并发调用幂等，不覆盖已有向量。
  *
- * 调用方式是消费者的 maintenance 钩子（不是新定时器）——因此不新增 ctx.effect，
+ * 调用方式是消费者的 maintenance 钩子，不是新定时器，因此不新增 ctx.effect，
  * 且天然被 2.2 既有的 `stop() → drainInboxBackgroundTasks() → db.close()` 序列覆盖。
  */
 import type * as lbug from '@ladybugdb/core'
@@ -41,7 +41,7 @@ import { EMBEDDING_MAX_BATCH, type EmbedClient } from './client.js'
 export const BACKFILL_BATCH_SIZE = 50
 
 /**
- * 单个 embedding 请求的预算（评审 P9①：按**批次**计时，不是按轮）。
+ * 单个 embedding 请求的预算（评审 P9①：按批次计时，不是按轮）。
  * 超时后这一批失败并计入聚合失败行，其余批次仍各拿一份自己的预算。
  */
 export const BACKFILL_RUN_TIMEOUT_MS = 20_000
@@ -50,7 +50,7 @@ export interface EmbeddingBackfillOptions {
   /** 惰性取连接（apply 期间建库完成后才可用；未就绪 → 本轮不做事）。 */
   readonly connection: () => lbug.Connection | null
   readonly gate: IdleGate
-  /** 复用 Story 2.3 的 embedding 客户端，**不另写**一个（U5）。 */
+  /** 复用 Story 2.3 的 embedding 客户端，不另写一个（U5）。 */
   readonly client: EmbedClient
   /** 请求体里的模型名。 */
   readonly model: string
@@ -67,7 +67,7 @@ export interface EmbeddingBackfill {
 }
 
 /**
- * 每轮至多一条的**聚合**失败审计（评审 P9③ / EC-3）：失败条数 + 首个 reason。
+ * 每轮至多一条的聚合失败审计（评审 P9③ / EC-3）：失败条数 + 首个 reason。
  * 与节点写入一样放进事务（评审 P9② / BH-06：审计在事务外用同一连接写，可能落进别人
  * 未结算的连接级事务，随对方 COMMIT/ROLLBACK）。
  */
@@ -112,7 +112,7 @@ export function createEmbeddingBackfill(options: EmbeddingBackfillOptions): Embe
     let failed = 0
     let firstFailure: string | null = null
     for (let start = 0; start < entries.length; start += EMBEDDING_MAX_BATCH) {
-      // 评审 P9⑥ / EC-4：每次批次迭代前复查空闲闸门——一轮里宿主随时可能开始新 turn。
+      // 评审 P9⑥ / EC-4：每次批次迭代前复查空闲闸门，一轮里宿主随时可能开始新 turn。
       if (!options.gate.isIdle()) break
       const batch = entries.slice(start, start + EMBEDDING_MAX_BATCH)
       // 评审 P9①：每批一个新预算，避免首批耗尽后余批全部 abort。

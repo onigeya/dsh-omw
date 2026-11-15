@@ -2,7 +2,7 @@
  * 孤儿快照重放真库测试（Story 2.1 / AC⑤、AD-7）。
  *
  * 关键前提（Lead 裁决）：同一快照必须算出同一 id，否则重放会造出第二条队列条目，
- * 同一段对话被精炼两次——本文件第二条用例把这一点钉死。
+ * 同一段对话被精炼两次，本文件第二条用例把这一点钉死。
  */
 import { mkdirSync, readdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'

@@ -3,10 +3,10 @@
  *
  * 三条验收：
  *   A. 旧库（无 parent_id）用写者打开 → 幂等 ALTER 补列、旧数据仍可读；
- *   B. 旧库用只读打开 → **不执行 ALTER**，列仍缺席（AC2：只读不写库）；
+ *   B. 旧库用只读打开 → 不执行 ALTER，列仍缺席（AC2：只读不写库）；
  *   C. 已带 parent_id 的库再次打开 → verifyExistingSchema 容忍多出来的列，不重复 ALTER（X3）。
  *
- * 旧库/新库都在**子进程**里建：LadybugDB 0.22.3 在 Windows 上 close() 后同进程立刻重开
+ * 旧库/新库都在子进程里建：LadybugDB 0.22.3 在 Windows 上 close() 后同进程立刻重开
  * 同一库文件会拿到 "IO exception: Could not set lock on file ... (Error: 33)"；
  * 子进程退出后父进程打开则正常（与 test/db-dim-mismatch.test.ts 同一手法）。
  */
@@ -31,8 +31,8 @@ const DIM = 4
 const LEGACY_ID = 'legacy-1'
 
 /**
- * 冻结的旧库 DDL（Story 1.4 的 memory 表形态：13 列，**无 parent_id**）。
- * 故意不复用 src 的 createMemoryTableStatement——它已经带上新列，写进测试就等于
+ * 冻结的旧库 DDL（Story 1.4 的 memory 表形态：13 列，无 parent_id）。
+ * 故意不复用 src 的 createMemoryTableStatement，它已经带上新列，写进测试就等于
  * 拿新 schema 冒充旧库，"旧库能补列"这条断言会变成永真式。
  */
 const LEGACY_MEMORY_TABLE = [

@@ -1,14 +1,14 @@
 /**
  * 精炼处理器 × 写入去重集成（Story 2.4）。
  *
- * 处理器把 L1 写路径从 writeMemoryVersion 换成 writeDeduplicatedMemory——本文件验证
- * 两条语义去重路径在**真实精炼链路**（真库 dim=4 + 脚本化 llm + 假 embeddings）上成立：
+ * 处理器把 L1 写路径从 writeMemoryVersion 换成 writeDeduplicatedMemory，本文件验证
+ * 两条语义去重路径在真实精炼链路（真库 dim=4 + 脚本化 llm + 假 embeddings）上成立：
  *   ① 两条向量 cosine ≈ 0.99 的事实合并成 1 个节点 + merge_semantic 审计；
  *   ② 预置同源（source_refs=[item.id]）、cosine ≈ 0.93 的既有节点 → 版本链：新节点带 parent_id、
  *      旧节点置 invalid_at + invalidate_version 审计；
  *   ③ embedding 失败 → 无向量、整段不走 ANN，节点照常写入（N4）；
- *   ④ **U4 粗筛上界回归钉**：cosine ≈ 0.92（distance ≈ 0.08）的亲缘候选确实被 ANN 取回并走进
- *      [0.90,0.97) 版本链分支——把粗筛退回 distance<=0.03 本用例即变红。
+ *   ④ U4 粗筛上界回归钉：cosine ≈ 0.92（distance ≈ 0.08）的亲缘候选确实被 ANN 取回并走进
+ *      [0.90,0.97) 版本链分支，把粗筛退回 distance<=0.03 本用例即变红。
  *
  * 独立文件的理由：test/distill-processor.test.ts 已贴 LadybugDB 每进程 ~15 实例硬顶。
  */

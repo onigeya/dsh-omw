@@ -2,7 +2,7 @@
  * `session/event` 监听器装配（Story 2.1 / 2.2 / 2.5）。
  *
  * 回放 turn/start、turn/end、step/end、compaction/start 到同一个空闲闸门、同一份 L1 提升
- * 触发器与同一个采集器——消费者拿到的 gate 必须就是这里驱动的那个实例（V3）。
+ * 触发器与同一个采集器：消费者拿到的 gate 必须就是这里驱动的那个实例（V3）。
  * 映射本体在 `inbox/session-events.ts`（可单测；这里接反了宿主级测试看不出来）。
  */
 import type { Context } from '@deepseek-ai/cordis'

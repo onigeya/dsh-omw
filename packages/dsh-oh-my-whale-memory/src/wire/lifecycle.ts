@@ -4,7 +4,7 @@
  * 注册的全是 effect：自己打开的资源必须挂 disposer 由宿主统一释放。
  * 异步 disposer：宿主/测试都会 await 它（entry-exports.test.ts 逐个 await closers）。
  *
- * **回收顺序与 disposer 执行顺序解耦**：cordis 对同一 fiber 的兄弟 effect 是「逆注册序启动 +
+ * 回收顺序与 disposer 执行顺序解耦：cordis 对同一 fiber 的兄弟 effect 是「逆注册序启动 +
  * Promise.all 并发完成」，没有完成顺序保证（harness `vendor/cordis/src/utils.ts:27-31`、
  * `vendor/cordis/src/fiber.ts:712-730`；cordis-tutorial/02-lifecycle-and-effects.md:94）。
  * 所以不能依赖「谁先注册谁先跑」：两个 effect 都经由记忆化的 runTeardown() 进入同一份 promise，
@@ -71,7 +71,7 @@ export function wireMemoryLifecycle(options: MemoryLifecycleOptions): void {
     return teardown
   }
   ctx.effect(() => runTeardown, 'omw-memory-db')
-  // 写者锁最后释放：必须等库句柄真正归还之后（顺序由 runTeardown 保证，见上）。
+  // 写者锁最后释放：必须等库句柄真正归还之后（顺序由 runTeardown 保证）。
   ctx.effect(() => async () => {
     await runTeardown()
     await lock.release()

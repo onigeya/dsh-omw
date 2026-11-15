@@ -3,9 +3,10 @@
  *
  * - `POST {endpoint}/embeddings`（endpoint 已以 /embeddings 结尾则不重复追加）；不写默认 base URL。
  * - 请求头 `Authorization: Bearer {token}` + `Content-Type: application/json`；体 `{ model, input: string[] }`。
- * - 单请求 `input` ≤ 8 条；响应 `{ data: [{ embedding, index }] }` **按 index 落位**（评审 T5：
- *   提供方乱序返回时不能把向量挂到错误文本上）；缺失 index 才回退位置序，index 重复/越界/缺位即失败。
- * - 超时 ≤10s（AbortSignal，与调用方任务预算的 signal 合并）；失败**不抛错**，返回 ok:false——
+ * - 单请求 `input` ≤ 8 条。响应 `{ data: [{ embedding, index }] }` 按 index 落位（评审 T5：
+ *   提供方乱序返回时不能把向量挂到错误文本上）；缺失 index 才回退位置序，index 重复、越界
+ *   或缺位即失败。
+ * - 超时 ≤10s（AbortSignal，与调用方任务预算的 signal 合并）。失败不抛错，返回 ok:false，
  *   调用方必须让 L1 照常写入、只记审计、embedding 两列留空（N4）。
  */
 
@@ -21,7 +22,7 @@ export type EmbedResult =
 
 export interface EmbedClient {
   /**
-   * 对一批文本取向量。失败返回 ok:false（reason 自由字符串），不抛错——
+   * 对一批文本取向量。失败返回 ok:false（reason 是自由字符串），不抛错。
    * 调用方据此只记审计、不阻塞 L1 写入。
    */
   embed(model: string, input: readonly string[], signal: AbortSignal): Promise<EmbedResult>

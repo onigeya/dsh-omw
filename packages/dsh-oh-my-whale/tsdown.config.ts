@@ -3,7 +3,7 @@ import { defineConfig } from 'tsdown'
 /**
  * bundle 入口包构建配置。
  *
- * 产出口径对齐宿主 `@deepseek-ai/dsh-plugin-manager` 的 exports 布局：
+ * 产出口径与宿主 `@deepseek-ai/dsh-plugin-manager` 的 exports 布局一致：
  * - lib/index.js：ESM（因 package.json `type: module`；`fixedExtension: false`
  *   让 tsdown 在 node 平台仍用 `.js` 而非 `.mjs`）。
  * - lib/types/index.d.ts：tsc `--emitDeclarationOnly --declarationDir lib/types`

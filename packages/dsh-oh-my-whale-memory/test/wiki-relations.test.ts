@@ -4,10 +4,10 @@
  * 覆盖：parseRelationOutput（snake_case 原样 schema）、selectRelatedTargets（同 kind 优先是
  * 排序权重、跨层/未知 target/上限 5 都拒绝、EVIDENCE 一律拒绝）、recallNeighbors（真 KNN，
  * 排除自身、向量缺失/维度不符返回空）、applyRelations（写边 + 两路审计）、createRelationRunner
- * 的三条降级路径（embedding 禁用 / 节点无向量 / LLM 失败 —— 都不得影响记忆本身）。
+ * 的三条降级路径（embedding 禁用 / 节点无向量 / LLM 失败，都不得影响记忆本身）。
  *
  * 播种用 upsertMemory + memoryNodeId（节点 id 是指纹 uuid5，不是文本本身）。
- * 开库次数：本文件 1 次——LadybugDB 每进程约 15 个库封顶。
+ * 开库次数：本文件 1 次，LadybugDB 每进程约 15 个库封顶。
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
@@ -76,7 +76,7 @@ async function seed(
 
 /**
  * 审计行（可按 l0_refs 里的 itemId 过滤）。
- * 评审 P18d①（T22）：不限 itemId 的计数会与前序用例的顺序耦合——同一 action 的行会累积。
+ * 评审 P18d①（T22）：不限 itemId 的计数会与前序用例的顺序耦合，同一 action 的行会累积。
  */
 async function auditRows(
   action: string,
@@ -355,7 +355,7 @@ describe('createRelationRunner（生产降级路径）', () => {
       }),
     ).resolves.toBeUndefined()
     // 每个节点两条 warn：① recallNeighbors 抛错 ② 这条降级的审计写入也失败（同一个坏连接）。
-    // 关键是**不抛出**且循环继续（两个节点都被处理）。
+    // 关键是不抛出且循环继续（两个节点都被处理）。
     expect(warn).toHaveBeenCalledTimes(4)
     expect(okLlm.calls()).toBe(0)
   })
@@ -403,7 +403,7 @@ describe('P5：status 的关系降级计数（真库）', () => {
   it('countRelatedSkips 只数三类降级 action，不数正常写入', async () => {
     const before = (await countRelatedSkips(store.connection)) ?? 0
     // 评审 P5（T6）：口径改为恒定 action 白名单（skip_related / reject_evidence /
-    // write_evidence_skipped）。正常写入（write_related）**不计**，否则 /memory status 的降级行
+    // write_evidence_skipped）。正常写入（write_related）不计，否则 /memory status 的降级行
     // 会随成功写入单调上涨，变成假警报。
     await audit('skip_related')
     await audit('reject_evidence')

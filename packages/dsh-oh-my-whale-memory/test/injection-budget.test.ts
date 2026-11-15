@@ -65,7 +65,7 @@ describe('applyInjectionBudget：三限制边界', () => {
   })
 
   it('④ 预算剩余 <40 字符时不追加碎片条目（已入列的短条正常保留）', () => {
-    // 6×1200 = 7200，再加 770 ⇒ 7970 满额附近，剩余 30 < 40。
+    // 6×1200 = 7200，再加 770，7970 满额附近，剩余 30 < 40。
     const nearlyFull = Array.from({ length: 6 }, (_, index) => item(`k${index}`, 'w'.repeat(1200)))
     const exact = applyInjectionBudget({
       ...EMPTY,

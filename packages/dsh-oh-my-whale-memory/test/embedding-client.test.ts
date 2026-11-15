@@ -2,7 +2,7 @@
  * embeddings 客户端契约测试（Story 2.3 / N4）。
  *
  * 契约：POST {endpoint}/embeddings（已以 /embeddings 结尾则不重复）；Bearer + JSON；
- * 体 { model, input: string[] }；单请求 ≤8 条；按 index 对齐；**失败一律 ok:false 不抛错**，
+ * 体 { model, input: string[] }；单请求 ≤8 条；按 index 对齐；失败一律 ok:false 不抛错，
  * 让调用方得以「只记审计、L1 照常写入、embedding 两列留空」。
  */
 import { describe, expect, it, vi } from 'vitest'

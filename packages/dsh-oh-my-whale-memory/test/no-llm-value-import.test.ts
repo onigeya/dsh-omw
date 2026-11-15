@@ -1,7 +1,7 @@
 /**
  * 源码级依赖纪律（Story 2.3 / N1 / 评审 T22）。
  *
- * `@deepseek-ai/dsh-llm` 是 devDependency：运行期**只能**使用它的类型，
+ * `@deepseek-ai/dsh-llm` 是 devDependency：运行期只能使用它的类型，
  * 任何值 import（含 `await import('@deepseek-ai/dsh-llm')`）都会让构建产物在外部 profile
  * 里解析不到该模块。允许 `import type …` 与「全部 specifier 都带 type 前缀」的内联写法。
  */

@@ -1,16 +1,16 @@
 /**
  * 注入时序模块级探针（Story 3.3 / B1）。
  *
- * 不做宿主集成，而是在 fake ctx 上**按真实 loop 的顺序**复演一次请求，验证 R1 机制的可依赖契约
+ * 不做宿主集成，而是在 fake ctx 上按真实 loop 的顺序复演一次请求，验证 R1 机制的可依赖契约
  * （源码依据见 `probe-3-3-timing.md`）：
- * 1. `preStep()` 先 claim 消息、再 `assemble()`（agent.ts:289-300）——此时 provider 可能还空；
- * 2. `dispatch.waterfall('agent/pre-step', { messages: claimed, … })`（agent.ts:302-303）——
+ * 1. `preStep()` 先 claim 消息、再 `assemble()`（agent.ts:289-300），此时 provider 可能还空；
+ * 2. `dispatch.waterfall('agent/pre-step', { messages: claimed, … })`（agent.ts:302-303）。
  *    B2 的生成入口在这里 `await`（≤3s）并写入注入状态；
- * 3. `step()` 里 `systemPrompt.refreshContext(...)`（agent.ts:452）**重新解析** context provider，
+ * 3. `step()` 里 `systemPrompt.refreshContext(...)`（agent.ts:452）重新解析 context provider，
  *    随后才 buildRequest（:485）。
  *
- * 断言点：第 1 步 provider 为空 ⇒ 第 2 步 await 生成 ⇒ 第 3 步（首个请求前）provider 返回文本。
- * 另覆盖：冷启动（无 llm ⇒ skipped）、首条是 `runtime-context` 合成消息（不生成）、无 systemPrompt 的裸 ctx。
+ * 断言点：第 1 步 provider 为空，第 2 步 await 生成，第 3 步（首个请求前）provider 返回文本。
+ * 另覆盖：冷启动（无 llm，skipped）、首条是 `runtime-context` 合成消息（不生成）、无 systemPrompt 的裸 ctx。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -70,7 +70,7 @@ async function replayFirstRequest(args: {
 }): Promise<{ readonly afterAssemble: string; readonly beforeFirstRequest: string; readonly generated: boolean }> {
   const assembleContext = { agent: { session: { id: args.sessionId } } }
 
-  // 1) preStep: assemble() —— 首次组装（可能还拿不到摘要）。
+  // 1) preStep: assemble()，首次组装（可能还拿不到摘要）。
   const afterAssemble = args.provider(assembleContext)
 
   // 2) agent/pre-step waterfall：payload 携带 claimed 消息；监听器可 await 生成。
@@ -164,7 +164,7 @@ describe('注入时序探针（R1 主通道）', () => {
       generate,
     })
 
-    // 同一批里既有合成也有真人：找真人那条（source.kind==='user'）——不按位置盲取。
+    // 同一批里既有合成也有真人：找真人那条（source.kind==='user'），不按位置盲取。
     expect(generate).toHaveBeenCalledTimes(1)
     expect(result.beforeFirstRequest).toBe('不该生成')
   })
@@ -172,14 +172,14 @@ describe('注入时序探针（R1 主通道）', () => {
   it('无 systemPrompt 的裸 ctx：注入面整体跳过（注册函数不被调用、provider 不存在）', async () => {
     const store = createInjectionStore()
     const host = (undefined as unknown) as { readonly systemPrompt?: InjectionPromptHost }
-    // index.ts 的守卫形状：服务缺失 ⇒ 不注册（此处直接断言该判据）。
+    // index.ts 的守卫形状：服务缺失，不注册（此处直接断言该判据）。
     expect(host?.systemPrompt).toBeUndefined()
     expect(store.textFor('s-bare')).toBe('')
   })
 })
 
 /**
- * F-02（评审教训）：探针必须建模**真实 waterfall 语义**——监听器签名是
+ * F-02（评审教训）：探针必须建模真实 waterfall 语义，监听器签名是
  * `(payload, next) => PreStepDecision`，生成后必须 `return next()` 把决策交回宿主；
  * 直接把它当普通无返回函数调用，会掩盖「不调 next 短路宿主」这类 P1（F-01）。
  */

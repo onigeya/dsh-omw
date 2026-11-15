@@ -1,7 +1,7 @@
 /**
  * 空闲闸门（Story 2.2 / AD-6）：消费者只在 turn/start ~ turn/end 窗口之外取队头。
  *
- * 多会话按**活跃 turn 计数**（同一会话 turn 嵌套也不提前放开）：只要还有任一 turn 未结束，
+ * 多会话按活跃 turn 计数（同一会话 turn 嵌套也不提前放开）：只要还有任一 turn 未结束，
  * 闸门就是忙的。会话键由 inboxSessionKey 归一（拿不到 id 的会话归到 'unknown'，
  * 宁可保守地挡住消费，也不在 turn 里抢数据库）。
  */

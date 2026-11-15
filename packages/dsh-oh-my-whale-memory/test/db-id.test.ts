@@ -2,7 +2,7 @@
  * 指纹 id 测试（Story 1.4 / AC3 / AD-4）。
  *
  * 契约：`id = uuid5(layer + ':' + 归一化 text)`；归一化 = NFKC + 小写 + 去标点 +
- * 空白折叠。指纹含 layer，不含 source_refs 与时间戳——同一事实重复写入必然命中同一 id。
+ * 空白折叠。指纹含 layer，不含 source_refs 与时间戳；同一事实重复写入必然命中同一 id。
  */
 import { describe, expect, it } from 'vitest'
 import { MEMORY_ID_NAMESPACE, memoryNodeId, normalizeFingerprintText, uuid5 } from '../src/db/id'

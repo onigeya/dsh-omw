@@ -8,14 +8,14 @@
  *   原生 addon 在 dlopen 阶段失败（`A dynamic link library (DLL) initialization routine
  *   failed.`），必须改用 `@ladybugdb/wasm-core/nodejs`（NODEFS 真文件系统 + worker_threads）。
  *
- * 两端同为 0.22.3、storage version 同为 49 —— 同一个 `lbug.db` 可被任一后端打开，
+ * 两端同为 0.22.3、storage version 同为 49，同一个 `lbug.db` 可被任一后端打开，
  * 切换运行时不需要迁移库文件。
  *
- * 运行时判据用 `process.versions.electron`（宿主自己在 util/ripgrep 用的同款判据）。
- * **不要用 `process.type`**：`ELECTRON_RUN_AS_NODE` 模式下它恒为 `undefined`，
+ * 运行时判据用 `process.versions.electron`（宿主自己在 util/ripgrep 用的同款判据），
+ * 不要用 `process.type`：`ELECTRON_RUN_AS_NODE` 模式下它恒为 `undefined`，
  * 两种运行时无法区分（2026-11-13 实测）。
  *
- * 本文件是**唯一**知道后端差异的地方，差异共 5 处：
+ * 本文件是唯一知道后端差异的地方，差异共 5 处：
  * 1. 模块装载：wasm 的 `./nodejs` 子路径只提供 CJS 的 `require` 条件（无 `import` 条件），
  *    所以用 `createRequire` 而不是 `import()`；
  * 2. `Database` 构造：native 的 `readOnly` 在第 4 个位置参数，wasm 在第 5 个
@@ -50,13 +50,13 @@ export interface StorageBackend {
   createDatabase(dbPath: string, readOnly: boolean): lbug.Database
   /**
    * 构造 `Connection`。wasm 的 worker 需要显式 `init()`（native 保持原本的惰性行为，
-   * 不额外调用 init——库文件落盘时机是只读竞态等待逻辑的前提）。
+   * 不额外调用 init，库文件落盘时机是只读竞态等待逻辑的前提）。
    */
   createConnection(database: lbug.Database): Promise<lbug.Connection>
   /**
    * 每进程装载扩展；wasm 为 no-op（扩展已静态编译）。失败必须冒泡，不做降级。
    *
-   * `install: false`（Story 3.1 / P4 探针）：native 只读连接不 `INSTALL` 只 `LOAD`——
+   * `install: false`（Story 3.1 / P4 探针）：native 只读连接不 `INSTALL` 只 `LOAD`，
    * 扩展已被某个写者实例安装在本机用户目录，只读实例无需下载即可装载。装载失败
    * 照常冒泡，由调用方决定是否吞掉（database.ts 的只读开库吞掉，recall 查询期
    * 以失败信封暴露）。
@@ -105,7 +105,7 @@ function nativeBackend(module: LoadedModule): StorageBackend {
       // 只读实例（install: false）只 LOAD 不 INSTALL：扩展已由写者实例安装，无需联网下载。
       if (options?.install === false) {
         // 两条各自 try/catch：vector 失败不得挡住 fts（否则只读实例连关键词单路也丢）；
-        // 失败仍要冒泡（调用方决定吞不吞），但必须**逐项**带上原因——只抛「最后一个失败」
+        // 失败仍要冒泡（调用方决定吞不吞），但必须逐项带上原因，只抛「最后一个失败」
         // 会让「fts 可用而 vector 不可用」这种部分成功状态不可辨（Story 3.1 / F-06）。
         const failures: string[] = []
         for (const extension of ['vector', 'fts'] as const) {
@@ -182,7 +182,7 @@ function wasmBackend(module: LoadedModule): StorageBackend {
 /**
  * 取第一条结果集的全部行。
  *
- * **按结果对象自身的方法分派**，不查"当前是哪个后端"——native 有 `getAll()`，wasm 只有
+ * 按结果对象自身的方法分派，不查"当前是哪个后端"：native 有 `getAll()`，wasm 只有
  * `getAllObjects()`。同进程里出现另一个后端的对象（测试/诊断）也不会串味，这是
  * 后端选择与结果读取解耦的关键。
  */
@@ -203,17 +203,17 @@ export async function collectResultRows(
 }
 
 /**
- * 释放查询结果（best-effort，绝不抛错）。
+ * 释放查询结果（best-effort，不抛错）。
  *
- * **每个 QueryResult 都必须释放**：0.22.3 的结果对象在存活期间持有 native 结果对象
+ * 每个 QueryResult 都必须释放：0.22.3 的结果对象在存活期间持有 native 结果对象
  * （wasm 后端是 worker `objectsStore` 里的强引用），不释放会持续 pin 住 buffer pool 的页。
  * 实测（2026-11-14，同 0.22.3）：64MB 池下不释放的查询第 195 次即以
  * 「Buffer manager exception: Unable to allocate memory! The buffer pool is full and no
  * memory could be freed!」失败；wasm 默认池下第 1632 次失败；每次 close 的两组对照
- * 各 2 万/1 万次通过。失败症状是**全局**的：池满后同连接所有查询与写入都抛该异常，
+ * 各 2 万/1 万次通过。失败症状是全局的：池满后同连接所有查询与写入都抛该异常，
  * 上层 catch 会把它吞成「静默失败 / 数据丢失」。
  *
- * 多语句 `query()` 返回 QueryResult[]，**每一项都要释放**（实测 `INSTALL fts; LOAD fts;`
+ * 多语句 `query()` 返回 QueryResult[]，每一项都要释放（实测 `INSTALL fts; LOAD fts;`
  * 返回 Array[2]）。两后端都有 `close()`（native 同步、wasm 异步），故不按后端分派。
  *
  * 关闭失败只吞掉：这是回收路径，不该把已成功的查询/写入翻成失败。
@@ -233,7 +233,7 @@ export async function closeQueryResult(
 }
 
 /**
- * 执行一条**不取行**的语句（DDL / 写语句）并释放结果。
+ * 执行一条不取行的语句（DDL / 写语句）并释放结果。
  *
  * 存在的理由：`await connection.query(...)` 的返回值若不释放就是一次 buffer pool pin 泄漏。
  * 只取行的路径一律走 rows.ts 的 collectRows/queryAll（它们内部也会释放），不要在这里取行。

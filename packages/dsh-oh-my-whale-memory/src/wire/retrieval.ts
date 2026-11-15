@@ -1,7 +1,7 @@
 /**
  * 召回域装配（Story 3.1 / 3.2、F-01/F-02/F-05/F-07/F-09）。
  *
- * 一个 `retrieval` 单元同时服务命令面（`/memory recall|related`，**不计**配额）与工具面
+ * 一个 `retrieval` 单元同时服务命令面（`/memory recall|related`，不计配额）与工具面
  * （`memory_recall` / `memory_related`，共享同一个 turn 配额实例）。所有依赖惰性读库句柄：
  * 注册发生在建库之前，库未就绪时命令层收敛为 error、工具面返回 `db_unavailable`。
  */
@@ -19,8 +19,8 @@ import { toRelatedSuccessView } from '../tools/related-shared.js'
 import type { SessionEventHost } from './host.js'
 
 /**
- * 召回查询向量的超时预算（Story 3.1）：召回是软目标 ≤500ms，网络等待必须短——
- * 超时即降级为关键词单路（结果标 `degraded: true`，绝不静默）。
+ * 召回查询向量的超时预算（Story 3.1）：召回是软目标 ≤500ms，网络等待必须短：
+ * 超时即降级为关键词单路（结果标 `degraded: true`，不静默）。
  * embedding 客户端自身另有 10s 硬超时，这里取更短的值让降级尽快发生。
  */
 const RECALL_EMBED_TIMEOUT_MS = 4_000
@@ -41,7 +41,7 @@ export interface RetrievalWiring {
   readonly relatedMemories: MemoryCommandDependencies['relatedMemories']
   /**
    * 注册 `turn/start` / `turn/end` 双点配额重置（spec D7）。
-   * `ctx.on` 自动挂 disposer，故**不新增 ctx.effect**（entry-exports 钉死 closer 数）。
+   * `ctx.on` 自动挂 disposer，故不新增 ctx.effect（entry-exports 钉死 closer 数）。
    */
   readonly wireQuotaReset: () => void
 }
@@ -51,7 +51,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
 
   /**
    * 混合检索内核的调用点（命令面与工具面共用，不复制第二份参数装配）。
-   * 库内 pin 的 embedding 模型 id 取 `db.modelId`——模型不符的节点不进向量路。
+   * 库内 pin 的 embedding 模型 id 取 `db.modelId`，模型不符的节点不进向量路。
    */
   const runRecall = async (input: {
     readonly query: string
@@ -78,7 +78,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
   }
 
   /**
-   * recall 的 embedding 客户端——**惰性**构造（只读实例也构造：它不写向量，但召回需要查询
+   * recall 的 embedding 客户端，惰性构造（只读实例也构造：它不写向量，但召回需要查询
    * 向量；写者路径的 embeddingClient 在只读早退之后，这里不能依赖它）。
    * dim 用库内实际 pin 的 `db.dim`（与节点向量同源，AD-14）。
    */
@@ -104,7 +104,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
       const database = getDb()
       if (!database) return null
       // F-02 / AD-14：查询向量与节点向量必须同一模型。写者模式开库时会把库内 pin 改写成本次
-      // 配置的模型（database.ts），只读模式不改写——此时若配置与 pin 不一致，用配置模型取
+      // 配置的模型（database.ts），只读模式不改写，此时若配置与 pin 不一致，用配置模型取
       // 查询向量、再对库内异模型向量算余弦，结果排序是噪声。直接跳过向量路（degraded + warn）。
       const configuredModel = resolved.embedding.model
       if (configuredModel !== undefined && configuredModel !== database.modelId) {
@@ -133,7 +133,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
     },
     async recall(input) {
       const result = await runRecall(input)
-      // F-01：向量路查询异常已由内核降级（关键词路照常），这里把原因记一次 warn——
+      // F-01：向量路查询异常已由内核降级（关键词路照常），这里把原因记一次 warn，
       // 配置态降级（本来就没有查询向量）不重复告警，它由 embedding 配置告警覆盖。
       if (result.degraded && input.queryVector !== null) {
         ctx.logger.warn(
@@ -145,7 +145,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
   }
 
   /**
-   * `/memory recall` 的 dep：手动召回**不计入** turn 配额（配额只在 memory_recall 工具面消耗）。
+   * `/memory recall` 的 dep：手动召回不计入 turn 配额（配额只在 memory_recall 工具面消耗）。
    * 降级语义与工具一致：embed 失败 → 关键词单路。
    */
   const recallMemories: RetrievalWiring['recallMemories'] = async (input) => {
@@ -168,9 +168,9 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
   }
 
   /**
-   * `/memory related` 的 dep：手动遍历**不计入** turn 配额（与 recall 同口径）。
+   * `/memory related` 的 dep：手动遍历不计入 turn 配额（与 recall 同口径）。
    * D4/D5 判定、hint 与 256-token 截断统一走 `tools/related-shared.ts`（F-05：与工具面同口径，
-   * 命令面**不**引入 depth=1 重试——spec D8 有意为之，超时由 handler 收敛为 error 结果）。
+   * 命令面不引入 depth=1 重试，spec D8 有意为之，超时由 handler 收敛为 error 结果）。
    */
   const relatedMemories: RetrievalWiring['relatedMemories'] = async (input) => {
     const result = await relatedStore.traverse({
@@ -189,7 +189,7 @@ export function createRetrievalWiring(options: RetrievalOptions): RetrievalWirin
     quota,
     recallMemories,
     relatedMemories,
-    // `turn/start` 与 `turn/end` 双点重置；监听必须在只读早退**之前**注册——
+    // `turn/start` 与 `turn/end` 双点重置；监听必须在只读早退之前注册，
     // 只读实例同样提供 memory_recall。裸 ctx（单测）没有 `on` 时降级为不监听。
     wireQuotaReset: () => {
       ;(ctx as unknown as SessionEventHost).on?.('session/event', createQuotaResetListener(quota))

@@ -2,9 +2,9 @@
  * 从宿主 session 对象解析精炼路由（Story 2.3 / AC:567 的回退链）。
  *
  * 回退顺序（单一来源，评审 T21 要求可单测）：
- * 1. `session.requestHeader()` 的 `config.provider/model`——log 中**最后一个** header 事件的折叠值，
+ * 1. `session.requestHeader()` 的 `config.provider/model`：log 中最后一个 header 事件的折叠值，
  *    即「最近一次已记录的请求目标」；
- * 2. `session.requestContext()` 的 `provider/model`——只在 provider/model/capacity 变化时追加；
+ * 2. `session.requestContext()` 的 `provider/model`：只在 provider/model/capacity 变化时追加；
  * 3. 都没有 ⇒ `null`（调用方据此直接降级，不调 LLM）。
  *
  * 纯函数：只依赖传入对象，不碰 ctx；运行期行为与原先 index.ts 内联实现一致。

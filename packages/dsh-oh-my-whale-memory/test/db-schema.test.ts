@@ -1,7 +1,7 @@
 /**
  * 建库与 schema 测试（Story 1.4 / AC1、AC2、AC4）。
  *
- * 契约：openMemoryDatabase 幂等——缺目录建目录、缺表建表、缺索引建索引、
+ * 契约：openMemoryDatabase 幂等：缺目录建目录、缺表建表、缺索引建索引、
  * 首建写入库级元数据 omw_meta{schema_version, embedding_dim, embedding_model_id, created_at}。
  * AC6（同指纹重复写入的合并语义）在 db-upsert.test.ts。
  *

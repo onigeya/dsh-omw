@@ -2,7 +2,7 @@
  * 注入面骨架测试（Story 3.3 / B1；fake host，0 开库）。
  *
  * 覆盖：
- * - 静态 section：名 `omw-memory`、text 是**常量**、`interpolate:false`、order 常量；
+ * - 静态 section：名 `omw-memory`、text 是常量、`interpolate:false`、order 常量；
  * - 动态 context：名/order、`interpolate:false`、provider 从注入状态机取文本，
  *   非 ready / 空文本一律 `''`（空文本短路 ⇒ 宿主不产消息）；
  * - 裸 ctx（无 systemPrompt 服务）：`registerInjectionPrompt` 不被调用也不抛错（由 index 守卫，
@@ -56,7 +56,7 @@ describe('注入面注册（Story 3.3 / B1）', () => {
     expect(section.name).toBe('omw-memory')
     expect(section.order).toBe(INJECTION_SECTION_ORDER)
     expect(section.order).toBe(600)
-    // text 必须是与导出常量同一字面量（不是函数/模板）——AC:920「text 必须为常量」。
+    // text 必须是与导出常量同一字面量（不是函数/模板）；AC:920「text 必须为常量」。
     expect(section.text).toBe(OMW_MEMORY_SECTION_TEXT)
     expect(typeof section.text).toBe('string')
     expect(section.interpolate).toBe(false)

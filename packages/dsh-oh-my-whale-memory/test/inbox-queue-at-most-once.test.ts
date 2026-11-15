@@ -4,7 +4,7 @@
  * - R1：已处理标记 = status='done'，markInboxItemDone 带 processing 守卫 ⇒ at-most-once；
  * - ③ 对已 done 条目记失败是 no-op（N8：不把已完成的条目打回 pending/failed）；
  * - ⑤ 退避窗口：失败回 pending 后写 lease_until = now + backoff(attempts)，窗口内不可再取；
- * - ⑥ 第 4 次失败进 failed 且永不再被取；
+ * - ⑥ 第 4 次失败进 failed 且不再被取；
  * - ⑨ 崩溃循环：启动回收把这次崩溃记成一次失败，达上限进死信（U11）。
  *
  * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 db-inbox-queue.test.ts。

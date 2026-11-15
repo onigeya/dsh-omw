@@ -2,9 +2,9 @@
  * 有效性谓词钉（Story 2.6 评审补钉 P9①/P9② / T9，VG-5 + VG-6）。
  *
  * 两条只有「种子真的落在边界上」才能暴露：
- * 1. `checkReachableToL0` 的有效性三条件（AD-19:175）——未来 `valid_at` 的节点必须判
- *    `not-effective`，且**不进** `computeEiiViolations`（违例集只由有效节点构成）；
- * 2. `recallNeighbors` 的 `invalid_at IS NULL AND expired_at IS NULL`——已失效节点不得被
+ * 1. `checkReachableToL0` 的有效性三条件（AD-19:175）：未来 `valid_at` 的节点必须判
+ *    `not-effective`，且不进 `computeEiiViolations`（违例集只由有效节点构成）；
+ * 2. `recallNeighbors` 的 `invalid_at IS NULL AND expired_at IS NULL`：已失效节点不得被
  *    召回（否则关系识别会把 RELATED 连到墓碑上）。
  *
  * 独立成文件：本文件 1 个用例 = 1 次开库（LadybugDB 每进程约 15 库封顶，db-edge-tables
@@ -80,7 +80,7 @@ async function seedL0(id: string): Promise<void> {
 
 describe('P9①：有效性三条件（未来 valid_at / 失效 / forget）', () => {
   it('未来 valid_at ⇒ not-effective 且不算 EII 违例；失效节点不被召回', async () => {
-    // ① 未来 valid_at 的节点：有真实 L0 证据链，但「尚未生效」⇒ 必须 not-effective。
+    // ① 未来 valid_at 的节点：有真实 L0 证据链，但「尚未生效」，必须 not-effective。
     const futureId = memoryNodeId('L1', '未来的事实')
     await seedL0('eff-l0-future')
     await seedNode({ id: futureId, text: '未来的事实', validAt: FUTURE, embedding: E1 })
@@ -91,7 +91,7 @@ describe('P9①：有效性三条件（未来 valid_at / 失效 / forget）', ()
     const reach = await checkReachableToL0(store.connection, futureId, NOW)
     expect(reach.pass).toBe(false)
     expect(reach.failingReasons).toEqual(['not-effective'])
-    // 违例集只由**有效**节点构成：尚未生效的节点既不是违例，也不该被要求有证据链。
+    // 违例集只由有效节点构成：尚未生效的节点既不是违例，也不该被要求有证据链。
     expect(await computeEiiViolations(store.connection, NOW)).not.toContain(futureId)
 
     // ② 已失效（invalid_at）与用户 forget（expired_at）：都不得被 recall 召回。
@@ -124,7 +124,7 @@ describe('P9①：有效性三条件（未来 valid_at / 失效 / forget）', ()
   })
 })
 /**
- * 评审 P18b（T20）变异审计 M9 补钉：`computeEvidenceDrift` 漂移 A 必须遍历**去重后的 refSet**。
+ * 评审 P18b（T20）变异审计 M9 补钉：`computeEvidenceDrift` 漂移 A 必须遍历去重后的 refSet。
  * 库内 `source_refs` 允许含重复 id（`list_concat` 追加时可能留重复），用原数组遍历会把
  * 同一条漂移放大成多条（M9 = 用 refs 数组替回 refSet 时，本用例变红）。
  */
@@ -134,7 +134,7 @@ describe('P18b：漂移 A 按去重 refSet 计数（重复 ref 不放大）', ()
       "CREATE (l:l0_raw {id: 'drift-l0', raw_text: '原文', recorded_at: '" + PAST + "', actor: 'system'})",
     )
     await seedNode({ id: 'drift-m', text: '有重复引用的事实', embedding: null })
-    // 目标节点无 EVIDENCE 入边 ⇒ drift-l0 是一条真漂移；同时把 source_refs 塞成重复值。
+    // 目标节点无 EVIDENCE 入边，drift-l0 是一条真漂移；同时把 source_refs 塞成重复值。
     await store.connection.query(
       "MATCH (m:memory {id: 'drift-m'}) SET m.source_refs = ['drift-l0', 'drift-l0']",
     )

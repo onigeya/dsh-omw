@@ -1,7 +1,7 @@
 {
   "name": "dsh-oh-my-whale",
   "version": "0.1.0",
-  "description": "DSH 记忆插件 bundle 入口（AD-2 发布名，永不重命名）",
+  "description": "DSH 记忆插件的 bundle 入口（AD-2：发布名已锁定）",
   "type": "module",
   "main": "lib/index.js",
   "types": "lib/types/index.d.ts",

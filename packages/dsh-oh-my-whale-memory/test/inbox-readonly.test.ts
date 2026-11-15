@@ -40,7 +40,7 @@ function mergeMeta(key: string, value: string): string {
 
 /** 只读打开只校验 meta + memory 表与 dim（不建索引、不装扩展）。 */
 function buildReadonlyStatements(dim: number, withInbox = true): string[] {
-  // 只回 lease 值的单参 helper：owner 空串渲染 null（原本多一个从不使用的 until 形参，删掉避免误导）。
+  // 只回 lease 值的单参 helper：owner 空串渲染 null（原 until 形参从不使用，已删）。
   const lease = (owner: string): string => (owner === '' ? 'null' : `'${owner}'`)
   const inboxRow = (
     id: string,
@@ -150,7 +150,7 @@ describe('AC7：只读实例不启动消费者、不回收 lease', () => {
       expect(registeredDefs).toHaveLength(1)
       expect(plugin.memoryRuntimeState().readonly).toBe(true)
       // 只读：不启动消费者（不接闸门/采集的 session/event 监听）；Story 3.1 起只读实例
-      // 仍注册**召回配额重置**监听（memory_recall 在只读模式也可用，turn/start 恢复配额）。
+      // 仍注册召回配额重置监听（memory_recall 在只读模式也可用，turn/start 恢复配额）。
       // Story 3.3 起只读实例同样注册开局注入的 `agent/pre-step` 监听（注入是纯读 + LLM）。
       // Story 3.3 / F-05：注入面的 `session/disposed` 清理监听（同一次 wireInjection 注册）。
       expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event'])
@@ -184,7 +184,7 @@ describe('AC4 相邻：status 读队列表缺表时照抛（不静默报 0）', 
 
       const result = await registeredDefs[0]!.handler({ rawInput: ' status' })
 
-      // 缺表 → 错误可见（绝不静默返回 failed: 0）；消息点名 l1_inbox。
+      // 缺表 → 错误可见（不静默返回 failed: 0）；消息点名 l1_inbox。
       expect(result.kind).toBe('error')
       expect(result.text).toMatch(/l1_inbox/)
       expect(result.text).not.toContain('failed: 0')

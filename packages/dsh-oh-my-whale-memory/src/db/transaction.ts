@@ -5,13 +5,13 @@
  * BEGIN TRANSACTION / COMMIT / ROLLBACK（2026-11-11 实测可用）。三条实测语义
  * 决定了本文件的形态：
  *
- * 1. 事务内任一语句出错时，引擎**自动中止并回滚**整个事务；此后再 ROLLBACK 会抛
- *    「No active transaction for ROLLBACK.」。故这里静默容忍回滚失败、只把原始错误
- *    上抛——不能因为「回滚也失败了」把真正的病根换成一句无关的报错。
+ * 1. 事务内任一语句出错时，引擎会自动中止并回滚整个事务，此后再 ROLLBACK 会抛
+ *    「No active transaction for ROLLBACK.」。所以这里静默容忍回滚失败、只把原始错误
+ *    上抛：不能因为回滚也失败，就把真正的病根换成一句无关的报错。
  * 2. 同一连接上不能嵌套事务：第二次 BEGIN TRANSACTION 抛
  *    「Connection already has an active transaction…」。故同一连接上的并发写入在本层用
  *    per-connection promise 链串行化（src/ 没有别的写串行化设施）。
- * 3. DDL 同样在事务内、异常时一并回滚——一次迁移建两张表因此是 all-or-nothing。
+ * 3. DDL 同样在事务内、异常时一并回滚，一次迁移建两张表因此是 all-or-nothing。
  */
 import { AsyncLocalStorage } from 'node:async_hooks'
 import type * as lbug from '@ladybugdb/core'
@@ -26,16 +26,16 @@ interface OpenTransaction {
 }
 
 /**
- * 当前 async 链的**打开事务登记表**（Epic 1 复盘 A-2 的重入守卫）。
+ * 当前 async 链的打开事务登记表（Epic 1 复盘 A-2 的重入守卫）。
  *
- * store 是 `Map<connection, {active}>`：判据是「本链上下文里该连接是否**仍有打开的事务**」，
- * 而不是「该连接是否在本链里出现过」。差异出现在**外层已结算之后**：事务 work 里派生的游离续体
- * 继承同一份 store，COMMIT/ROLLBACK 已把 active 置 false，于是它在事务结束后再调 runInTransaction
- * 会正常排队（旧实现会误报重入）。
+ * store 是 `Map<connection, {active}>`。判据是「本链上下文里该连接是否仍有打开的事务」，
+ * 而不是「该连接是否在本链里出现过」。两者在外层结算之后分开：事务 work 里派生的游离续体
+ * 继承同一份 store，COMMIT/ROLLBACK 已把 active 置 false，于是它在事务结束后再调
+ * runInTransaction 会正常排队（旧实现会误报重入）。
  *
- * 用 AsyncLocalStorage + 每链快照而不是布尔标志：**并发**（非嵌套）的两次 runInTransaction
- * 必须照旧按调用顺序排队（见文件头第 2 条承诺），只有「同一 async 链内该连接仍有打开事务」
- * 才是错误；布尔标志会把 `Promise.all` 里的并发写误判成重入。
+ * 用 AsyncLocalStorage 加每链快照，而不是布尔标志：并发的两次 runInTransaction 必须照旧
+ * 按调用顺序排队（见文件头第 2 条），只有同一 async 链内该连接仍有打开事务才是错误。
+ * 布尔标志会把 `Promise.all` 里的并发写误判成重入。
  */
 const openTransactions = new AsyncLocalStorage<ReadonlyMap<object, OpenTransaction>>()
 
@@ -52,25 +52,25 @@ function withOpenTransaction(
 
 /**
  * 在显式事务内执行 work：成功即 COMMIT 并返回其结果；work（或 COMMIT）抛错时回滚
- * 并**重新抛出原错误**。
+ * 并重新抛出原错误。
  *
  * 同一 connection 上的多次调用按调用顺序串行执行，调用方不必自己加锁。
  *
- * **不得重入**：在本事务的 work 里再次调用 runInTransaction（或任何自开事务的原语，如
- * upsertMemory）会让内层排在外层尚未结算的 promise 之后——外层 await 内层，内层的
+ * 不得重入：在本事务的 work 里再次调用 runInTransaction（或任何自开事务的原语，如
+ * upsertMemory）会让内层排在外层尚未结算的 promise 之后。外层 await 内层，内层的
  * BEGIN TRANSACTION 永远等不到，调用静默挂起。同一事务内的复合写入请直接用
  * writeMemoryVersion 这类「由调用方开事务」的原语。
  *
- * Epic 1 复盘 A-2：这条纪律**现在由代码强制**——同一 async 链内该连接**仍有打开事务**时，
- * 入口立即抛错（async 函数里的同步 throw = 返回被拒的 promise），不再静默挂起；
+ * Epic 1 复盘 A-2：这条纪律现在由代码强制。同一 async 链内该连接仍有打开事务时，
+ * 入口立即抛错（async 函数里的同步 throw 等于返回被拒的 promise），不再静默挂起。
  * 事务结算后（COMMIT/ROLLBACK 把 flag 置 false）再调用则正常排队，不会被误报。
  */
 export async function runInTransaction<T>(
   connection: lbug.Connection,
   work: () => Promise<T>,
 ): Promise<T> {
-  // 守卫必须在**同步**入口检查：放进 .then 回调里，内层仍会先排到外层尚未结算的 promise 之后，
-  // 又变成同一个静默挂起。抛普通 Error——不扩 MemoryDbErrorCode 封闭集。
+  // 守卫必须在同步入口检查。放进 .then 回调里，内层仍会先排到外层尚未结算的 promise
+  // 之后，又变成同一个静默挂起。抛普通 Error，不扩 MemoryDbErrorCode 封闭集。
   const held = openTransactions.getStore()
   if (held?.get(connection)?.active === true) {
     throw new Error(
@@ -103,7 +103,7 @@ export async function runInTransaction<T>(
       throw error
     }
   })
-  // 链上只留**已结算**的 promise：一次写入失败不能卡死后续写入，也不能让下一个
+  // 链上只留已结算的 promise：一次写入失败不能卡死后续写入，也不能让下一个
   // BEGIN 撞上尚未结束的事务。
   writeChains.set(connection, run.then(() => undefined, () => undefined))
   return run

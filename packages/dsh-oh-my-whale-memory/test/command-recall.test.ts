@@ -3,7 +3,7 @@
  *
  * 命令层 dep 全部为假：断言传给 `recallMemories` 的参数（query + 默认 5 条）、
  * 钉死的渲染文案（id + layer + 摘要、degraded 标注）、无 query 的 usage error、
- * 无命中的正常 success、出错收敛为 `{ kind:'error' }`——均不抛异常。
+ * 无命中的正常 success、出错收敛为 `{ kind:'error' }`，均不抛异常。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {
@@ -58,7 +58,7 @@ describe('parseMemoryCommand（recall 分支）', () => {
 
   it('常量符合契约；总用法扩到五条子命令', () => {
     expect(MEMORY_RECALL_SUBCOMMAND).toBe('recall')
-    // F-10：命令面缺省 limit **直接复用内核常量**（单一来源，不再两份字面量）；
+    // F-10：命令面缺省 limit 直接复用内核常量（单一来源，不再两份字面量）；
     // 同时钉住它出现在 usage 文案里，改值不会漏改文案。
     expect(MEMORY_RECALL_DEFAULT_LIMIT).toBe(RECALL_DEFAULT_LIMIT)
     expect(MEMORY_RECALL_USAGE).toContain(`最多 ${RECALL_DEFAULT_LIMIT} 条`)
@@ -88,7 +88,7 @@ describe('handler：recall 的参数与渲染', () => {
 
     expect(recallMemories).toHaveBeenCalledExactlyOnceWith({ query: 'RRF', limit: MEMORY_RECALL_DEFAULT_LIMIT })
     expect(result.kind).toBe('success')
-    // F-07：首行报**截断前** total（7），并显示实际渲染条数（2）——不再把 5/2 条当总数。
+    // F-07：首行报截断前 total（7），并显示实际渲染条数（2），不再把 5/2 条当总数。
     expect(result.text).toBe([
       '记忆召回（共 7 条，显示 2 条，按 RRF 排序）：',
       '- id-2 [L1] 第二条',

@@ -34,7 +34,7 @@ export function createSessionEventHandler(
       deps.gate.enterTurn(sessionId)
     } else if (type === 'turn/end') {
       // 先出窗再结算，最后采集：结算与闸门无关，但顺序固定便于阅读。
-      // 「会话结束」的观测边界只能是 turn/end——宿主没有会话级结束事件（core/session 的
+      // 「会话结束」的观测边界只能是 turn/end：宿主没有会话级结束事件（core/session 的
       // known-event-types 只有 turn/start 与 turn/end，seed 事件不发布；见 U22）。
       deps.gate.exitTurn(sessionId)
       deps.promotion.recordSessionEnd({ sessionId })

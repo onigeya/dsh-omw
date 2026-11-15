@@ -3,7 +3,7 @@
  *
  * 覆盖：`related <id> [depth]` 解析（缺 id / 非整数 depth / 多余 token ⇒ usage）、
  * 渲染形态（首行共 N 条 + `- <id> <hops>跳 [<edge_type>] <摘要>` + 失效标记 + hint 末行）、
- * 空结果 hint、出错收敛为 `{ kind:'error' }`——均不抛异常；命令面**不计配额**（无 quota dep）。
+ * 空结果 hint、出错收敛为 `{ kind:'error' }`，均不抛异常；命令面不计配额（无 quota dep）。
  */
 import { describe, expect, it, vi } from 'vitest'
 import {

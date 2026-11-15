@@ -206,7 +206,7 @@ describe('评审补丁回归钉（T1/T2 事件信封、P4 去重时序、P9 失�
     recorder.recordStepEnd(session, { type: 'step/end', seq: 22, time: 0, data: { turn: 2, step: 1 } })
     await drainInboxBackgroundTasks()
 
-    // 顶层读法会得到 '?:?'，两次采集会撞成同一 id（MERGE 变 no-op）——这里两行都必须真落库。
+    // 顶层读法会得到 '?:?'，两次采集会撞成同一 id（MERGE 变 no-op），这里两行都必须真落库。
     expect(await l0Row('step', 'cap-envelope', '1:1')).toBeDefined()
     expect(await l0Row('step', 'cap-envelope', '2:1')).toBeDefined()
     expect(await l0Row('step', 'cap-envelope', '?:?')).toBeUndefined()

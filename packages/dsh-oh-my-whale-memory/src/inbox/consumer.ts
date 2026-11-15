@@ -3,13 +3,13 @@
  *
  * 运行纪律：
  * - 只在空闲闸门放开时取队头；turn 一开始（enterTurn）就停止取，本轮不再推进；
- * - **无精炼处理器时绝不取队头**：Story 2.3 才提供 ctx.llm 精炼，此刻取队会丢条目或
+ * - 无精炼处理器时不取队头：Story 2.3 才提供 ctx.llm 精炼，此刻取队会丢条目或
  *   把没精炼的条目误标 done（AC3「不丢条目」）。生产接线由 apply 启动/停止它；
  * - 单轮内用 FIFO 游标推进，一条失败回 pending 也不会在同一轮被重复取出，
  *   从而「失败不阻塞后续条目」（AC4）；
  * - 后台 promise 全部登记进模块级 Set<Promise> 持强引用防 GC（§14），完成后自我移除；
  *   dispose 时先用 drainInboxBackgroundTasks() 等在飞轮次结算，再关库；
- * - stop() 只保证不再**开**新一轮取队：已取出/正在精炼的条目照常结算完，不得中断在飞条目
+ * - stop() 只保证不再开新一轮取队：已取出/正在精炼的条目照常结算完，不得中断在飞条目
  *   （AC3「不丢条目」）；定时器在 stop() 里 clear，dispose 由既有的 db effect disposer 调用
  *   （不新增 effect）。
  */
@@ -49,8 +49,8 @@ export const INBOX_POLL_INTERVAL_MS = 1_000
 /**
  * 精炼处理器的返回值（Story 2.3 / R1、R4①）。
  *
- * - `completed: true` = 处理器已在**自身事务内**把条目转成 done（`markInboxItemDone` 与产出同事务，
- *   at-most-once）；消费者据此**不再**重复 complete（第二次必不命中）。缺省 = 由消费者照旧收尾（2.2 行为）。
+ * - `completed: true` = 处理器已在自身事务内把条目转成 done（`markInboxItemDone` 与产出同事务，
+ *   at-most-once）；消费者据此不再重复 complete（第二次必不命中）。缺省 = 由消费者照旧收尾（2.2 行为）。
  * - `kinds` = 本次精炼产出的节点 kind 列表（不是采集来源标签 step|turn|compaction）；
  *   消费者按它逐条记提升信号（R4①）。缺省 = 沿用条目自身的 kind（2.2 兼容路径）。
  */
@@ -89,8 +89,8 @@ export interface InboxConsumerOptions {
    */
   readonly process?: (item: InboxItem) => Promise<InboxProcessResult | void>
   /**
-   * 可选维护钩子（Story 2.4 / U5）：FIFO 循环**之后**、gate 仍空闲且未请求停止时调用一次。
-   * NULL 向量回填挂在这里——复用本轮的定时器，不新增 ctx.effect，天然被 stop()→drain 覆盖。
+   * 可选维护钩子（Story 2.4 / U5）：FIFO 循环之后、gate 仍空闲且未请求停止时调用一次。
+   * NULL 向量回填挂在这里：复用本轮的定时器，不新增 ctx.effect，天然被 stop()→drain 覆盖。
    */
   readonly maintenance?: () => Promise<unknown>
   readonly promotion?: PromotionTracker
@@ -100,7 +100,7 @@ export interface InboxConsumerOptions {
    */
   readonly queue?: InboxQueue
   /**
-   * Story 2.5 / brief §5.4：取件前的让路闸门——返回 false 时本轮**不再取**新条目
+   * Story 2.5 / brief §5.4：取件前的让路闸门，返回 false 时本轮不再取新条目
    * （已取出的条目照常结算完）。L2 慢循环用它给 L1 主路径让路（L1 有待处理条目就跳过本轮），
    * 避免慢路径把主路径的条目饿死。抛错时按「忙」处理（跳过本轮，只告警）。
    */
@@ -122,8 +122,8 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
   const intervalMs = options.intervalMs ?? INBOX_POLL_INTERVAL_MS
   const queue = options.queue ?? l1InboxQueue
   let running = false
-  // stop() 置位、start() 复位：runOnce 的循环据此在**当前条目结算完**后退出，不中断在飞条目。
-  // 不能直接读 running——诊断/测试会不经 start() 直接调 runOnce（那时 running 一直是 false）。
+  // stop() 置位、start() 复位：runOnce 的循环据此在当前条目结算完后退出，不中断在飞条目。
+  // 不能直接读 running：诊断/测试会不经 start() 直接调 runOnce（那时 running 一直是 false）。
   let stopRequested = false
   let timer: ReturnType<typeof setTimeout> | null = null
 
@@ -159,8 +159,8 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       })
       if (!item) break
       after = { enqueuedAt: item.enqueuedAt, id: item.id }
-      // 只有**精炼本身**失败才算这条失败：记账（complete / recordL1）失败不得把精炼成功的条目
-      // 写回 pending/failed——那会重复精炼，attempts 已 3 时还会误送死信。
+      // 只有精炼本身失败才算这条失败：记账（complete / recordL1）失败不得把精炼成功的条目
+      // 写回 pending/failed，那会重复精炼，attempts 已 3 时还会误送死信。
       let result: InboxProcessResult | void
       try {
         result = await process(item)
@@ -174,7 +174,7 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
         )
         continue
       }
-      // R1：处理器若已在自身事务内标 done（与产出同事务），这里不能再 complete——
+      // R1：处理器若已在自身事务内标 done（与产出同事务），这里不能再 complete：
       // 第二次转换必不命中，会把成功路径误判成「未落库」。
       let completed = result?.completed === true
       if (!completed) {
@@ -191,7 +191,7 @@ export function createInboxConsumer(options: InboxConsumerOptions): InboxConsume
       }
       processed += 1
       // 提升记账是旁路：记账失败不改队列状态（条目已 done），也不中断本轮。
-      // R4①：有精炼结果时按**精炼后的节点 kind** 逐条记账；无（2.2 兼容路径）才退回条目 kind。
+      // R4①：有精炼结果时按精炼后的节点 kind 逐条记账；无（2.2 兼容路径）才退回条目 kind。
       try {
         const kinds = result?.kinds
         if (kinds === undefined) {

@@ -4,7 +4,7 @@
  * 契约：generation_log 与 keyed_decision 一次建表（不改既有三表）；任一写路径的日志行与
  * 节点同事务（要么都成、要么都失败）；invalidated_by 追加而非覆盖且重放幂等；audit_gap
  * 只算「已失效却无 keyed 裁决记录」的版本写入，审计表缺失时报不可用（null）而不是静默 0；
- * 记忆原文与凭据值绝不进账本（NFR9）。
+ * 记忆原文与凭据值不进账本（NFR9）。
  *
  * 依赖 Windows 上 PATH 里的 OpenSSL 3（vector/fts 扩展），同 db-upsert.test.ts。
  */

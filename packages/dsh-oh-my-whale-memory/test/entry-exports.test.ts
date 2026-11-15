@@ -2,7 +2,7 @@
  * 入口导出形态测试（Story 1.1 / I/O 矩阵第 4 行）。
  *
  * 契约：function 插件入口只允许命名导出 `name`/`inject`/`Config`/`apply`，
- * **禁 default export**——default export 会让宿主 Loader 丢弃 function 插件
+ * 禁 default export：default export 会让宿主 Loader 丢弃 function 插件
  * 命名空间（PRD §14 / postmortem 0001）。
  *
  * 测试对象是 `src/index.ts`（契约源头），而非构建产物：这样 `pnpm test`

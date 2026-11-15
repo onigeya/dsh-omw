@@ -1,7 +1,7 @@
 /**
  * `/memory remember` 命令落库集成测试（Story 1.7 / AC1-AC4 的库内部分）。
  *
- * 沿用 db-upsert.test.ts 范式：mkdtemp → 真实库（dim=4）。
+ * 沿用 db-upsert.test.ts 的建库方式：mkdtemp → 真实库（dim=4）。
  * 用裸 ctx 驱动 apply，捕获交给 commands.register 的定义，再以
  * `{ rawInput: ' remember 我偏好 ESM 不要 CJS' }` 调 definition.handler，
  * 在最外层表面（命令返回值 + 落库事实）上验证：
@@ -102,11 +102,11 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
     // L1_INBOX 只是 INBOX 队列标识的历史计数位，本文件不再有写入命中它，故恒 0。
     const result = await registered?.handler({ rawInput: ' status' })
 
-    // Story 2.4 / U5 + 评审 P16（T17）：**固定期望值**，不复刻生产 SQL 现算期望——
+    // Story 2.4 / U5 + 评审 P16（T17）：固定期望值，不复刻生产 SQL 现算期望，
     // 否则生产过滤条件写错时，测试会跟着一起错。本用例之前本文件只写了一条 L1 记忆
     //（且不带向量），所以 L1 与「未嵌入」都恒为 1；顺序变化会立刻变红，这是有意的。
-    // Story 2.6 / F2：`memory_remember` 工具写的是**没有 source_refs 的 L1 节点**（Epic 1 手动
-    // 写路径），按 AD-19 它构成 1 条 EII 违例（无 L0 前驱可达），故 evidence_gap 追加一行；
+    // Story 2.6 / F2：`memory_remember` 工具写的是没有 source_refs 的 L1 节点（Epic 1 手动
+    // 漂移为 0（无 source_refs 可漂）。related_skipped 为 0，不渲染。
     // 漂移为 0（无 source_refs 可漂）。related_skipped 为 0，不渲染。
     expect(result?.kind).toBe('success')
     expect(result?.text).toBe([
