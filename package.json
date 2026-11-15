@@ -1,6 +1,6 @@
 {
   "name": "dsh-omw",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "description": "DSH Oh My Whale — pnpm workspace 根（不发布）",
   "main": "index.js",
@@ -14,7 +14,10 @@
     "check:deps": "node scripts/check-deps.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
-    "verify": "pnpm constraints && pnpm typecheck && pnpm check:deps && pnpm check:migrations && pnpm test"
+    "verify": "pnpm constraints && pnpm typecheck && pnpm check:deps && pnpm check:migrations && pnpm test",
+    "test:coverage": "vitest run --coverage",
+    "test:security": "vitest run packages/dsh-oh-my-whale-memory/test/config-schema.test.ts packages/dsh-oh-my-whale-memory/test/db-redact.test.ts packages/dsh-oh-my-whale-memory/test/db-readonly.test.ts",
+    "check:coverage": "node scripts/coverage-gate.mjs"
   },
   "keywords": [],
   "author": "",
@@ -32,6 +35,7 @@
   },
   "type": "module",
   "devDependencies": {
+    "@vitest/coverage-v8": "3.2.4",
     "playwright": "1.64.1",
     "vitest": "^3.2.4"
   }

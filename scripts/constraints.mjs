@@ -17,6 +17,32 @@ if (bundle.name !== 'dsh-oh-my-whale') fail('bundle 包名必须为 dsh-oh-my-wh
 if (mem.name !== 'dsh-oh-my-whale-memory') fail('memory 包名必须为 dsh-oh-my-whale-memory')
 if (bundle.private === true || mem.private === true) fail('两包不得 private'); else ok('包名锁定 / 可发布')
 if (bundle.version !== mem.version) fail('两包版本必须一致'); else ok('两包版本一致')
+// Story 5.2 / AC:1199-1205、1211-1213：三条此前没有门禁的硬约定。
+// 版本权威 = 两包的值（根 private: true 不发布，值跟随两包）；三处不相等即红——
+// 真正的「由根派生」需要构建期改写 package.json，本仓库不做（见 Story 5.2 spec 的 D-1）。
+if (rootPkg.version !== bundle.version || rootPkg.version !== mem.version) {
+  fail(`版本一致性：root=${String(rootPkg.version)} bundle=${String(bundle.version)} memory=${String(mem.version)} 必须三者相等`)
+} else {
+  ok(`版本三处一致（${String(rootPkg.version)}，root 跟随两包）`)
+}
+// 版本存在性前置：三处同时缺失时 undefined===undefined 会静默通过（评审 STATUS52 第 1 条）。
+for (const [label, value] of [['root', rootPkg.version], ['bundle', bundle.version], ['memory', mem.version]]) {
+  if (typeof value !== 'string' || value.trim() === '') fail(`版本：${label} 的 version 缺失或为空`)
+}
+let typeOk = true
+for (const [pkg, label] of [[bundle, 'bundle'], [mem, 'memory']]) {
+  if (pkg.type !== 'module') { typeOk = false; fail(label + ": package.json type 应为 'module'（ESM only）") }
+}
+if (typeOk) ok("'type: module（两包）'")
+// AD-1：必须在 dependencies 声明、且不得同时放 peerDependencies（放 peer 在 autoInstallPeers:false 下装不上）。
+const memDep = bundle.dependencies?.['dsh-oh-my-whale-memory']
+if (typeof memDep !== 'string' || memDep.trim() === '') {
+  fail("bundle: 必须在 dependencies 声明 dsh-oh-my-whale-memory（AD-1 单向下游，不得放 peer）")
+} else if (bundle.peerDependencies?.['dsh-oh-my-whale-memory'] !== undefined) {
+  fail('bundle: dsh-oh-my-whale-memory 不得同时出现在 peerDependencies（AD-1）')
+} else {
+  ok("'bundle → memory 声明在 dependencies（AD-1）'")
+}
 
 for (const [pkg, label] of [[bundle, 'bundle'], [mem, 'memory']]) {
   if (pkg.main !== 'lib/index.js') fail(label + ': main 应为 lib/index.js')

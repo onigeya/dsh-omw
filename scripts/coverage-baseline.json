@@ -1,0 +1,309 @@
+{
+  "generatedAt": "2026-11-15T21:52:21.260Z",
+  "files": {
+    "packages/dsh-oh-my-whale-memory/src/capture/recorder.ts": {
+      "lines": 95.88,
+      "branches": 91.52
+    },
+    "packages/dsh-oh-my-whale-memory/src/capture/snapshot-store.ts": {
+      "lines": 95.23,
+      "branches": 84.61
+    },
+    "packages/dsh-oh-my-whale-memory/src/capture/step-counter.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/capture/transcript.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/command.ts": {
+      "lines": 99.76,
+      "branches": 97.39
+    },
+    "packages/dsh-oh-my-whale-memory/src/config.ts": {
+      "lines": 99.3,
+      "branches": 97.14
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/audit.ts": {
+      "lines": 94.78,
+      "branches": 81.13
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/backend.ts": {
+      "lines": 88.14,
+      "branches": 82.14
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/column-presence.ts": {
+      "lines": 93.1,
+      "branches": 85.71
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/database.ts": {
+      "lines": 91.12,
+      "branches": 85.71
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/dedup.ts": {
+      "lines": 97.66,
+      "branches": 89.36
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/edges.ts": {
+      "lines": 98.4,
+      "branches": 82.5
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/eii.ts": {
+      "lines": 97.84,
+      "branches": 91.78
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/embedding-profile.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/errors.ts": {
+      "lines": 100,
+      "branches": 75
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/forget.ts": {
+      "lines": 100,
+      "branches": 90.47
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/health.ts": {
+      "lines": 100,
+      "branches": 97.05
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/id.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/inbox-tables.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/l0.ts": {
+      "lines": 100,
+      "branches": 80
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/memory.ts": {
+      "lines": 97.84,
+      "branches": 81.7
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/migrate.ts": {
+      "lines": 93.47,
+      "branches": 88.15
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/migrations.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/migrations/0002-evidence-degraded-and-redact.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/paths.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/redact.ts": {
+      "lines": 100,
+      "branches": 93.75
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/rows.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/schema.ts": {
+      "lines": 97.68,
+      "branches": 95.23
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/snapshot.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/transaction.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/db/writer-lock.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/l2-refine.ts": {
+      "lines": 97.05,
+      "branches": 87.03
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/llm-refine.ts": {
+      "lines": 96.31,
+      "branches": 92.85
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/processor.ts": {
+      "lines": 98.67,
+      "branches": 90.8
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/promotion.ts": {
+      "lines": 97.56,
+      "branches": 80.98
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/session-route.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/distill/system-one.ts": {
+      "lines": 100,
+      "branches": 96.29
+    },
+    "packages/dsh-oh-my-whale-memory/src/embedding/backfill.ts": {
+      "lines": 88.88,
+      "branches": 83.33
+    },
+    "packages/dsh-oh-my-whale-memory/src/embedding/client.ts": {
+      "lines": 97.26,
+      "branches": 95.23
+    },
+    "packages/dsh-oh-my-whale-memory/src/inbox/consumer.ts": {
+      "lines": 98.63,
+      "branches": 94.73
+    },
+    "packages/dsh-oh-my-whale-memory/src/inbox/idle-gate.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/inbox/promotion-trigger.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/inbox/queue.ts": {
+      "lines": 99.5,
+      "branches": 92.7
+    },
+    "packages/dsh-oh-my-whale-memory/src/inbox/session-events.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/index.ts": {
+      "lines": 94.96,
+      "branches": 94.11
+    },
+    "packages/dsh-oh-my-whale-memory/src/injection/budget.ts": {
+      "lines": 100,
+      "branches": 97.36
+    },
+    "packages/dsh-oh-my-whale-memory/src/injection/openstart.ts": {
+      "lines": 89.34,
+      "branches": 86
+    },
+    "packages/dsh-oh-my-whale-memory/src/injection/prompt.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/injection/state.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/recall/core.ts": {
+      "lines": 98.81,
+      "branches": 81.25
+    },
+    "packages/dsh-oh-my-whale-memory/src/shared/memory-vocab.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/shared/stream-fold.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/shared/summarize.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/shared/text-budget.ts": {
+      "lines": 100,
+      "branches": 90.9
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/memory-forget.ts": {
+      "lines": 100,
+      "branches": 94.11
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/memory-recall.ts": {
+      "lines": 100,
+      "branches": 94.73
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/memory-related.ts": {
+      "lines": 100,
+      "branches": 84.78
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/memory-remember.ts": {
+      "lines": 100,
+      "branches": 95.23
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/recall-quota.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/recall-shared.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/tools/related-shared.ts": {
+      "lines": 100,
+      "branches": 86.95
+    },
+    "packages/dsh-oh-my-whale-memory/src/wiki/evidence-backfill.ts": {
+      "lines": 97.61,
+      "branches": 93.54
+    },
+    "packages/dsh-oh-my-whale-memory/src/wiki/relations.ts": {
+      "lines": 98.13,
+      "branches": 82.14
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/access.ts": {
+      "lines": 98.9,
+      "branches": 94.11
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/capture.ts": {
+      "lines": 91.3,
+      "branches": 75
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/commands.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/distill.ts": {
+      "lines": 98.92,
+      "branches": 75
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/events.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/host.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/inbox.ts": {
+      "lines": 92.55,
+      "branches": 77.77
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/injection.ts": {
+      "lines": 95.45,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/lifecycle.ts": {
+      "lines": 88.57,
+      "branches": 72.72
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/retrieval.ts": {
+      "lines": 92.72,
+      "branches": 63.63
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/runtime.ts": {
+      "lines": 100,
+      "branches": 100
+    },
+    "packages/dsh-oh-my-whale-memory/src/wire/tools.ts": {
+      "lines": 66.66,
+      "branches": 66.66
+    },
+    "packages/dsh-oh-my-whale/src/index.ts": {
+      "lines": 100,
+      "branches": 100
+    }
+  }
+}

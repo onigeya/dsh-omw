@@ -1,3 +1,11 @@
+# 唯一 CI 定义（Story 5.2 / AC:1191-1193：`scripts/` 与 `.github/workflows/` 的唯一 owner 是 5.2）。
+#
+# 分工：
+# - linux  job：全部门禁 + 覆盖率 ratchet + 发布形态（pack / publish-smoke 的 tarball 段）。
+# - windows job：AD-13 的原生 ABI 冒烟必须在真实 Windows 上跑（`pnpm test` 内含 abi-smoke），
+#   另跑同一套门禁与安全三项，防止「Linux 绿、Windows 红」的分叉。
+# 不在 CI 跑：`publish-smoke` 的安装段（要建 profile + pnpm 安装，5 分钟级）与 `test:e2e`
+#   （要浏览器 + 真实宿主）；两者在发布前本地跑（见 Story 5.1/5.2 spec 的 D-3）。
 name: CI
 
 on:
@@ -18,18 +26,29 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: gates
+      - name: gates (metadata / types / layering / migrations)
         run: |
           pnpm constraints
           pnpm typecheck
           pnpm check:deps
           pnpm check:migrations
+      - name: coverage gate self-test
+        run: node scripts/coverage-gate.mjs --self-test
       - name: tests (linux)
         run: pnpm test
-      - name: pack smoke
+      - name: coverage (per-file ratchet, AC:1227-1229)
+        run: |
+          pnpm test:coverage
+          pnpm check:coverage
+      - name: security trio (NFR9 / NFR15 / AD-12)
+        run: pnpm test:security
+      - name: host smoke subset
+        run: pnpm test:smoke
+      - name: publish form (pack + exact tarball, AC:1145)
         run: |
           pnpm build
           pnpm pack:smoke
+          node scripts/publish-smoke.mjs --only=tarball
 
   windows:
     runs-on: windows-latest
@@ -43,12 +62,21 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
-      - name: gates
+      - name: gates (metadata / types / layering / migrations)
         run: |
           pnpm constraints
           pnpm typecheck
           pnpm check:deps
+          pnpm check:migrations
       - name: OpenSSL 3 for native vector/fts (AD-13)
         run: echo "C:\Program Files\Git\mingw64\bin" >> $env:GITHUB_PATH
-      - name: tests (windows, native ABI + wasm)
+      - name: tests (windows, native ABI + wasm, AD-13)
         run: pnpm test
+      - name: coverage (per-file ratchet)
+        run: |
+          pnpm test:coverage
+          pnpm check:coverage
+      - name: security trio (NFR9 / NFR15 / AD-12)
+        run: pnpm test:security
+      - name: host smoke subset
+        run: pnpm test:smoke
