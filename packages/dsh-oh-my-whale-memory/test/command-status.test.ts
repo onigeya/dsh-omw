@@ -29,6 +29,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
     getStatus: async () => STATUS_BASE,
     recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '' }),
     relatedMemories: async () => ({ id: '', depth: 2, total: 0, results: [] }),
+    forgetMemory: async () => ({ id: '', alreadyExpired: false, affected: [] }),
     ...overrides,
   }
 }
@@ -105,10 +106,20 @@ describe('renderMemoryStatus（spec「输出格式钉死」）', () => {
     expect(text).not.toContain('embedding: enabled')
   })
 
-  it('audit_gap 未知（审计表缺失）：显式标注而不是印 0', () => {
-    const text = renderMemoryStatus({ ...STATUS_BASE, auditGap: null })
-    expect(text).toContain('audit_gap: 未知（审计表缺失）')
-    expect(text).not.toContain('audit_gap: 0')
+  it('Story 4.1 / D-B：audit_gap 是 keyed + 边侧三集的合计；任一算不出来即「未知」', () => {
+    // 两集都可算 ⇒ 合计（AD-21:300 的三集合并口径）。
+    expect(renderMemoryStatus({
+      ...STATUS_BASE,
+      auditGap: 2,
+      evidenceGap: { total: 3, eiiViolations: 2, drift: 1 },
+    })).toContain('audit_gap: 5')
+    // 审计表缺失 ⇒ 未知（不再只报 keyed 口径）。
+    const missingAudit = renderMemoryStatus({ ...STATUS_BASE, auditGap: null })
+    expect(missingAudit).toContain('audit_gap: 未知（审计表或边表缺失）')
+    expect(missingAudit).not.toContain('audit_gap: 0')
+    // 边表缺失（null）同样算不出来。
+    const missingEdge = renderMemoryStatus({ ...STATUS_BASE, evidenceGap: null })
+    expect(missingEdge).toContain('audit_gap: 未知（审计表或边表缺失）')
   })
 
   it('enabled × 只读：原因逐字渲染', () => {

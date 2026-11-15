@@ -40,6 +40,8 @@ export type MemoryDbErrorCode =
   | 'db_backend_unavailable'
   /** 时间参数不是合法 UTC ISO-8601 时刻（Story 2.6：闭包谓词需内联时刻字面量）。 */
   | 'invalid_instant'
+  /** 目标 id 在库里不存在（Story 4.1 / forget：命令面渲染成「未找到 id 为 <id> 的记忆。」）。 */
+  | 'memory_not_found'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode

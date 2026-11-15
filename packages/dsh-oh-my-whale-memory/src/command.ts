@@ -6,12 +6,13 @@
  * `invocation.rawInput`，把读/写库异常收敛为 `{ kind: 'error', text }`；命令不抛异常，
  * 宿主对 thrown handler 以 `kind: 'error'` 收尾（commands.md:172）。
  *
- * 六个子命令共用一个 definition（`ctx.commands.register` 仍只有一处），代码看不出的约束：
+ * 七个子命令共用一个 definition（`ctx.commands.register` 仍只有一处），代码看不出的约束：
  * - `remember [--kind=..] [--priority=..] <内容>` 写 L1（Story 1.7 + 1.11）；FR-20 / AC2：
  *   手动写路径也产出非空 kind / 非 0 priority（含 -1）；
  * - `list [关键词]`：文本包含匹配、`recorded_at` 倒序、默认 20 条；
  * - `show <id>` 含已失效墓碑，「列表隐藏、详情可见」是有意的；
  * - `status` 无参、纯读、无 LLM/网络（Story 1.9）；
+ * - `forget <id>` 软删除（Story 4.1）：目标写 expired_at、上层引用者同事务写 invalid_at；
  * - `list` 是字面包含匹配（两侧小写化），不是语义检索 / 向量 / FTS / RRF；语义检索走
  *   `recall`（db 侧 src/recall/core.ts）。过滤、排序、截断在 db 层完成，命令层只做渲染；
  * - 手动 `recall` / `related` 不计入 turn 配额，配额只作用于对应的工具面。
@@ -45,6 +46,8 @@ export const MEMORY_STATUS_SUBCOMMAND = 'status'
 export const MEMORY_RECALL_SUBCOMMAND = 'recall'
 /** `related` 子命令：沿证据链/语义关系遍历邻居（Story 3.2）。 */
 export const MEMORY_RELATED_SUBCOMMAND = 'related'
+/** `forget` 子命令：软删除一条记忆并级联作废其上层引用者（Story 4.1）。 */
+export const MEMORY_FORGET_SUBCOMMAND = 'forget'
 
 /**
  * `list` 默认返回条数。
@@ -109,7 +112,16 @@ export const MEMORY_RELATED_USAGE = [
   '示例：/memory related <记忆 id> 2',
 ].join('\n')
 
-/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall / related 六条）。 */
+/** `forget` 子命令缺少 id 时的 usage 提示（Story 4.1）。 */
+export const MEMORY_FORGET_USAGE = [
+  '用法：/memory forget <id>',
+  '',
+  '把一条记忆从当前快照里移除：目标写 expired_at（此后同文本重写不复活），',
+  '其上层引用者按跳数自顶向下写 invalid_at（EII 定序级联），同事务生效。',
+  'id 取自 /memory list 或 /memory recall 的输出。示例：/memory forget <记忆 id>',
+].join('\n')
+
+/** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall / related / forget 七条）。 */
 export const MEMORY_COMMAND_USAGE = [
   '用法：/memory <子命令>',
   '',
@@ -124,6 +136,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_RECALL_USAGE,
   '',
   MEMORY_RELATED_USAGE,
+  '',
+  MEMORY_FORGET_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -199,6 +213,24 @@ export interface MemoryCommandRelatedResult {
   readonly results: readonly MemoryCommandRelatedEntry[]
   readonly hint?: string
   readonly partial?: boolean
+}
+
+/** 被遗忘的一个节点（命令层镜像 `db/forget.ts` 的 `ForgottenNode`；不 import db 模块）。 */
+export interface MemoryCommandForgetEntry {
+  readonly id: string
+  readonly layer: string
+  /** 与目标的证据跳数：目标 0，级联受害者 1..4。 */
+  readonly hops: number
+  readonly text: string
+}
+
+/** 遗忘结果（与 `db/forget.ts` 的 `ForgetResult` 同形）。 */
+export interface MemoryCommandForgetResult {
+  readonly id: string
+  /** true = 此前已遗忘（幂等重放），本次没有写任何行。 */
+  readonly alreadyExpired: boolean
+  /** 跳数降序、目标在最后；幂等重放时只有目标一行。 */
+  readonly affected: readonly MemoryCommandForgetEntry[]
 }
 
 /** 单条记忆详情（db 层 `getMemoryById` 的返回形状；字段与 show 渲染顺序一致）。 */
@@ -350,9 +382,15 @@ export interface MemoryCommandDependencies {
    * 抛错由 handler 收敛为 error 结果。
    */
   relatedMemories(input: { readonly id: string; readonly depth?: number }): Promise<MemoryCommandRelatedResult>
+  /**
+   * 遗忘一条记忆并级联作废其上层引用者（Story 4.1）。抛错由 handler 收敛为 error 结果
+   *（不存在时是 `memory_not_found`，文案「未找到 id 为 <id> 的记忆。」）。手动 forget 不计入
+   * turn 配额（配额只作用于召回族工具）。
+   */
+  forgetMemory(id: string): Promise<MemoryCommandForgetResult>
 }
 
-/** 解析结果：六个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
+/** 解析结果：七个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
 export type MemoryCommandParseResult =
   | { kind: 'remember', text: string, classification?: MemoryInboxWriteOptions }
   | { kind: 'list', query?: string }
@@ -360,6 +398,7 @@ export type MemoryCommandParseResult =
   | { kind: 'status' }
   | { kind: 'recall', query: string }
   | { kind: 'related', id: string, depth?: number }
+  | { kind: 'forget', id: string }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -425,6 +464,7 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
  * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
  * - `recall` → 其余 trim 后为检索 query；为空给 `MEMORY_RECALL_USAGE`（Story 3.1）；
  * - `related` → 其余 trim 后为 `<id> [depth]`（Story 3.2，depth 非正整数 → usage）；
+ * - `forget` → 其余 trim 后为 id；为空给 `MEMORY_FORGET_USAGE`（Story 4.1）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
@@ -447,6 +487,8 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return payload ? { kind: 'recall', query: payload } : { kind: 'invalid', usage: MEMORY_RECALL_USAGE }
     case MEMORY_RELATED_SUBCOMMAND:
       return parseRelatedPayload(payload)
+    case MEMORY_FORGET_SUBCOMMAND:
+      return payload ? { kind: 'forget', id: payload } : { kind: 'invalid', usage: MEMORY_FORGET_USAGE }
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -552,6 +594,26 @@ function renderMemoryRecall(result: MemoryCommandRecallResult): string {
 }
 
 /**
+ * 遗忘渲染（Story 4.1，spec「钉死的输出文案」逐字）：
+ * - 首次成功：`已遗忘 <id>：共作废 <n> 条（其中级联 <n-1> 条）`，其后每行
+ *   `- <id> [<layer>] 深度 <d> <text摘要>`（行按跳数降序，目标在最后）；
+ * - 幂等重放：`已遗忘 <id>：本次未重复写入（此前已遗忘）`，只有目标一行、深度 0。
+ * 摘要走 `summarizeMemoryText`（折叠换行 + 60 code point 截断），保证「每行一个条目」。
+ */
+function renderMemoryForget(result: MemoryCommandForgetResult): string {
+  const entries = result.affected.map(
+    (entry) => `- ${entry.id} [${entry.layer}] 深度 ${entry.hops} ${summarizeMemoryText(entry.text)}`,
+  )
+  if (result.alreadyExpired) {
+    return [`已遗忘 ${result.id}：本次未重复写入（此前已遗忘）`, ...entries].join('\n')
+  }
+  return [
+    `已遗忘 ${result.id}：共作废 ${result.affected.length} 条（其中级联 ${result.affected.length - 1} 条）`,
+    ...entries,
+  ].join('\n')
+}
+
+/**
  * 详情渲染（spec 钉死格式）：首行 `记忆 <id>：`，其后按 AC 字段顺序每行 `<字段>: <值>`。
  * 不回显 `embedding` 向量列（体积与可读性）。
  */
@@ -592,6 +654,21 @@ function appendFailedEntryLines(
 }
 
 /**
+ * audit_gap 行的值（Story 4.1 / D-B：按 AD-21 合并成三集合计）。
+ *
+ * AD-21 把 audit_gap 定义为三集合并集：缺裁决记录（keyed 口径）+ EII 违例 + 边/refs 漂移。
+ * 此前实现只把第一集渲染在 `audit_gap` 行，另两集另起 `evidence_gap` 行才是偏差；现在
+ * `audit_gap` 给合计，`evidence_gap` 保留为分项明细（EII / 漂移），两张表都算不出来时
+ * 同一句「未知」，绝不静默报 0。
+ */
+function renderAuditGapValue(snapshot: MemoryStatusSnapshot): string {
+  if (snapshot.auditGap === null || snapshot.evidenceGap === null) {
+    return '未知（审计表或边表缺失）'
+  }
+  return String(snapshot.auditGap + snapshot.evidenceGap.total)
+}
+
+/**
  * 状态渲染（spec「输出格式钉死（可断言）」逐行照抄）：
  * 首行 `记忆状态`，其后固定顺序的 `键: 值` 行，计数为十进制。
  *
@@ -606,7 +683,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
     `L1_INBOX: ${snapshot.inboxes.L1}`,
     `L2_INBOX: ${snapshot.inboxes.L2}`,
     `failed: ${snapshot.failed}`,
-    `audit_gap: ${snapshot.auditGap ?? '未知（审计表缺失）'}`,
+    `audit_gap: ${renderAuditGapValue(snapshot)}`,
     snapshot.embeddingMode === 'disabled'
       ? 'embedding: disabled（降级检索）'
       : snapshot.unembedded > 0
@@ -682,9 +759,9 @@ function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
 export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
   return {
     name: MEMORY_COMMAND_NAME,
-    description: '记录与浏览长期记忆（remember / list / show / status / recall / related）',
+    description: '记录与浏览长期记忆（remember / list / show / status / recall / related / forget）',
     input: {
-      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query> | related <id> [depth]',
+      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query> | related <id> [depth] | forget <id>',
     },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
@@ -723,6 +800,12 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
               : { id: parsed.id, depth: parsed.depth }
             const result = await deps.relatedMemories(input)
             return { kind: 'success', text: renderMemoryRelated(result) }
+          }
+          case 'forget': {
+            // 手动遗忘不计入 turn 配额；库未就绪/只读/不存在由 deps 抛错，下面的 catch
+            // 收敛为 error 结果（`memory_not_found` 的文案与 `show` 逐字一致）。
+            const result = await deps.forgetMemory(parsed.id)
+            return { kind: 'success', text: renderMemoryForget(result) }
           }
         }
       } catch (error) {

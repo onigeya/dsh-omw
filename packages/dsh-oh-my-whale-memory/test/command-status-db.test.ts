@@ -122,7 +122,10 @@ function statusText(
     `L1_INBOX: ${overrides.L1_INBOX ?? 3}`,
     `L2_INBOX: ${overrides.L2_INBOX ?? 0}`,
     'failed: 0',
-    `audit_gap: ${auditGap}`,
+    // Story 4.1 / D-B：audit_gap 是 keyed 口径与边侧（EII + 漂移）的合计；边表缺失即「未知」。
+    evidenceGap === null
+      ? 'audit_gap: 未知（审计表或边表缺失）'
+      : `audit_gap: ${auditGap + evidenceGap.total}`,
     unembedded > 0 ? `embedding: enabled（未嵌入 ${unembedded} 条）` : 'embedding: enabled',
     'systemOne: enabled',
     'readonly: false',
@@ -375,8 +378,9 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'L1_INBOX: 1',
         'L2_INBOX: 0',
         'failed: 0',
-        // 只读实例的库缺审计表（夹具不建）→ 差额不可用；队列表在（Story 2.2 起 status 读它算 failed）。
-        'audit_gap: 未知（审计表缺失）',
+        // 只读实例的库缺审计表与边表（夹具不建）→ 三集合计不可用（Story 4.1 / D-B 的合并口径）；
+        // 队列表在（Story 2.2 起 status 读它算 failed）。
+        'audit_gap: 未知（审计表或边表缺失）',
         // Story 2.4 / U5：只读夹具 4 条节点（L1×2 / L2×1 / L1_INBOX×1）全无向量。
         'embedding: enabled（未嵌入 4 条）',
         'systemOne: enabled',

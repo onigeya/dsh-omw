@@ -116,7 +116,8 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'L1_INBOX: 0',
       'L2_INBOX: 0',
       'failed: 0',
-      'audit_gap: 0',
+      // Story 4.1 / D-B：audit_gap = keyed 口径 0 + 边侧差额 1（下面那行 evidence_gap 的分项明细）。
+      'audit_gap: 1',
       'embedding: enabled（未嵌入 1 条）',
       'systemOne: enabled',
       'readonly: false',

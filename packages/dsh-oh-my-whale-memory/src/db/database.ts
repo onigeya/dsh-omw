@@ -539,7 +539,13 @@ function createModeMismatchError(dbPath: string, wanted: boolean, actual: boolea
   )
 }
 
-function createReadonlyModeError(dbPath: string): MemoryDbError {
+/**
+ * facade 的只读拒绝错误（`readonly_mode`）。
+ *
+ * 导出它是为了让写路径的第二个入口（`wire/access.ts` 的 forgetMemory，Story 4.1）逐字复用
+ * 同一句文案：忘却是写入，只读实例必须先拒，而「不新造一句话」比少一个导出更重要。
+ */
+export function createReadonlyModeError(dbPath: string): MemoryDbError {
   return new MemoryDbError(
     'readonly_mode',
     `记忆库处于只读模式（${READONLY_REASON}），拒绝写入（${dbPath}）：本窗口不是写者实例。` +

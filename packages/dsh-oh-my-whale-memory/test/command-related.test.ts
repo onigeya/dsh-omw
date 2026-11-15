@@ -31,6 +31,7 @@ function makeDeps(overrides: Partial<MemoryCommandDependencies> = {}): MemoryCom
     }),
     recallMemories: async () => ({ total: 0, results: [], degraded: false, hint: '' }),
     relatedMemories: async () => ({ id: '', depth: 2, total: 0, results: [] }),
+    forgetMemory: async () => ({ id: '', alreadyExpired: false, affected: [] }),
     ...overrides,
   }
 }
