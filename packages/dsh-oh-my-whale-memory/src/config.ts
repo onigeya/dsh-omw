@@ -267,5 +267,5 @@ export interface ConfigShape {
   priorityWeight: Volatile<number>
   llmProvider: Volatile<string | undefined>
   llmModel: Volatile<string | undefined>
-  systemOne: Volatile<{ enabled: boolean }>
+  systemOne: Volatile<{ enabled: boolean; endpoint?: string; model?: string; token?: string }>
 }
