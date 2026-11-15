@@ -104,6 +104,20 @@ const ALL_DIRECT_IN_EDGES = [
   'RETURN m.id AS to_id, x.id AS from_id',
 ].join('\n')
 
+/** 可解析端点探测（A 侧口径，Story 4.3）：ref 命中 `l0_raw.id` 即算「引用目标存在」。 */
+const RESOLVABLE_L0_IDS = [
+  'MATCH (l:' + L0_RAW_TABLE + ')',
+  'WHERE l.id IN $ids',
+  'RETURN l.id AS id',
+].join('\n')
+
+/** 可解析端点探测（A 侧口径，Story 4.3）：ref 命中 `memory.id` 同样算「引用目标存在」。 */
+const RESOLVABLE_MEMORY_IDS = [
+  'MATCH (m:' + MEMORY_TABLE + ')',
+  'WHERE m.id IN $ids',
+  'RETURN m.id AS id',
+].join('\n')
+
 const EDGE_TABLE_PROBE = "CALL table_info('" + EVIDENCE_TABLE + "') RETURN name"
 
 /**
@@ -239,6 +253,13 @@ export interface EvidenceDrift {
 /**
  * 边 ↔ source_refs[] 的双向漂移（裁决 U1：基准是直接入边，不是 L0 闭包）。
  * 两条全表查询 + JS 求差集（避免逐节点 N+1）；只读；谓词不含 recorded_at。
+ *
+ * Story 4.3 / D-5：A 侧只统计**可解析端点**的 ref（命中 `l0_raw.id` 或 `memory.id`）。
+ * 理由：手工 `memory_remember(context=<消息 id>)` 写的 `source_refs` 既不是 L0 也不是节点，
+ * 它描述的是「引用了一个库外载体」而不是「边与 refs 不一致」；把它算成漂移会让 AD-21 的
+ * `audit_gap` 在常规使用下永不为 0（Story 4.1 遗留 action item，SM-2 因此不可达）。
+ * 不可解析 ref 的可见性归 Epic 10 的 `unresolvable_pointers`（见 spec frontmatter deferred）。
+ * B 侧不动：边一定有端点，不存在「不可解析」的边。
  */
 export async function computeEvidenceDrift(connection: lbug.Connection, now: string): Promise<EvidenceDrift> {
   const presence = await schemaColumnPresence(connection)
@@ -251,6 +272,10 @@ export async function computeEvidenceDrift(connection: lbug.Connection, now: str
     set.add(String(edge.from_id))
     inEdges.set(to, set)
   }
+  // 先取全库 refs 并集再分两次 IN 查询：一次探测覆盖所有节点，避免逐节点 N+1。
+  const candidateRefs = new Set<string>()
+  for (const node of nodes) for (const ref of toStringArray(node.source_refs)) candidateRefs.add(ref)
+  const resolvable = await resolvableEndpointIds(connection, [...candidateRefs])
   const refsWithoutEdges: EvidenceDriftEntry[] = []
   const edgesWithoutRefs: EvidenceDriftEntry[] = []
   for (const node of nodes) {
@@ -260,10 +285,24 @@ export async function computeEvidenceDrift(connection: lbug.Connection, now: str
     const edgeSet = inEdges.get(id) ?? new Set<string>()
     // 评审 P18b（T20）：遍历去重后的 refSet，库内 source_refs 允许含重复 id
     //（list_concat 追加），用原数组会把同一条漂移放大成多条。
-    for (const ref of refSet) if (!edgeSet.has(ref)) refsWithoutEdges.push({ id, ref })
+    // Story 4.3：不可解析的 ref 不是漂移，跳过（矩阵行 12/13/14）。
+    for (const ref of refSet) {
+      if (resolvable.has(ref) && !edgeSet.has(ref)) refsWithoutEdges.push({ id, ref })
+    }
     for (const from of edgeSet) if (!refSet.has(from)) edgesWithoutRefs.push({ id, ref: from })
   }
   return { refsWithoutEdges, edgesWithoutRefs }
+}
+
+/** 命中 `l0_raw.id` 或 `memory.id` 的 ref 集合（空输入不发查询）。 */
+async function resolvableEndpointIds(connection: lbug.Connection, ids: readonly string[]): Promise<Set<string>> {
+  const resolved = new Set<string>()
+  if (ids.length === 0) return resolved
+  const params = { ids: [...ids] }
+  for (const statement of [RESOLVABLE_L0_IDS, RESOLVABLE_MEMORY_IDS]) {
+    for (const row of await queryRows(connection, statement, params)) resolved.add(String(row.id))
+  }
+  return resolved
 }
 
 /** 边表是否已建（只读探针）：表缺失时 `/memory status` 必须显示「未知」而不是 0。 */

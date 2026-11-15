@@ -332,6 +332,34 @@ export interface MemoryStatusSnapshot {
    * 缺省按 true 处理（既有夹具无需改动即向后兼容）。
    */
   readonly injectionEnabled?: boolean
+  /**
+   * 健康指标（Story 4.3）：积压时长 / 最近精炼完成时刻。**缺省 ⇒ 不追加任何行**，
+   * 既有钉死输出逐字不变（矩阵行 11）；只有真实读路径（`src/wire/access.ts`）会填。
+   */
+  readonly health?: MemoryHealthView
+}
+
+/**
+ * 单个健康指标的三态（命令层镜像 `src/db/health.ts` 的 `HealthMetric`；命令层不 import db 模块）。
+ * 字段名与语义必须与 db 侧一致，两者靠结构类型直接对接（无 `as` 转换）。
+ */
+export type MemoryHealthMetric<T> =
+  | { readonly status: 'ok', readonly value: T }
+  | { readonly status: 'none' }
+  | { readonly status: 'missing-table' }
+  | { readonly status: 'failed' }
+  | { readonly status: 'budget' }
+
+/** 两路队列的积压时长（毫秒，非负）；null = 该队列无积压。 */
+export interface MemoryHealthBacklog {
+  readonly l1Ms: number | null
+  readonly l2Ms: number | null
+}
+
+/** 健康指标视图（db 侧 `MemoryHealthView` 的同形镜像）。 */
+export interface MemoryHealthView {
+  readonly inboxBacklog: MemoryHealthMetric<MemoryHealthBacklog>
+  readonly lastRefineAt: MemoryHealthMetric<string>
 }
 
 /**
@@ -785,7 +813,62 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   // Story 3.3 / B4：开局注入的可见性（末尾追加，既有行逐字不动）。恒打印一行，
   // 让「Config 关闭」「从未注入」「已注入」三态都可断言；预算超限再追加一行（INV-2 提示）。
   lines.push(...renderInjectionStatusLines(snapshot))
+  // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
+  // 既有钉死块因此逐字不变（矩阵行 11）。
+  lines.push(...renderHealthStatusLines(snapshot.health))
   return lines.join('\n')
+}
+
+/** 积压时长的 `n/a` 原因文案（D-2：三态各有固定文案，可断言）。 */
+function healthMetricReason(metric: MemoryHealthMetric<unknown>, noneReason: string): string {
+  switch (metric.status) {
+    case 'none':
+      return noneReason
+    case 'missing-table':
+      return 'n/a（队列表缺失）'
+    case 'failed':
+      return 'n/a（采集失败）'
+    case 'budget':
+      return 'n/a（超出 10s 观测预算）'
+    case 'ok':
+      // 调用方只在非 ok 时走本函数；ok 分支给出空串而不是抛错，渲染函数保持纯且总可返回。
+      return ''
+  }
+}
+
+/** 单路队列的积压：有值 ⇒ `<秒>s`，无积压 ⇒ `n/a（无积压）`（D-2：整数秒，向下取整）。 */
+function renderBacklogQueue(ageMs: number | null): string {
+  return ageMs === null ? 'n/a（无积压）' : `${Math.floor(ageMs / 1000)}s`
+}
+
+/**
+ * `inbox_backlog` 行的值：取两条队列的较大者，括号里给分项（矩阵行 2/3）。
+ * 无积压（`none`）渲染整行 `n/a（无积压）`，与「积压 0 秒」的 `0s` 明确区分（矩阵行 4）。
+ */
+function renderInboxBacklogValue(metric: MemoryHealthMetric<MemoryHealthBacklog>): string {
+  if (metric.status !== 'ok') return healthMetricReason(metric, 'n/a（无积压）')
+  const { l1Ms, l2Ms } = metric.value
+  const maxMs = Math.max(l1Ms ?? 0, l2Ms ?? 0)
+  return `${Math.floor(maxMs / 1000)}s（L1 ${renderBacklogQueue(l1Ms)} / L2 ${renderBacklogQueue(l2Ms)}）`
+}
+
+/**
+ * 健康指标五行（Story 4.3，spec 钉死的顺序与文案）：
+ * `inbox_backlog` / `last_refine_at` / `rerank_latency` / `pending_conflicts` / `strategy_gate`。
+ *
+ * 两张 Epic 7 的占位行只写死文案、不做任何采集（真源在 Story 7.1 / 7.3，D-6）；
+ * `rerank_latency` 恒 `n/a`（v1 无精排，AD-16 归 v1.1，绝不编造数字）。
+ */
+function renderHealthStatusLines(health: MemoryHealthView | undefined): string[] {
+  if (health === undefined) return []
+  const lastRefine = health.lastRefineAt
+  return [
+    `inbox_backlog: ${renderInboxBacklogValue(health.inboxBacklog)}`,
+    `last_refine_at: ${lastRefine.status === 'ok' ? lastRefine.value : healthMetricReason(lastRefine, 'n/a（从未完成精炼）')}`,
+    'rerank_latency: n/a (v1 无精排)',
+    'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
+    'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+  ]
 }
 
 /** 注入状态行（Story 3.3 / B4；单位标注=字符，AC:935）。 */

@@ -118,19 +118,26 @@ describe('浏览路（listMemories）', () => {
 
 describe('eii 正集（EFFECTIVE_MEMORY_REFS）', () => {
   it('漂移 A 只统计当前快照节点的 source_refs', async () => {
+    // Story 4.3 / D-5：A 侧只统计**可解析**端点的 ref（命中 l0_raw 或 memory）。这里的
+    // 端点是一行真实 L0（无边），四个节点都引用它：只有当前快照里那条能进漂移 A。
+    await store.connection.query(
+      `CREATE (l:l0_raw {id: 'drift-endpoint', raw_text: '原文', recorded_at: '${PAST}', actor: 'test'})`,
+    )
     // 有效节点：ref 无边 ⇒ 计入漂移 A。
-    await seed('漂移-有效', { sourceRefs: ['msg-drift-valid'] })
+    await seed('漂移-有效', { sourceRefs: ['drift-endpoint'] })
     // 非快照节点：即使 ref 无边也不得计入（它们不在正集里）。
-    await seed('漂移-已失效', { invalidAt: PAST, sourceRefs: ['msg-drift-invalid'] })
-    await seed('漂移-将来记录', { recordedAt: FUTURE, sourceRefs: ['msg-drift-future'] })
-    await seed('漂移-将来生效', { validAt: FUTURE, sourceRefs: ['msg-drift-future-valid'] })
+    await seed('漂移-已失效', { invalidAt: PAST, sourceRefs: ['drift-endpoint'] })
+    await seed('漂移-将来记录', { recordedAt: FUTURE, sourceRefs: ['drift-endpoint'] })
+    await seed('漂移-将来生效', { validAt: FUTURE, sourceRefs: ['drift-endpoint'] })
 
     const drift = await computeEvidenceDrift(store.connection, NOW)
-    const driftRefs = new Set(drift.refsWithoutEdges.map((entry) => entry.ref))
-    expect(driftRefs.has('msg-drift-valid')).toBe(true)
-    expect(driftRefs.has('msg-drift-invalid')).toBe(false)
-    expect(driftRefs.has('msg-drift-future')).toBe(false)
-    expect(driftRefs.has('msg-drift-future-valid')).toBe(false)
+    const driftedIds = new Set(drift.refsWithoutEdges.map((entry) => entry.id))
+    expect(driftedIds.has(nid('漂移-有效'))).toBe(true)
+    expect(driftedIds.has(nid('漂移-已失效'))).toBe(false)
+    expect(driftedIds.has(nid('漂移-将来记录'))).toBe(false)
+    expect(driftedIds.has(nid('漂移-将来生效'))).toBe(false)
+    // 只有有效节点那一条贡献了漂移（证明正集过滤在「端点可解析」的前提下仍然生效）。
+    expect(drift.refsWithoutEdges.filter((entry) => entry.ref === 'drift-endpoint')).toHaveLength(1)
   })
 })
 

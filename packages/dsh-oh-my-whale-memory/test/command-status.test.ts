@@ -17,6 +17,7 @@ import {
   parseMemoryCommand,
   renderMemoryStatus,
   type MemoryCommandDependencies,
+  type MemoryHealthView,
   type MemoryStatusSnapshot,
 } from '../src/command'
 
@@ -322,5 +323,80 @@ describe('createMemoryCommandDefinition（status 分支）', () => {
     const result = await definition.handler({ rawInput: ' status' })
 
     expect(result).toEqual({ kind: 'error', text: 'plain-string-failure' })
+  })
+})
+
+describe('Story 4.3：健康五行（T2 / 矩阵行 2/3/11）', () => {
+  it('health 缺省 ⇒ 一行都不追加（既有钉死块逐字不变）', () => {
+    const withoutHealth = renderMemoryStatus(STATUS_BASE)
+    expect(withoutHealth).not.toContain('inbox_backlog')
+    expect(withoutHealth).not.toContain('last_refine_at')
+    expect(withoutHealth).not.toContain('rerank_latency')
+    expect(withoutHealth.split('\n').at(-1)).toBe('injection: 未知（本实例尚未触发开局注入）')
+  })
+
+  it('有 health ⇒ 五行追加在 injection 之后，顺序固定', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      health: {
+        inboxBacklog: { status: 'ok', value: { l1Ms: 90_000, l2Ms: 30_000 } },
+        lastRefineAt: { status: 'ok', value: '2026-11-01T00:30:00.000Z' },
+      },
+    })
+    const lines = text.split('\n')
+    const tail = lines.slice(-5)
+    expect(tail).toEqual([
+      'inbox_backlog: 90s（L1 90s / L2 30s）',
+      'last_refine_at: 2026-11-01T00:30:00.000Z',
+      'rerank_latency: n/a (v1 无精排)',
+      'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
+      'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+    ])
+    // 既有行（injection 之前）逐字不变。
+    expect(lines.slice(0, -5).join('\n')).toBe(renderMemoryStatus(STATUS_BASE))
+  })
+
+  it('单队列积压：另一队列渲染 n/a（无积压），整行取较大者', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      health: {
+        inboxBacklog: { status: 'ok', value: { l1Ms: 90_000, l2Ms: null } },
+        lastRefineAt: { status: 'none' },
+      },
+    })
+    expect(text).toContain('inbox_backlog: 90s（L1 90s / L2 n/a（无积压））')
+    expect(text).toContain('last_refine_at: n/a（从未完成精炼）')
+  })
+
+  it('三态文案固定：无积压 / 表缺失 / 采集失败 / 超预算', () => {
+    const withMetric = (health: MemoryHealthView): string => renderMemoryStatus({ ...STATUS_BASE, health })
+    expect(withMetric({
+      inboxBacklog: { status: 'none' },
+      lastRefineAt: { status: 'none' },
+    })).toContain('inbox_backlog: n/a（无积压）')
+    expect(withMetric({
+      inboxBacklog: { status: 'missing-table' },
+      lastRefineAt: { status: 'missing-table' },
+    })).toContain('inbox_backlog: n/a（队列表缺失）')
+    expect(withMetric({
+      inboxBacklog: { status: 'failed' },
+      lastRefineAt: { status: 'failed' },
+    })).toContain('last_refine_at: n/a（采集失败）')
+    expect(withMetric({
+      inboxBacklog: { status: 'budget' },
+      lastRefineAt: { status: 'budget' },
+    })).toContain('last_refine_at: n/a（超出 10s 观测预算）')
+  })
+
+  it('积压 0 秒是 `0s` 而不是 n/a（有积压与无积压必须可区分）', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      health: {
+        inboxBacklog: { status: 'ok', value: { l1Ms: 0, l2Ms: null } },
+        lastRefineAt: { status: 'none' },
+      },
+    })
+    expect(text).toContain('inbox_backlog: 0s（L1 0s / L2 n/a（无积压））')
+    expect(text).not.toContain('inbox_backlog: n/a（无积压）')
   })
 })

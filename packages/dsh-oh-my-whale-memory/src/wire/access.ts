@@ -9,6 +9,7 @@ import type { MemoryDatabase } from '../db/database.js'
 import { createReadonlyModeError } from '../db/database.js'
 import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
+import { collectHealthMetrics } from '../db/health.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
@@ -154,6 +155,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 3.3 / B4：注入可见性，进程内 lastInjection（null=未知）+ Config 开关。
       injection: options.injectionStore.readLastInjection() ?? null,
       injectionEnabled: options.resolved.injectOnNewSession,
+      // Story 4.3：健康指标（积压 / 最近精炼完成）。collectHealthMetrics 自身对每个采集点
+      // best-effort，异常与超预算都收敛成该点 `n/a`，绝不让 status 失败（AC:1105-1107）。
+      health: await collectHealthMetrics({ connection }),
       uncertain: await countUncertainAudits(connection),
     }
   }
