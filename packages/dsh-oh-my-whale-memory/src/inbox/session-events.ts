@@ -14,6 +14,8 @@ export interface CaptureHooks {
   recordStepEnd(session: unknown, event: unknown): void
   recordCompactionStart(session: unknown, event: unknown): void
   recordTurnEnd(session: unknown, event: unknown): void
+  /** 会话销毁时清掉采集器的每会话内存（旧实现没有该钩子时跳过）。 */
+  resetSession?(sessionId: string): void
 }
 
 export interface SessionEventHandlerDeps {
@@ -43,6 +45,12 @@ export function createSessionEventHandler(
       deps.capture?.recordStepEnd(session, event)
     } else if (type === 'compaction/start') {
       deps.capture?.recordCompactionStart(session, event)
+    } else if (type === 'session/disposed') {
+      // 宿主不保证 dispose 前一定有 turn/end：悬空的活跃计数会让闸门永久忙、消费者停摆。
+      // 三处每会话状态都按「会话已不存在」归还，不依赖配对事件。
+      deps.gate.forgetSession(sessionId)
+      deps.promotion.forgetSession(sessionId)
+      deps.capture?.resetSession?.(sessionId)
     }
   }
 }

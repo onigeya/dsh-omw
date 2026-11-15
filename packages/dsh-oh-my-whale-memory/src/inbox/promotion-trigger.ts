@@ -67,6 +67,8 @@ export interface PromotionTracker {
    * turn/end，U22）时调用：检查该会话同 kind 计数并清空该会话计数。
    */
   recordSessionEnd(input: { readonly sessionId: string; readonly kind?: string }): void
+  /** 会话销毁：清掉该会话的累计，不发提升信号（没有可提升的完整会话边界）。 */
+  forgetSession(sessionId: string): void
   readonly totalL1: number
   pendingFor(sessionId: string): { readonly total: number; readonly byKind: Record<string, number> }
 }
@@ -138,6 +140,10 @@ export function createPromotionTracker(options: PromotionTrackerOptions): Promot
       })
       // 判定时传 0 只为屏蔽累计分支；信号里的 totalL1 仍回填真实累计值（调用方要能读到）。
       if (sessionTrigger) emit({ ...sessionTrigger, totalL1 })
+    },
+    forgetSession(sessionId) {
+      sessionKinds.delete(sessionId)
+      sessionTotals.delete(sessionId)
     },
     pendingFor(sessionId) {
       const kinds = sessionKinds.get(sessionId)

@@ -10,6 +10,13 @@ export interface IdleGate {
   enterTurn(sessionId: string): void
   /** turn/end：该会话活跃 turn -1（降到 0 即移除）。 */
   exitTurn(sessionId: string): void
+  /**
+   * 会话销毁（`session/disposed`）：直接清掉该会话的活跃计数。
+   *
+   * 宿主不保证 dispose 前一定先发 turn/end；留下悬空计数会让 `isIdle()` 永久为 false，
+   * 后台消费者从此不再取件（直到进程重启）。这里按「会话已不存在」归还资源，不依赖配对事件。
+   */
+  forgetSession(sessionId: string): void
   /** 是否空闲（无任何活跃 turn）。 */
   isIdle(): boolean
   /** 该会话当前活跃 turn 数（测试/诊断用）。 */
@@ -26,6 +33,9 @@ export function createIdleGate(): IdleGate {
       const depth = active.get(sessionId) ?? 0
       if (depth <= 1) active.delete(sessionId)
       else active.set(sessionId, depth - 1)
+    },
+    forgetSession(sessionId) {
+      active.delete(sessionId)
     },
     isIdle() {
       return active.size === 0

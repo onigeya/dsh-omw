@@ -80,6 +80,35 @@ describe('createSessionEventHandler：turn/start 进窗、turn/end 出窗', () =
     expect(gate.depthFor('unknown')).toBe(1)
     expect(gate.isIdle()).toBe(false)
   })
+
+  it('session/disposed：清掉悬空 turn 计数与每会话采集/提升状态（不依赖 turn/end）', () => {
+    const gate = createIdleGate()
+    const promotion = createPromotionTracker({ onTrigger: () => {} })
+    const resets: string[] = []
+    const handle = createSessionEventHandler({
+      gate,
+      promotion,
+      capture: {
+        recordStepEnd: () => {},
+        recordCompactionStart: () => {},
+        recordTurnEnd: () => {},
+        resetSession: (id) => { resets.push(id) },
+      },
+    })
+
+    handle({ id: 's1' }, { type: 'turn/start', turn: 1 })
+    promotion.recordL1({ sessionId: 's1', kind: 'persona' })
+    expect(gate.isIdle()).toBe(false)
+    expect(promotion.pendingFor('s1').total).toBe(1)
+
+    handle({ id: 's1' }, { type: 'session/disposed' })
+
+    // 若 dispose 前没有 turn/end，旧实现会让闸门永久忙、消费者停摆。
+    expect(gate.isIdle()).toBe(true)
+    expect(gate.depthFor('s1')).toBe(0)
+    expect(promotion.pendingFor('s1')).toEqual({ total: 0, byKind: {} })
+    expect(resets).toEqual(['s1'])
+  })
 })
 
 describe('Story 2.1：三钩子采集分派', () => {

@@ -58,6 +58,8 @@ export interface CaptureRecorder {
   recordStepEnd(session: unknown, event: unknown): void
   recordCompactionStart(session: unknown, event: unknown): void
   recordTurnEnd(session: unknown, event: unknown): void
+  /** 会话销毁：清掉该会话的步数计数与「已采集最大 turn」（有界内存，不依赖 turn/end 配对）。 */
+  resetSession(sessionId: string): void
   /** 启动扫描残留快照（有文件 = 事务未提交）并重放；返回重放条数。 */
   replayOrphanSnapshots(): Promise<number>
 }
@@ -209,6 +211,11 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
         // P4：只有落库成功才推进「已采集的最大 turn」，失败的内容会被下一次采集重新带上。
         lastTurn.set(sessionId, turn)
       })(), 'turn/end')
+    },
+
+    resetSession(sessionId) {
+      steps.reset(sessionId)
+      lastTurn.delete(sessionId)
     },
 
     async replayOrphanSnapshots() {
