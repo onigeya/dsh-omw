@@ -1,0 +1,336 @@
+/**
+ * 首个迁移 0002（Story 4.2 / AD-34）：备份、版本比较、单事务、bootstrap、fail-loud。
+ *
+ * 覆盖 I/O & Edge-Case 矩阵行 1–6。旧库一律在**子进程**里建（Windows 上同进程 close()
+ * 后重开同一库文件报 Error: 33，手法同 `test/db-support-column.test.ts`），并断言备份文件
+ * 真的产生且能独立打开（唯一回滚点不是日志里的说法，而是文件系统里的事实）。
+ *
+ * 本文件 6 次开库（4 次经 openMemoryDatabase + 2 个迁移注入用例的裸句柄），≤14。
+ */
+import { spawnSync } from 'node:child_process'
+import { readdir } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
+import { afterAll, describe, expect, it } from 'vitest'
+import type * as lbug from '@ladybugdb/core'
+import { loadStorageBackend } from '../src/db/backend'
+import { openMemoryDatabase, closeMemoryDatabase } from '../src/db/database'
+import { migrateDatabase } from '../src/db/migrate'
+import { queryRows } from '../src/db/rows'
+import { resolveMemoryDbPath } from '../src/db/paths'
+import {
+  EVIDENCE_DEGRADED_COLUMN,
+  META_KEYS,
+  REDACTED_BY_COLUMN,
+  SCHEMA_MIGRATION_TABLE,
+  SCHEMA_VERSION,
+  createGenerationLogTableStatement,
+  createL0RawTableStatement,
+  createMetaTableStatement,
+} from '../src/db/schema'
+import type { Migration } from '../src/db/migrations'
+import { cleanupTempDirs, makeTempDir } from './tmp'
+
+const DIM = 4
+const MODEL = 'test-embed'
+const T0 = '2026-01-01T00:00:00.000Z'
+
+/** 冻结的 v1 memory DDL（15 列：有 parent_id/support，无 evidence_degraded）。 */
+const V1_MEMORY_TABLE = [
+  'CREATE NODE TABLE IF NOT EXISTS memory(',
+  '  id STRING,',
+  '  layer STRING,',
+  '  kind STRING,',
+  '  priority INT64,',
+  '  text STRING,',
+  `  embedding FLOAT[${DIM}],`,
+  '  valid_at STRING,',
+  '  recorded_at STRING,',
+  '  invalid_at STRING,',
+  '  expired_at STRING,',
+  '  source_refs STRING[],',
+  '  embedding_model_id STRING,',
+  '  embedding_dim INT64,',
+  '  parent_id STRING,',
+  '  support INT64,',
+  '  PRIMARY KEY(id)',
+  ')',
+].join('')
+
+/** 冻结的 v1 l0_raw DDL（4 列，无墓碑两列）。 */
+const V1_L0_TABLE =
+  'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, PRIMARY KEY(id))'
+
+/** 冻结的 v1 generation_log DDL（15 列，无 detail）。 */
+const V1_GENERATION_LOG = [
+  'CREATE NODE TABLE IF NOT EXISTS generation_log(',
+  '  id STRING, recorded_at STRING, actor STRING, kind STRING, action STRING, policy STRING,',
+  '  l0_refs STRING[], outcome STRING, reason STRING, question_key STRING, probability DOUBLE,',
+  '  threshold DOUBLE, passed BOOL, cascade_depth INT64, trigger_id STRING, PRIMARY KEY(id)',
+  ')',
+].join('')
+
+function metaStatements(version: string): string[] {
+  return [
+    createMetaTableStatement(),
+    `MERGE (m:omw_meta {key: '${META_KEYS.schemaVersion}'}) ON CREATE SET m.value = '${version}' ON MATCH SET m.value = '${version}'`,
+    `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'}) ON CREATE SET m.value = '${DIM}' ON MATCH SET m.value = '${DIM}'`,
+    `MERGE (m:omw_meta {key: '${META_KEYS.embeddingModelId}'}) ON CREATE SET m.value = '${MODEL}' ON MATCH SET m.value = '${MODEL}'`,
+    `MERGE (m:omw_meta {key: '${META_KEYS.createdAt}'}) ON CREATE SET m.value = '${T0}' ON MATCH SET m.value = '${T0}'`,
+  ]
+}
+
+/** v1 旧库：三张表都是旧列形态，并写入一行数据（迁移必须保住它）。 */
+function v1Statements(version = '1'): string[] {
+  return [
+    V1_MEMORY_TABLE,
+    V1_L0_TABLE,
+    V1_GENERATION_LOG,
+    ...metaStatements(version),
+    "CREATE (:memory {id: 'legacy-m1', layer: 'L1', kind: '', priority: 0, text: '旧数据', valid_at: '2026-01-01T00:00:00.000Z', recorded_at: '2026-01-01T00:00:00.000Z', source_refs: []})",
+    "CREATE (:l0_raw {id: 'legacy-l0', raw_text: '旧原文', recorded_at: '2026-01-01T00:00:00.000Z', actor: 'test'})",
+  ]
+}
+
+/** 当前形态（v2）的库，只把版本号写成 3：模拟「新插件写的库被旧插件打开」。 */
+function v3Statements(): string[] {
+  return [
+    'CREATE NODE TABLE IF NOT EXISTS memory(id STRING, layer STRING, kind STRING, priority INT64, text STRING, embedding FLOAT[4], valid_at STRING, recorded_at STRING, invalid_at STRING, expired_at STRING, source_refs STRING[], embedding_model_id STRING, embedding_dim INT64, parent_id STRING, support INT64, evidence_degraded BOOL, PRIMARY KEY(id))',
+    createL0RawTableStatement(),
+    createGenerationLogTableStatement(),
+    ...metaStatements('3'),
+  ]
+}
+
+/** 子进程动作：建库（`create`）或只读转储（`dump`），统一走原生 lbug。 */
+function runChild(action: 'create' | 'dump', dbPath: string, statements: string[] = []): Record<string, unknown> {
+  const script = [
+    "import { Database, Connection } from '@ladybugdb/core'",
+    "const { mkdirSync } = await import('node:fs')",
+    "const { dirname } = await import('node:path')",
+    'const [action, path, payload] = JSON.parse(process.env.OMW_TEST_JOB)',
+    'mkdirSync(dirname(path), { recursive: true })',
+    'const db = new Database(path)',
+    'const conn = new Connection(db)',
+    "await conn.query('INSTALL vector')",
+    "await conn.query('LOAD vector')",
+    "await conn.query('INSTALL fts')",
+    "await conn.query('LOAD fts')",
+    'const statements = action === "create" ? payload : []',
+    'for (const s of statements) await conn.query(s)',
+    "let out = 'null'",
+    'if (action === "dump") {',
+    "  const read = async (sql) => { const r = await conn.query(sql); const rows = await r.getAll(); await r.close(); return rows }",
+    "  const columns = await read(\"CALL table_info('memory') RETURN name\")",
+    '  const l0 = await read("CALL table_info(\'l0_raw\') RETURN name")',
+    "  const meta = await read(\"MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value\")",
+    '  let hasMigrationTable = true',
+    "  try { await read(\"CALL table_info('schema_migration') RETURN name\") } catch { hasMigrationTable = false }",
+    '  out = JSON.stringify({',
+    '    memoryColumns: columns.map((r) => String(r.name)),',
+    '    l0Columns: l0.map((r) => String(r.name)),',
+    '    meta: Object.fromEntries(meta.map((r) => [String(r.key), String(r.value)])),',
+    '    hasMigrationTable,',
+    '  })',
+    '}',
+    'process.stdout.write(out)',
+    'await conn.close()',
+    'await db.close()',
+  ].join('\n')
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    cwd: resolve(import.meta.dirname, '..'),
+    env: { ...process.env, OMW_TEST_JOB: JSON.stringify([action, dbPath, statements]) },
+    encoding: 'utf8',
+  })
+  if (child.status !== 0) {
+    throw new Error(`子进程 ${action} 失败（exit ${child.status}）：${child.stderr || child.stdout}`)
+  }
+  return action === 'dump' ? JSON.parse(child.stdout) as Record<string, unknown> : {}
+}
+
+async function backupFiles(dbPath: string): Promise<string[]> {
+  const entries = await readdir(dirname(dbPath))
+  // 只数主备份文件：`<db>.bak-<from>-<pid>-<ns>` 旁边可能还有同名 `-wal` 副本（一并复制）。
+  return entries.filter((entry) => /^lbug\.db\.bak-\d+-\d+-\d+$/.test(entry))
+}
+
+async function columnsOf(connection: lbug.Connection, table: string): Promise<Map<string, string>> {
+  const rows = await queryRows(connection, `CALL table_info('${table}') RETURN name, type`)
+  return new Map(rows.map((row) => [String(row.name), String(row.type)]))
+}
+
+async function readMeta(connection: lbug.Connection): Promise<Map<string, string>> {
+  const rows = await queryRows(connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
+  return new Map(rows.map((row) => [String(row.key), String(row.value)]))
+}
+
+afterAll(cleanupTempDirs)
+
+describe('矩阵行 1：全新空库 bootstrap', () => {
+  it('SCHEMA_VERSION=2；schema_migration 含 0002 一行；三表新列齐；无备份文件', async () => {
+    const dir = await makeTempDir('omw-migr-fresh-')
+    const dbPath = resolveMemoryDbPath(dir)
+    const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+
+    expect(SCHEMA_VERSION).toBe('2')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('2')
+    const applied = await queryRows(
+      store.connection,
+      `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS version, s.checksum AS checksum`,
+    )
+    expect(applied.map((row) => Number(row.version))).toEqual([2])
+    expect(String(applied[0]?.checksum)).toMatch(/^[0-9a-f]{64}$/)
+
+    expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
+    expect((await columnsOf(store.connection, 'l0_raw')).get(REDACTED_BY_COLUMN)).toBe('STRING')
+    expect((await columnsOf(store.connection, 'l0_raw')).get('redacted_at')).toBe('STRING')
+    expect((await columnsOf(store.connection, 'generation_log')).get('detail')).toBe('STRING')
+
+    // bootstrap 不备份：备份只在「旧库升级」这条有回滚需求的路径上产生。
+    expect(await backupFiles(dbPath)).toEqual([])
+    await store.close()
+  }, 30_000)
+})
+
+describe('矩阵行 2：v1 旧库自动升级', () => {
+  it('三表新列出现、版本 2、schema_migration 一行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
+    const dir = await makeTempDir('omw-migr-v1-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v1Statements())
+
+    const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    const meta = await readMeta(store.connection)
+    expect(meta.get(META_KEYS.schemaVersion)).toBe('2')
+    expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
+    const l0Columns = await columnsOf(store.connection, 'l0_raw')
+    expect(l0Columns.get(REDACTED_BY_COLUMN)).toBe('STRING')
+    expect(l0Columns.get('redacted_at')).toBe('STRING')
+    expect((await columnsOf(store.connection, 'generation_log')).get('detail')).toBe('STRING')
+    const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
+    expect(applied.map((row) => Number(row.v))).toEqual([2])
+    // 旧数据必须还在（迁移只加列）。
+    const legacy = await queryRows(store.connection, "MATCH (m:memory {id: 'legacy-m1'}) RETURN m.text AS text")
+    expect(legacy[0]?.text).toBe('旧数据')
+
+    // 备份：同目录、命名含 fromVersion=1，且是迁移**之前**的快照（memory 仍是 15 列）。
+    const backups = await backupFiles(dbPath)
+    expect(backups).toHaveLength(1)
+    expect(backups[0]).toMatch(/^lbug\.db\.bak-1-\d+-\d+$/)
+    // 在**新进程**里打开备份：同进程换路径打开同一份库会撞 LadybugDB 的进程级句柄状态
+    // （实测会报 catalog 不存在），所以「内容可打开」这条必须由子进程证明。
+    const backupDump = runChild('dump', join(dirname(dbPath), backups[0]!))
+    expect(backupDump.memoryColumns as string[]).not.toContain(EVIDENCE_DEGRADED_COLUMN)
+    expect((backupDump.memoryColumns as string[]).length).toBe(15)
+    expect((backupDump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('1')
+    expect(backupDump.hasMigrationTable).toBe(false)
+
+    await store.close()
+  }, 60_000)
+})
+
+describe('矩阵行 3：重复启动', () => {
+  it('已迁移库再开：不重复 ALTER、不新增 schema_migration 行、不产生新备份', async () => {
+    const dir = await makeTempDir('omw-migr-reopen-')
+    const dbPath = resolveMemoryDbPath(dir)
+    const first = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    const appliedBefore = await queryRows(first.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`)
+    const backupsBefore = await backupFiles(dbPath)
+    await first.close()
+
+    // 同进程重开：facade 已回收，底层句柄复用 ⇒ 真正再跑一遍 initializeDatabase 的迁移入口。
+    const second = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    const appliedAfter = await queryRows(second.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`)
+    expect(Number(appliedAfter[0]?.c)).toBe(Number(appliedBefore[0]?.c))
+    expect(await backupFiles(dbPath)).toEqual(backupsBefore)
+    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('2')
+    await second.close()
+  }, 60_000)
+})
+
+describe('矩阵行 4：版本高于插件', () => {
+  it('version=3 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
+    const dir = await makeTempDir('omw-migr-v3-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v3Statements())
+
+    await expect(openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL }))
+      .rejects.toMatchObject({ code: 'schema_mismatch' })
+    await expect(openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL }))
+      .rejects.toThrow(/高于本插件支持/)
+
+    // 用子进程独立核对：版本仍是 3，且本插件没有偷偷建出 schema_migration。
+    // 先释放父进程持有的句柄（被拒绝的打开同样会缓存 Database，跨进程会挡住建库文件的锁）。
+    await closeMemoryDatabase(dbPath)
+    const dump = runChild('dump', dbPath)
+    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('3')
+    expect(dump.hasMigrationTable).toBe(false)
+  }, 60_000)
+})
+
+describe('矩阵行 5：迁移中途失败', () => {
+  it('注入一条非法 DDL ⇒ 整条迁移回滚：列与版本都不变、schema_migration 无新行、备份仍在', async () => {
+    const dir = await makeTempDir('omw-migr-fail-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v1Statements())
+
+    const backend = loadStorageBackend()
+    const database = backend.createDatabase(dbPath, false)
+    const connection = await backend.createConnection(database)
+    await backend.loadExtensions(connection)
+
+    const broken: Migration = {
+      version: 2,
+      name: 'broken-injection',
+      statements: [
+        // 第一条合法：若事务语义失效，它就会留下来（断言点）。
+        {
+          table: 'memory',
+          column: EVIDENCE_DEGRADED_COLUMN,
+          ddl: `ALTER TABLE memory ADD ${EVIDENCE_DEGRADED_COLUMN} BOOL`,
+        },
+        { table: 'no_such_table', column: 'x', ddl: 'ALTER TABLE no_such_table ADD x STRING' },
+      ],
+    }
+
+    await expect(migrateDatabase(connection, { dbPath, migrations: [broken] }))
+      .rejects.toMatchObject({ code: 'schema_migration_failed' })
+
+    expect((await columnsOf(connection, 'memory')).has(EVIDENCE_DEGRADED_COLUMN)).toBe(false)
+    expect((await readMeta(connection)).get(META_KEYS.schemaVersion)).toBe('1')
+    // 连表本身都被回滚掉：事务内的 CREATE 同样不是「已提交事实」。
+    await expect(queryRows(connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`))
+      .rejects.toThrow(/does not exist/i)
+    // 备份是唯一回滚点：失败后必须仍在。
+    expect(await backupFiles(dbPath)).toHaveLength(1)
+    await backend.close(database, connection)
+  }, 60_000)
+})
+
+describe('矩阵行 6：备份创建失败', () => {
+  it('预置同名备份文件 ⇒ 拒绝迁移、不执行任何 DDL', async () => {
+    const dir = await makeTempDir('omw-migr-nobak-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v1Statements())
+
+    const backend = loadStorageBackend()
+    const database = backend.createDatabase(dbPath, false)
+    const connection = await backend.createConnection(database)
+    await backend.loadExtensions(connection)
+
+    const occupied = join(dirname(dbPath), 'lbug.db.bak-1-occupied')
+    // 先占位：O_EXCL 创建必须失败（不覆盖上一份备份）。
+    const { open } = await import('node:fs/promises')
+    const handle = await open(occupied, 'wx')
+    await handle.close()
+
+    await expect(migrateDatabase(connection, {
+      dbPath,
+      backupPath: () => occupied,
+    })).rejects.toMatchObject({ code: 'schema_migration_failed' })
+
+    expect((await columnsOf(connection, 'memory')).has(EVIDENCE_DEGRADED_COLUMN)).toBe(false)
+    expect((await readMeta(connection)).get(META_KEYS.schemaVersion)).toBe('1')
+    await backend.close(database, connection)
+  }, 60_000)
+})
+
+

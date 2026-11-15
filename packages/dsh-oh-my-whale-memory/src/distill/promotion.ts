@@ -42,7 +42,7 @@ import { checkReachableToL0, checkRefReachableToL0 } from '../db/eii.js'
 import { memoryNodeId, uuid5 } from '../db/id.js'
 import { getMemoryById, type MemoryDetail } from '../db/memory.js'
 import { queryRows } from '../db/rows.js'
-import { GENERATION_LOG_TABLE, L0_RAW_TABLE } from '../db/schema.js'
+import { GENERATION_LOG_TABLE, L0_RAW_TABLE, l0EvidencePredicate } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
@@ -150,11 +150,15 @@ class L2GateFailure extends Error {
   }
 }
 
-/** 存活 L0 计数：UNWIND 后 MATCH 会丢掉未命中的 ref，故命中数即存活数（并集已去重）。 */
+/**
+ * 存活 L0 计数：UNWIND 后 MATCH 会丢掉未命中的 ref，故命中数即存活数（并集已去重）。
+ * Story 4.2：谓词收敛为 `schema.ts` 的 `l0EvidencePredicate`（redact 墓碑不再是「存活 L0」，
+ * 判据③ 的 support 也不该把已抹除的证据算成支撑）。
+ */
 const LIVE_L0_COUNT_STATEMENT = [
   'UNWIND $refs AS ref',
   'MATCH (l:' + L0_RAW_TABLE + ' {id: ref})',
-  'WHERE l.raw_text IS NOT NULL',
+  'WHERE ' + l0EvidencePredicate('l'),
   'RETURN count(DISTINCT l.id) AS live',
 ].join('\n')
 

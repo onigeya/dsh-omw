@@ -133,6 +133,14 @@ export const FORGET_CASCADE_KIND = 'cascade'
  */
 export const FORGET_POLICY = 'user-forget'
 
+/**
+ * L0 墓碑写路径的 kind / action 取值（Story 4.2 / FR-14、AD-4）。
+ * 每条被改写的 L0 落一行：`l0_refs=[<l0id>]`，正文/凭据一律不进账本（NFR9）。
+ * policy 留空（redact 没有裁决语义，不需要 judge key）。
+ */
+export const REDACT_KIND = 'redact'
+export const REDACT_L0_ACTION = 'redact_l0'
+
 /** 一条溯源 / 级联 / 核实记账行。缺省值一律落 null，不落空串。 */
 export interface GenerationLogEntry {
   /** 缺省由本层生成 UUIDv4。崩溃重放要幂等时由调用方给确定性 id。 */

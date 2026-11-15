@@ -9,12 +9,13 @@
  * 查询口径（brief §2.4 推荐形态 + 裁决 U2）：
  * - 一律正集 + 应用层差集，绝不用相关 EXISTS/NOT EXISTS 表达谓词版
  *   （brief §2.3 N2 实测：内层谓词不生效，8 个节点全判违例）。
- * - 路径谓词按标签显式写：`label(x)='l0_raw'` 支判 `raw_text IS NOT NULL`；
+ * - 路径谓词按标签显式写：`label(x)='l0_raw'` 支判「非墓碑」（Story 4.2 起收敛为
+ *   `schema.ts` 的 `l0EvidencePredicate`：`raw_text IS NOT NULL AND redacted_at IS NULL`）；
  *   `label(x)='memory'` 支判 AD-19:175 三条件。不用隐式 NULL 语义，l0_raw 没有
  *   invalid_at/expired_at 列，`x.invalid_at IS NULL` 对缺失属性恒真（U2）。
  * - 有效性谓词（SQL 侧）走 `src/db/snapshot.ts` 的共享四条件（Story 3.1 收敛；
- *   原先按裁决 U7 不含 recorded_at，已在 ledger 记 U7 反转）；JS 侧 `isEffective`
- *   保留 AD-19 三条件不动，它只服务 checkReachableToL0 的早退判定，不拼 SQL。
+ *   原先按裁决 U7 不含 recorded_at，已在 ledger 记 U7 反转）；Story 4.2 起再叠一条
+ *   「非 evidence_degraded」——降级节点不计入 EII 违例与漂移（AC:1055）。
  * - depth 固定 4 字面量（AD-19），不随 FR-12 的 depth 参数漂移。
  *
  * ⚠️ 升版必回归：`all(x IN nodes(p) ...)` 的动态属性语义与 `label(x)` 在 0.22.3 上实测可用
@@ -24,7 +25,7 @@ import type * as lbug from '@ladybugdb/core'
 import { MemoryDbError, isMissingTableError } from './errors.js'
 import { nullishString, queryRows, toStringArray } from './rows.js'
 import { currentSnapshotPredicate } from './snapshot.js'
-import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
+import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, L0_RAW_TABLE, MEMORY_TABLE, l0EvidencePredicate, notEvidenceDegradedPredicate } from './schema.js'
 
 /** 只读可达性原语的封闭失败枚举（2.5 据此路由到「回滚 INBOX 重试」或「判不合格」）。 */
 export type ReachabilityFailure =
@@ -53,18 +54,18 @@ const DIRECT_IN_EDGE_COUNT = [
 
 const READ_L0_STATEMENT = [
   'MATCH (l:' + L0_RAW_TABLE + ' {id: $id})',
-  'RETURN l.raw_text AS raw_text',
+  'RETURN l.raw_text AS raw_text, l.redacted_at AS redacted_at',
 ].join('\n')
 
 const EFFECTIVE_MEMORY_IDS = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE ' + currentSnapshotPredicate('m'),
+  'WHERE ' + currentSnapshotPredicate('m') + ' AND ' + notEvidenceDegradedPredicate('m'),
   'RETURN m.id AS id',
 ].join('\n')
 
 const EFFECTIVE_MEMORY_REFS = [
   'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE ' + currentSnapshotPredicate('m'),
+  'WHERE ' + currentSnapshotPredicate('m') + ' AND ' + notEvidenceDegradedPredicate('m'),
   'RETURN m.id AS id, m.source_refs AS source_refs',
 ].join('\n')
 
@@ -98,7 +99,7 @@ function sqlInstant(now: string): string {
  */
 function pathPredicate(nowLiteral: string): string {
   return [
-    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND x.raw_text IS NOT NULL)',
+    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND ' + l0EvidencePredicate('x') + ')',
     '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND ' + currentSnapshotPredicate('x', nowLiteral) + ')',
   ].join('\n')
 }
@@ -168,7 +169,10 @@ export async function checkRefReachableToL0(
   const l0Rows = await queryRows(connection, READ_L0_STATEMENT, { id: refId })
   if (l0Rows.length > 0) {
     const raw = l0Rows[0]?.raw_text
-    return raw === null || raw === undefined
+    const redactedAt = l0Rows[0]?.redacted_at
+    // Story 4.2：墓碑有两种形态——指针行（raw_text NULL，Story 10.1）与 redact 过的 inline 行
+    // （raw_text 仍是墓碑文本，redacted_at 非空）。两者都不再是「可达 L0」。
+    return raw === null || raw === undefined || (redactedAt !== null && redactedAt !== undefined)
       ? { id: refId, pass: false, failingReasons: ['l0-tombstone'] }
       : { id: refId, pass: true, failingReasons: [] }
   }

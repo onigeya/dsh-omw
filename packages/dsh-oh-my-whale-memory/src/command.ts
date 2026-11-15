@@ -112,13 +112,12 @@ export const MEMORY_RELATED_USAGE = [
   '示例：/memory related <记忆 id> 2',
 ].join('\n')
 
-/** `forget` 子命令缺少 id 时的 usage 提示（Story 4.1）。 */
+/** `forget` 子命令缺少 id 时的 usage 提示（Story 4.1；Story 4.2 加 `--redact` 说明）。 */
 export const MEMORY_FORGET_USAGE = [
-  '用法：/memory forget <id>',
+  '用法：/memory forget <id> [--redact]',
   '',
-  '把一条记忆从当前快照里移除：目标写 expired_at（此后同文本重写不复活），',
-  '其上层引用者按跳数自顶向下写 invalid_at（EII 定序级联），同事务生效。',
-  'id 取自 /memory list 或 /memory recall 的输出。示例：/memory forget <记忆 id>',
+  '把一条记忆从当前快照里移除（软删除，写 expired_at），并静默级联作废引用它的全部上层记忆。',
+  '--redact 额外把该记忆证据链上的 L0 原始段落替换为 [REDACTED <id> @<时间>] 墓碑，并把受影响的记忆标 evidence_degraded。',
 ].join('\n')
 
 /** 未知 / 缺失子命令时的总用法（必须含 remember / list / show / status / recall / related / forget 七条）。 */
@@ -231,6 +230,13 @@ export interface MemoryCommandForgetResult {
   readonly alreadyExpired: boolean
   /** 跳数降序、目标在最后；幂等重放时只有目标一行。 */
   readonly affected: readonly MemoryCommandForgetEntry[]
+  /**
+   * Story 4.2：本次改写为墓碑的 L0 条数。**只有请求带 `--redact` 时才出现**——
+   * 缺省 undefined 是 4.1 的纯 forget，渲染必须逐字不变（矩阵行 15）。
+   */
+  readonly redactedL0?: number
+  /** Story 4.2：本次新标 `evidence_degraded` 的记忆条数，与 `redactedL0` 同生同灭。 */
+  readonly degraded?: number
 }
 
 /** 单条记忆详情（db 层 `getMemoryById` 的返回形状；字段与 show 渲染顺序一致）。 */
@@ -298,6 +304,12 @@ export interface MemoryStatusSnapshot {
    * 算不出来（渲染成未知，不静默报 0，与 auditGap 同一约定）。0 时不追加渲染。
    */
   readonly relatedSkipped: number | null
+  /**
+   * 被用户授权抹除证据的**有效**记忆条数（Story 4.2 / D-5）：`evidence_degraded = true`
+   * 且仍在当前快照里。null = 库缺少该列（旧库未迁移且只读），渲染成「未知（库缺少该列）」；
+   * 0 / 缺省 ⇒ 不追加渲染（既有逐行输出逐字不变）。
+   */
+  readonly evidenceDegraded?: number | null
   /**
    * L2 提升的死信条数（Story 2.5 / 评审 P8-T8）：l2_inbox 里 status='failed' 的数量。
    * 缺省/0 ⇒ 不追加渲染（既有逐行输出逐字不变）。
@@ -386,8 +398,11 @@ export interface MemoryCommandDependencies {
    * 遗忘一条记忆并级联作废其上层引用者（Story 4.1）。抛错由 handler 收敛为 error 结果
    *（不存在时是 `memory_not_found`，文案「未找到 id 为 <id> 的记忆。」）。手动 forget 不计入
    * turn 配额（配额只作用于召回族工具）。
+   *
+   * Story 4.2：`options.redact === true` 时同一事务里把证据链上的 L0 写成墓碑
+   * （只有带旗标才传第二个参数，4.1 的调用点与断言因此逐字不变）。
    */
-  forgetMemory(id: string): Promise<MemoryCommandForgetResult>
+  forgetMemory(id: string, options?: { readonly redact?: boolean }): Promise<MemoryCommandForgetResult>
 }
 
 /** 解析结果：七个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
@@ -398,7 +413,7 @@ export type MemoryCommandParseResult =
   | { kind: 'status' }
   | { kind: 'recall', query: string }
   | { kind: 'related', id: string, depth?: number }
-  | { kind: 'forget', id: string }
+  | { kind: 'forget', id: string, redact?: boolean }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -456,6 +471,34 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
   return { kind: 'remember', text: rest, classification }
 }
 
+/** `forget` 的 `--redact` 旗标（Story 4.2 / FR-14）。 */
+const MEMORY_FORGET_REDACT_FLAG = '--redact'
+
+/**
+ * 解析 `forget` 的 payload：`<id> [--redact]`（Story 4.1 / 4.2）。
+ *
+ * - 空 payload、只有旗标（`/memory forget --redact`）、多余 token、重复旗标 → usage
+ *   （矩阵行 12：`--redact` 未指定 id 必须是参数错误，不能把 `--redact` 当 id 去查库）；
+ * - 旗标可出现在 id 之前或之后：命令面只认「一个 id + 至多一个旗标」，位置不影响语义；
+ * - 不带旗标时**不**在结果里出现 `redact` 字段，4.1 的 `toEqual` 断言因此逐字不变。
+ */
+function parseForgetPayload(payload: string): MemoryCommandParseResult {
+  if (!payload) return { kind: 'invalid', usage: MEMORY_FORGET_USAGE }
+  const tokens = payload.split(/\s+/)
+  const ids: string[] = []
+  let redact = false
+  for (const token of tokens) {
+    if (token === MEMORY_FORGET_REDACT_FLAG) {
+      if (redact) return { kind: 'invalid', usage: MEMORY_FORGET_USAGE }
+      redact = true
+      continue
+    }
+    ids.push(token)
+  }
+  if (ids.length !== 1) return { kind: 'invalid', usage: MEMORY_FORGET_USAGE }
+  return redact ? { kind: 'forget', id: ids[0]!, redact: true } : { kind: 'forget', id: ids[0]! }
+}
+
 /**
  * 解析 `rawInput`：trim 起始空白取首 token（子命令大小写敏感）。
  * - `remember` → 其余 trim 后为 payload；payload 为空给 `MEMORY_REMEMBER_USAGE`；
@@ -464,7 +507,8 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
  * - `status` → 不接受 payload；有 payload 给 `MEMORY_STATUS_USAGE`（不静默忽略输入）；
  * - `recall` → 其余 trim 后为检索 query；为空给 `MEMORY_RECALL_USAGE`（Story 3.1）；
  * - `related` → 其余 trim 后为 `<id> [depth]`（Story 3.2，depth 非正整数 → usage）；
- * - `forget` → 其余 trim 后为 id；为空给 `MEMORY_FORGET_USAGE`（Story 4.1）；
+ * - `forget` → `<id> [--redact]`（Story 4.1/4.2）：id 之后只允许一个 `--redact`；
+ *   缺 id / 多余 token / 重复旗标 → usage（不静默忽略输入）；
  * - 其它 token / 空 `rawInput` → `MEMORY_COMMAND_USAGE`。
  * 保留 payload 的内部空白（只 trim 首尾）。
  */
@@ -488,7 +532,7 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
     case MEMORY_RELATED_SUBCOMMAND:
       return parseRelatedPayload(payload)
     case MEMORY_FORGET_SUBCOMMAND:
-      return payload ? { kind: 'forget', id: payload } : { kind: 'invalid', usage: MEMORY_FORGET_USAGE }
+      return parseForgetPayload(payload)
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -594,23 +638,28 @@ function renderMemoryRecall(result: MemoryCommandRecallResult): string {
 }
 
 /**
- * 遗忘渲染（Story 4.1，spec「钉死的输出文案」逐字）：
+ * 遗忘渲染（Story 4.1，spec「钉死的输出文案」逐字；Story 4.2 追加 redact 结果行）：
  * - 首次成功：`已遗忘 <id>：共作废 <n> 条（其中级联 <n-1> 条）`，其后每行
  *   `- <id> [<layer>] 深度 <d> <text摘要>`（行按跳数降序，目标在最后）；
- * - 幂等重放：`已遗忘 <id>：本次未重复写入（此前已遗忘）`，只有目标一行、深度 0。
+ * - 幂等重放：`已遗忘 <id>：本次未重复写入（此前已遗忘）`，只有目标一行、深度 0；
+ * - 带 `--redact` 时（`redactedL0 !== undefined`）在最后追加一行
+ *   `已改写 L0 墓碑 <k> 条，证据降级 <m> 条记忆`——不带旗标时该行绝不出现（矩阵行 15）。
  * 摘要走 `summarizeMemoryText`（折叠换行 + 60 code point 截断），保证「每行一个条目」。
  */
 function renderMemoryForget(result: MemoryCommandForgetResult): string {
   const entries = result.affected.map(
     (entry) => `- ${entry.id} [${entry.layer}] 深度 ${entry.hops} ${summarizeMemoryText(entry.text)}`,
   )
-  if (result.alreadyExpired) {
-    return [`已遗忘 ${result.id}：本次未重复写入（此前已遗忘）`, ...entries].join('\n')
+  const lines = result.alreadyExpired
+    ? [`已遗忘 ${result.id}：本次未重复写入（此前已遗忘）`, ...entries]
+    : [
+        `已遗忘 ${result.id}：共作废 ${result.affected.length} 条（其中级联 ${result.affected.length - 1} 条）`,
+        ...entries,
+      ]
+  if (result.redactedL0 !== undefined) {
+    lines.push(`已改写 L0 墓碑 ${result.redactedL0} 条，证据降级 ${result.degraded ?? 0} 条记忆`)
   }
-  return [
-    `已遗忘 ${result.id}：共作废 ${result.affected.length} 条（其中级联 ${result.affected.length - 1} 条）`,
-    ...entries,
-  ].join('\n')
+  return lines.join('\n')
 }
 
 /**
@@ -713,6 +762,13 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   } else if (snapshot.relatedSkipped > 0) {
     lines.push(`related_skipped: ${snapshot.relatedSkipped}`)
   }
+  // Story 4.2 / D-5：证据降级计数。0 时不追加（既有逐行输出逐字不变）；列缺失时渲染
+  // 「未知」，与 auditGap / evidenceGap 的「算不出来不静默报 0」同一约定。
+  if (snapshot.evidenceDegraded === null) {
+    lines.push('evidence_degraded: 未知（库缺少该列）')
+  } else if (snapshot.evidenceDegraded !== undefined && snapshot.evidenceDegraded > 0) {
+    lines.push(`evidence_degraded: ${snapshot.evidenceDegraded}`)
+  }
   // Story 2.5 / 评审 P8：L2 死信与疑似失效账目都只在需要时追加，0/缺省时既有
   // 逐行输出逐字不变；算不出来（null）照 2.6 的范式渲染「未知」，不静默报 0。
   if (snapshot.l2Failed !== undefined && snapshot.l2Failed > 0) {
@@ -761,7 +817,7 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
     name: MEMORY_COMMAND_NAME,
     description: '记录与浏览长期记忆（remember / list / show / status / recall / related / forget）',
     input: {
-      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query> | related <id> [depth] | forget <id>',
+      hint: '/memory remember [--kind=..] [--priority=..] <内容> | list [关键词] | show <id> | status | recall <query> | related <id> [depth] | forget <id> [--redact]',
     },
     handler: async (invocation): Promise<MemoryCommandResult> => {
       try {
@@ -804,7 +860,10 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
           case 'forget': {
             // 手动遗忘不计入 turn 配额；库未就绪/只读/不存在由 deps 抛错，下面的 catch
             // 收敛为 error 结果（`memory_not_found` 的文案与 `show` 逐字一致）。
-            const result = await deps.forgetMemory(parsed.id)
+            // Story 4.2：只有带 --redact 才传第二个参数，4.1 的调用形态与断言因此不变。
+            const result = parsed.redact === true
+              ? await deps.forgetMemory(parsed.id, { redact: true })
+              : await deps.forgetMemory(parsed.id)
             return { kind: 'success', text: renderMemoryForget(result) }
           }
         }

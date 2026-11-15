@@ -27,11 +27,14 @@ import {
   FORGET_ACTION,
   FORGET_CASCADE_KIND,
   FORGET_POLICY,
+  REDACT_KIND,
+  REDACT_L0_ACTION,
   buildJudgeKey,
   insertGenerationLog,
   insertKeyedDecision,
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
+import { applyL0Tombstones, collectL0ClosureIds, markEvidenceDegraded } from './redact.js'
 import { nullishString, queryRows, toStringArray } from './rows.js'
 import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, MEMORY_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
@@ -52,11 +55,23 @@ export interface ForgetResult {
   readonly alreadyExpired: boolean
   /** 本次真正作废的节点，跳数降序、目标在最后；幂等重放时只有目标一行。 */
   readonly affected: readonly ForgottenNode[]
+  /**
+   * 本次改写为墓碑的 L0 条数（Story 4.2）。**只有请求带 `--redact` 时才出现**：
+   * 缺省 undefined 让 4.1 的渲染分支逐字不变（matrix 行 15）。
+   */
+  readonly redactedL0?: number
+  /** 本次新标 `evidence_degraded` 的记忆条数（Story 4.2），与 `redactedL0` 同生同灭。 */
+  readonly degraded?: number
 }
 
 export interface ForgetOptions {
   /** 时钟注入点（单测固定时刻；缺省系统时间）。 */
   readonly now?: () => Date
+  /**
+   * `--redact`（Story 4.2 / D-3）：与 forget 同一个事务，把证据链上的 L0 原文替换成墓碑，
+   * 并把受影响的记忆标 `evidence_degraded`。actor 只允许 `user`（AC:1050）。
+   */
+  readonly redact?: { readonly actor: 'user' }
 }
 
 /** 目标节点的当前状态（只需决定「能不能写」的列 + 记账要用的列）。 */
@@ -178,11 +193,67 @@ async function writePointer(
   if (rows.length === 0) throw notFound(String(params.id))
 }
 
+/** 一次 redact 需要的两个 L0 集合（在写账本之前算好：AD-10 要求 log 先于写入）。 */
+interface RedactPlan {
+  /** 证据链上的全部行内 L0（降级判定用，含已墓碑的）。 */
+  readonly closureL0: readonly string[]
+  /** 还没被墓碑化的 L0（本次改写与记账的对象；重放时为空）。 */
+  readonly pendingL0: readonly string[]
+}
+
+async function planRedact(connection: lbug.Connection, id: string): Promise<RedactPlan> {
+  return {
+    closureL0: await collectL0ClosureIds(connection, id),
+    pendingL0: await collectL0ClosureIds(connection, id, { onlyNotRedacted: true }),
+  }
+}
+
+/** 每条将被改写的 L0 落一条 `redact_l0` 账本行：只放 id 与 root，不放正文/凭据（NFR9）。 */
+async function insertRedactLogs(
+  connection: lbug.Connection,
+  rootId: string,
+  l0Ids: readonly string[],
+  ts: string,
+): Promise<void> {
+  for (const l0Id of l0Ids) {
+    await insertGenerationLog(connection, {
+      recordedAt: ts,
+      actor: 'user',
+      kind: REDACT_KIND,
+      action: REDACT_L0_ACTION,
+      outcome: 'success',
+      l0Refs: [l0Id],
+      reason: `redact root=${rootId} l0=${l0Id}`,
+    })
+  }
+}
+
+/** AD-10 次序的最后一组写入：先墓碑、再降级标记。返回本次真实发生的变化量。 */
+async function applyRedact(
+  connection: lbug.Connection,
+  id: string,
+  plan: RedactPlan,
+  ts: string,
+  actor: 'user',
+): Promise<{ readonly redactedL0: number; readonly degraded: number }> {
+  const rewritten = await applyL0Tombstones(connection, { l0Ids: plan.pendingL0, ts, actor })
+  const degraded = await markEvidenceDegraded(connection, {
+    l0Ids: plan.closureL0,
+    targetId: id,
+    now: ts,
+  })
+  return { redactedL0: rewritten.length, degraded }
+}
+
 /**
  * 遗忘一条记忆：目标写 `expired_at`，其上层引用者按跳数自顶向下写 `invalid_at`。
  *
  * 幂等：目标已有 `expired_at` ⇒ 直接返回 success，不写任何行（保留首次时间，也不级联）。
  * 不存在 ⇒ `memory_not_found`（不写任何行）。
+ *
+ * `--redact`（Story 4.2）：同一事务内追加 AD-10 的最后一步，把证据链上的 L0 原文换成墓碑
+ * 并把受影响的记忆标 `evidence_degraded`。目标已遗忘时仍执行 redact（L0 可能上次没抹），
+ * 但不重复写 forget 的账本/指针。
  *
  * @param connection 库连接（本函数自开事务，不得在既有事务内调用）
  * @param id         目标记忆 id
@@ -193,12 +264,24 @@ export async function forgetMemory(
   options: ForgetOptions = {},
 ): Promise<ForgetResult> {
   const ts = (options.now ?? (() => new Date()))().toISOString()
+  const redact = options.redact
   return runInTransaction(connection, async () => {
     const target = await readTarget(connection, id)
     if (target === null) throw notFound(id)
+
+    // redact 的对象集合要在写指针（乃至任何写入）之前定下来：墓碑文本、账本行与改写对象
+    // 必须是同一批 id，否则「记了账没改」或「改了没记账」都会破坏可审计性（AD-10）。
+    const redactPlan = redact === undefined ? null : await planRedact(connection, id)
+
     if (target.expired) {
       // 幂等重放（矩阵行 2/9/10）：保留首次 expired_at，不重写、不级联、零新行。
-      return { id, alreadyExpired: true, affected: [toForgotten(target)] }
+      if (redactPlan === null) {
+        return { id, alreadyExpired: true, affected: [toForgotten(target)] }
+      }
+      // 幂等重放 + --redact：只补 redact 这一步（L0 可能上次没带旗标）。
+      await insertRedactLogs(connection, id, redactPlan.pendingL0, ts)
+      const counts = await applyRedact(connection, id, redactPlan, ts, redact!.actor)
+      return { id, alreadyExpired: true, affected: [toForgotten(target)], ...counts }
     }
 
     // 级联受害者的判据：仍在当前快照里才重写。已作废/已遗忘的上层照样进闭包（它能往更高层
@@ -254,6 +337,8 @@ export async function forgetMemory(
         ts,
       })
     }
+    // redact 的账本行同样先于任何指针/墓碑写入（AD-10）。
+    if (redactPlan !== null) await insertRedactLogs(connection, id, redactPlan.pendingL0, ts)
 
     // ② 指针：invalid_at 自顶向下（跳数降序），最后写目标的 expired_at（AD-10）。
     for (const victim of victims) {
@@ -261,7 +346,12 @@ export async function forgetMemory(
     }
     await writePointer(connection, SET_EXPIRED_AT, { id, expired_at: ts })
 
+    // ③ Story 4.2：L0 墓碑 + evidence_degraded（AD-10 追加的最后一步）。
+    const redactCounts = redactPlan === null
+      ? undefined
+      : await applyRedact(connection, id, redactPlan, ts, redact!.actor)
+
     const affected = [...victims.map(toForgotten), toForgotten(target)].sort(compareAffected)
-    return { id, alreadyExpired: false, affected }
+    return { id, alreadyExpired: false, affected, ...(redactCounts ?? {}) }
   })
 }

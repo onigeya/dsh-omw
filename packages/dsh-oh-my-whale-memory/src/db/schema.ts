@@ -8,10 +8,12 @@
  * Epic 2 加列（Story 2.4 / U1）：memory.parent_id（STRING，被作废的旧版本节点 id，挂在新节点上）。
  * Epic 2 加列（Story 2.5 / U16）：memory.support（INT64，直接支撑该节点的存活 L0 观测条数；
  * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
- * 新库由 createMemoryTableStatement 直接带上；旧库因 CREATE ... IF NOT EXISTS 是 no-op，
- * 由 database.ts 的唯一迁移点用幂等 `ALTER TABLE memory ADD parent_id STRING` 补列。
- * SCHEMA_VERSION 不变（它只被写、从不被读取，改它只会让新旧库版本串不一致）。
- * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）
+ * 新库由 createMemoryTableStatement 直接带上；旧库此前由 database.ts 的幂等
+ * `ALTER TABLE memory ADD parent_id STRING` 补列（Story 4.2 起新列一律只走迁移 0002）。
+ * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '2'。
+ * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）；
+ *   唯一例外是 Story 4.2 的 redact 墓碑（redacted_by/redacted_at 记录改写者与时刻）。
+ * - generation_log：detail（Story 4.2 只加列，写入方留给后续 story）
  * - omw_meta：库级元数据（embedding_dim、embedding_model_id、schema_version、created_at）
  *
  * 时间列一律 UTC ISO-8601 字符串（ARCHITECTURE-SPINE 一致性约定）。
@@ -28,7 +30,11 @@ export const META_TABLE = 'omw_meta'
 export const VECTOR_INDEX_NAME = 'memory_embedding_hnsw'
 export const FTS_INDEX_NAME = 'memory_text_fts'
 
-export const SCHEMA_VERSION = '1'
+/**
+ * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
+ * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
+ */
+export const SCHEMA_VERSION = '2'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -69,9 +75,66 @@ export function createMemoryTableStatement(dim: number): string {
     '  embedding_dim INT64,',
     '  parent_id STRING,',
     '  support INT64,',
+    '  evidence_degraded BOOL,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
+}
+
+/** Story 4.2：证据被用户授权抹除的标记列（BOOL，缺省 NULL = 未降级）。 */
+export const EVIDENCE_DEGRADED_COLUMN = 'evidence_degraded'
+
+/** Story 4.2：L0 墓碑的改写者 / 改写时刻列。 */
+export const REDACTED_BY_COLUMN = 'redacted_by'
+export const REDACTED_AT_COLUMN = 'redacted_at'
+
+/** Story 4.2：generation_log 的净化明细列（本 story 只加列，无写入方）。 */
+export const GENERATION_LOG_DETAIL_COLUMN = 'detail'
+
+/**
+ * 0.22.3 上 BOOL 列只接受 `true`/`false` 或 JS boolean 参数：`= 1` 直接抛
+ * "Binder exception: Type Mismatch: Cannot compare types BOOL and INT64"（2026-11-15 实测）。
+ * 故判定「已降级」的唯一写法是 `IS NOT NULL AND = true` 的等价式，见下面两个 helper。
+ */
+export function evidenceDegradedPredicate(alias: string): string {
+  return `${alias}.${EVIDENCE_DEGRADED_COLUMN} = true`
+}
+
+/** 未降级（旧库缺列时该属性读出 NULL，同样落进这一支）。 */
+export function notEvidenceDegradedPredicate(alias: string): string {
+  return `(${alias}.${EVIDENCE_DEGRADED_COLUMN} IS NULL OR ${alias}.${EVIDENCE_DEGRADED_COLUMN} = false)`
+}
+
+/**
+ * L0「仍有原文」谓词（Story 4.2 单一实现，替换全仓三处手写 `raw_text IS NOT NULL`）。
+ *
+ * 墓碑判据从 AD-36 的「指针行 `raw_text IS NULL` 且 `seq IS NULL`」扩展：redact 过的
+ * inline 行保留 `raw_text` 列但落墓碑文本，必须靠 `redacted_at IS NULL` 才能与真实原文区分。
+ * 对旧库（无 `redacted_at` 列）该属性恒 NULL ⇒ 谓词退化成原来的 `raw_text IS NOT NULL`，
+ * 只读旧库不因缺列而失效。
+ */
+export function l0EvidencePredicate(alias: string): string {
+  return `${alias}.raw_text IS NOT NULL AND ${alias}.${REDACTED_AT_COLUMN} IS NULL`
+}
+
+/**
+ * 墓碑文本（D-4 逐字可断言）：`[REDACTED <l0id> @<ISO8601>]`。
+ *
+ * 不含任何原文片段，也不含记忆 id 以外的语义；`id`/`recorded_at`/`actor` 保持原值，
+ * 于是墓碑行仍能被 `source_refs` 与 EVIDENCE 边找回（AC:1045 的「不删行」）。
+ */
+export function l0TombstoneText(l0Id: string, redactedAt: string): string {
+  return `[REDACTED ${l0Id} @${redactedAt}]`
+}
+
+/** 迁移账本表（Story 4.2 / AD-34）：只 append，重放幂等。 */
+export const SCHEMA_MIGRATION_TABLE = 'schema_migration'
+
+export function createSchemaMigrationTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + SCHEMA_MIGRATION_TABLE + '(' +
+    'version INT64, applied_at STRING, checksum STRING, PRIMARY KEY(version))'
+  )
 }
 
 /** Epic 2 新增列（Story 2.4 / U1）：旧库补列的幂等迁移目标。 */
@@ -98,7 +161,10 @@ export function alterMemoryAddSupportStatement(): string {
 }
 
 export function createL0RawTableStatement(): string {
-  return 'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, PRIMARY KEY(id))'
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, ' +
+    REDACTED_BY_COLUMN + ' STRING, ' + REDACTED_AT_COLUMN + ' STRING, PRIMARY KEY(id))'
+  )
 }
 
 /**
@@ -173,7 +239,7 @@ export const GENERATION_LOG_TABLE = 'generation_log'
  */
 export const KEYED_DECISION_TABLE = 'keyed_decision'
 
-/** generation_log 建表 DDL：15 列，列序即语义分组（溯源 → 核实 → 级联）。 */
+/** generation_log 建表 DDL：16 列，列序即语义分组（溯源 → 核实 → 级联 → 净化明细）。 */
 export function createGenerationLogTableStatement(): string {
   return [
     'CREATE NODE TABLE IF NOT EXISTS ' + GENERATION_LOG_TABLE + ' (',
@@ -192,6 +258,7 @@ export function createGenerationLogTableStatement(): string {
     '  passed BOOL,',
     '  cascade_depth INT64,',
     '  trigger_id STRING,',
+    '  detail STRING,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
