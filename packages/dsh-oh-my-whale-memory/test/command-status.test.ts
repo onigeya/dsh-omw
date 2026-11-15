@@ -400,3 +400,17 @@ describe('Story 4.3：健康五行（T2 / 矩阵行 2/3/11）', () => {
     expect(text).not.toContain('inbox_backlog: n/a（无积压）')
   })
 })
+
+describe('Story 5.1 / AC:1171：存储后端行（backend）', () => {
+  it('缺省（undefined）时不追加任何行——既有逐行输出逐字不变', () => {
+    const withoutBackend = renderMemoryStatus({ ...STATUS_BASE, health: undefined })
+    expect(withoutBackend.split('\n').some((line) => line.startsWith('backend:'))).toBe(false)
+  })
+
+  it('native / wasm 各渲染一行，且位置在末尾', () => {
+    const native = renderMemoryStatus({ ...STATUS_BASE, backend: 'native' })
+    expect(native.split('\n').at(-1)).toBe('backend: native')
+    const wasm = renderMemoryStatus({ ...STATUS_BASE, backend: 'wasm' })
+    expect(wasm.split('\n').at(-1)).toBe('backend: wasm')
+  })
+})

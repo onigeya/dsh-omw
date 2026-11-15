@@ -337,6 +337,12 @@ export interface MemoryStatusSnapshot {
    * 既有钉死输出逐字不变（矩阵行 11）；只有真实读路径（`src/wire/access.ts`）会填。
    */
   readonly health?: MemoryHealthView
+  /**
+   * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
+   * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
+   *（既有逐行输出逐字不变）。数据来源是 `db/database.ts` 的 `memoryDatabaseBackendKind`。
+   */
+  readonly backend?: 'native' | 'wasm'
 }
 
 /**
@@ -816,6 +822,11 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
   lines.push(...renderHealthStatusLines(snapshot.health))
+  // Story 5.1 / AC:1171：存储后端可见（纯 Node = native，Electron 宿主 = wasm，AD-32）。
+  // 缺省（未传）时不追加，既有钉死块与 4.3 的五行顺序逐字不变（矩阵行 8）。
+  if (snapshot.backend !== undefined) {
+    lines.push(`backend: ${snapshot.backend}`)
+  }
   return lines.join('\n')
 }
 

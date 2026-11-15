@@ -148,6 +148,7 @@ function statusText(
     'rerank_latency: n/a (v1 无精排)',
     'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
     'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+    'backend: native',
   )
   return lines.join('\n')
 }
@@ -408,6 +409,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'rerank_latency: n/a (v1 无精排)',
         'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
         'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+        'backend: native',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {

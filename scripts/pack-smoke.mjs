@@ -1,38 +1,47 @@
-// AD-35 发布形态冒烟：pnpm pack 两包，再断言 tarball 内容。P1-R12。
+// AD-35 发布形态冒烟：pnpm pack 两包，再按 AC:1145 的精确集合断言 tarball 内容。P1-R12。
+// 判定逻辑与 scripts/publish-smoke.mjs 共用 scripts/lib/tarball-expectations.mjs，避免两套断言漂移。
 import { execSync } from 'node:child_process'
 import { mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  TARBALL_SPECS,
+  describeTarballFailures,
+  evaluateTarball,
+  tarballSummary,
+} from './lib/tarball-expectations.mjs'
 
-const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
-const out = mkdtempSync(join(tmpdir(), 'omw-pack-'))
-const failures = []
+const root = fileURLToPath(new URL('..', import.meta.url))
 const run = (cmd, cwd) => execSync(cmd, { cwd, stdio: 'pipe', encoding: 'utf8' })
 const list = (tar) => run('tar -tf "' + tar + '"', root).split(/\r?\n/).filter(Boolean)
 
-const packages = [
-  ['packages/dsh-oh-my-whale', 'bundle', ['cordis.patch.yml', 'lib/index.js', 'package.json']],
-  ['packages/dsh-oh-my-whale-memory', 'memory', ['lib/index.js', 'lib/types/index.d.ts', 'package.json']],
-]
-for (const [dir, label, required] of packages) {
-  try {
-    run('pnpm pack --pack-destination "' + out + '"', join(root, dir))
-    const tars = readdirSync(out).filter((f) => f.endsWith('.tgz'))
-    const pkgName = label === 'bundle' ? 'dsh-oh-my-whale' : 'dsh-oh-my-whale-memory'
-    const mine = tars.find((f) => f.startsWith(pkgName + '-') && (label === 'memory' ? f.includes('-memory-') : !f.includes('-memory-')))
-    if (!mine) { failures.push(label + ': 未找到 tarball'); continue }
-    const entries = list(join(out, mine))
-    for (const r of required) if (!entries.some((e) => e === r || e.endsWith('/' + r))) failures.push(label + ': tarball 缺 ' + r)
-    if (label === 'memory' && entries.some((e) => e.includes('cordis.patch.yml'))) failures.push('memory: tarball 不应含 cordis.patch.yml')
-    if (label === 'bundle' && !entries.some((e) => e.endsWith('cordis.patch.yml'))) failures.push('bundle: tarball 缺 cordis.patch.yml')
-    if (entries.some((e) => e.startsWith('src/') || e.includes('/src/'))) failures.push(label + ': tarball 不应含 src')
-    if (entries.some((e) => e.includes('/test/'))) failures.push(label + ': tarball 不应含 test')
-    console.log('  ok   ' + label + ' tarball ' + entries.length + ' 项')
-  } catch (e) {
-    failures.push(label + ': pnpm pack 失败 → ' + (e.stderr || e.message).toString().slice(0, 300))
+const workdirs = []
+const failures = []
+try {
+  for (const [label, spec] of Object.entries(TARBALL_SPECS)) {
+    // 每个包用独立目录：两包文件名前缀重叠，分目录可避免选错 tarball。
+    const out = mkdtempSync(join(tmpdir(), `omw-pack-${label}-`))
+    workdirs.push(out)
+    try {
+      run('pnpm pack --pack-destination "' + out + '"', join(root, spec.dir))
+      const tars = readdirSync(out).filter((name) => name.endsWith('.tgz'))
+      if (tars.length !== 1) {
+        failures.push(`${label}: 预期 1 个 tarball，实际 ${String(tars.length)} 个`)
+        continue
+      }
+      const result = evaluateTarball(label, list(join(out, tars[0])))
+      failures.push(...describeTarballFailures(result))
+      if (result.ok) {
+        console.log(`  ok   ${label} tarball ${String(result.entries.length)} 项（${tarballSummary(result)}）`)
+      }
+    } catch (error) {
+      failures.push(`${label}: pnpm pack 失败 → ${(error.stderr || error.message).toString().slice(0, 300)}`)
+    }
   }
+} finally {
+  for (const dir of workdirs) rmSync(dir, { recursive: true, force: true })
 }
-rmSync(out, { recursive: true, force: true })
-for (const f of failures) console.log('  FAIL ' + f)
+for (const failure of failures) console.log('  FAIL ' + failure)
 console.log(failures.length ? 'pack:smoke: FAIL' : 'pack:smoke: PASS')
 process.exit(failures.length ? 1 : 0)
