@@ -2,8 +2,10 @@
 node_modules/
 .pnpm-store/
 
-# build output
-lib/
+# build output（仅两包的构建产物：tsdown → packages/*/lib/index.js，
+# tsc → packages/*/lib/types；由 prepack 重建，不入库。锚定在 packages/*/ 下，
+# 避免误吞将来名为 lib/ 的源码/资源目录）
+packages/*/lib/
 dist/
 *.tsbuildinfo
 

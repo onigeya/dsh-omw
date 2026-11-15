@@ -8,7 +8,7 @@
  * 都在此 fail-fast。
  *
  * 测试对象是源文件：本文件 import 两包 `src/index.ts` 而非包名入口。
- * 包名入口解析到 `lib/index.js`，而 `lib/` 在 .gitignore:6，干净 clone 里不存在。这与兄弟
+ * 包名入口解析到 `lib/index.js`，而两包的 `lib/` 构建产物在 .gitignore、干净 clone 里不存在。这与兄弟
  * 测试 entry-exports.test.ts:8-11 的策略一致：`pnpm test` 不依赖先跑 `pnpm -r build`。
  */
 import { readFileSync } from 'node:fs'
