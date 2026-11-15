@@ -6,7 +6,7 @@
  * 本单元不做任何注册，只把读/写依赖与 status 快照组装成纯函数对象。
  */
 import type { MemoryDatabase } from '../db/database.js'
-import { createReadonlyModeError } from '../db/database.js'
+import { createReadonlyModeError, memoryDatabaseBackendKind } from '../db/database.js'
 import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
 import { collectHealthMetrics } from '../db/health.js'
@@ -158,6 +158,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 4.3：健康指标（积压 / 最近精炼完成）。collectHealthMetrics 自身对每个采集点
       // best-effort，异常与超预算都收敛成该点 `n/a`，绝不让 status 失败（AC:1105-1107）。
       health: await collectHealthMetrics({ connection }),
+      // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
+      backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),
     }
   }
