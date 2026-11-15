@@ -10,9 +10,11 @@
  * - 行 10：同 id 两次 forget ⇒ 两个账本表行数不变，keyed_decision.old_id=目标 至多 1 行；
  * - 行 11：迟到事件 —— forget 后用旧文本重写 ⇒ 不复活、库里仍只有 1 条同文本节点（D-A）；
  * - 行 13：事务内写 invalid_at 阶段抛错 ⇒ 整事务回滚（无半级联状态）；
+ * - 行 13b（独立审计补钉）：把注入点挪到**最后一步** `expired_at`，此时受害者的
+ *   `invalid_at` 已在事务内写成功 ⇒ 证明的是「已执行的指针被回滚」而不是「还没轮到」；
  * - 行 15：缺 generation_log / 边表 ⇒ 抛可读错误，不以「成功」收尾。
  *
- * 本文件 8 用例 = 2 次开库（共享 store 1 + 缺表场景 1，≤14）。
+ * 本文件 9 用例 = 2 次开库（共享 store 1 + 缺表场景 1，≤14）。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import type * as lbug from '@ladybugdb/core'
@@ -342,6 +344,28 @@ describe('forgetMemory：失败注入（矩阵行 13、15）', () => {
     expect(await tombstones('c13-a')).toEqual({ invalidAt: null, expiredAt: null })
     expect(await tombstones('c13-b')).toEqual({ invalidAt: null, expiredAt: null })
     // 已写下的两本账被一起回滚（这是「无半级联状态」的实质）。
+    expect(await countGenerationLog()).toBe(logBefore)
+    expect(await countKeyedDecision()).toBe(keyedBefore)
+  })
+
+  it('行 13b：写 expired_at 阶段抛错 ⇒ 已执行成功的 invalid_at 也被回滚', async () => {
+    await seedL0('c13b-l0', 'c13b 的原始观测')
+    await seedMemory({ id: 'c13b-a', layer: 'L1', text: '回滚根二', refs: ['c13b-l0'] })
+    await seedMemory({ id: 'c13b-b', layer: 'L2', text: '回滚上层二', refs: ['c13b-a'] })
+    await seedEvidence('c13b-l0', 'L0', 'c13b-a')
+    await seedEvidence('c13b-a', 'L1', 'c13b-b')
+
+    const logBefore = await countGenerationLog()
+    const keyedBefore = await countKeyedDecision()
+    // 注入点选在最后一步：此时 c13b-b 的 invalid_at 已经在同一事务里写成功了。
+    // 上行 13 的注入点更早（写 invalid_at 就失败），那种情形下「上层 invalid_at 仍空」
+    // 只说明还没轮到它；本用例才是「已写入的指针被整事务回滚」的实质证据。
+    const failing = connectionFailingOn(store.connection, 'expired_at')
+
+    await expect(forgetAt(failing, 'c13b-a')).rejects.toThrow(/注入的写失败/)
+
+    expect(await tombstones('c13b-b')).toEqual({ invalidAt: null, expiredAt: null })
+    expect(await tombstones('c13b-a')).toEqual({ invalidAt: null, expiredAt: null })
     expect(await countGenerationLog()).toBe(logBefore)
     expect(await countKeyedDecision()).toBe(keyedBefore)
   })
