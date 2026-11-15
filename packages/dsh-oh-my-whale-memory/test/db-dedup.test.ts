@@ -275,6 +275,59 @@ describe('writeDeduplicatedMemory（Story 2.4 三路去重）', () => {
     }
   })
 
+  it('AD-14 同模型可比：写入方给出 model id 时，不同模型的历史向量不参与语义合并', async () => {
+    const store = await openDb('omw-dd-model-')
+    try {
+      // 旧模型节点：与查询向量 cosine 0.99（原本必然命中路径②）。
+      await upsertMemory(store.connection, {
+        layer: LAYER,
+        text: '旧模型下的近似表述',
+        embedding: vectorWithCosine(0.99),
+        embeddingModelId: 'old-embed',
+        sourceRefs: ['m1'],
+      })
+      const result = await writeDedup(store, {
+        layer: LAYER,
+        text: '新模型下的表述',
+        embedding: E1,
+        embeddingModelId: 'new-embed',
+        sourceRefs: ['m2'],
+      })
+      // 模型不同 ⇒ ANN 不召回旧节点 ⇒ 不合并、不作废，写新节点。
+      expect(result.outcome).toBe('created')
+      expect(await nodeCount(store)).toBe(2)
+      expect(await readAudit(store, 'merge_semantic')).toHaveLength(0)
+      expect(await readAudit(store, 'invalidate_version')).toHaveLength(0)
+    } finally {
+      await store.close()
+    }
+  })
+
+  it('AD-14 正例：同 model id 的近似节点仍走语义合并（过滤不是恒假谓词）', async () => {
+    const store = await openDb('omw-dd-model-same-')
+    try {
+      await upsertMemory(store.connection, {
+        layer: LAYER,
+        text: '同模型下的近似表述',
+        embedding: vectorWithCosine(0.99),
+        embeddingModelId: 'same-embed',
+        sourceRefs: ['m1'],
+      })
+      const result = await writeDedup(store, {
+        layer: LAYER,
+        text: '同模型下的另一种说法',
+        embedding: E1,
+        embeddingModelId: 'same-embed',
+        sourceRefs: ['m2'],
+      })
+      expect(result.outcome).toBe('semantic-merge')
+      expect(await nodeCount(store)).toBe(1)
+      expect(await readAudit(store, 'merge_semantic')).toHaveLength(1)
+    } finally {
+      await store.close()
+    }
+  })
+
   it('U8 无向量整段跳过：库里有近似节点也只写新节点，且一次 ANN 查询都不发（P15 spy 钉住）', async () => {
     const store = await openDb('omw-dd-novec-')
     try {

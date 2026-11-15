@@ -85,20 +85,30 @@ export interface RecallNeighborsInput {
   readonly k?: number
   readonly excludeId?: string
   readonly now: string
+  /** 查询向量的模型 id；给出时只召回同模型节点（AD-14 可比性）。 */
+  readonly embeddingModelId?: string
 }
 
-/** ANN 粗筛：谓词顺序照 dedup.ts 的锁定形态（WITH node, distance MATCH (node) WHERE …）。 */
-const RECALL_STATEMENT = [
-  "CALL QUERY_VECTOR_INDEX('" + MEMORY_TABLE + "', '" + VECTOR_INDEX_NAME + "', $q, $k)",
-  'WITH node, distance',
-  'MATCH (node)',
-  'WHERE ' + currentSnapshotPredicate('node'),
-  // 评审 P19b（T24）：自身排除下推到查询（与 dedup.ts:117 同一形态）。
-  // 原先在 JS 里 continue 过滤会让自身白占一个 top-K 名额（k=8 实际最多 7 条）。
-  "  AND node.id <> $self_id",
-  'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.text AS text, distance',
-  'ORDER BY distance',
-].join('\n')
+/**
+ * ANN 粗筛：谓词顺序照 dedup.ts 的锁定形态（WITH node, distance MATCH (node) WHERE …）。
+ *
+ * `withModelFilter`：给出模型 id 时只召回同模型节点（AD-14 可比性）。换模型（dim 不变）
+ * 时库内旧向量仍在，不过滤会让关系识别把两个不可比向量空间里的节点当成近邻。
+ */
+function recallStatement(withModelFilter: boolean): string {
+  return [
+    "CALL QUERY_VECTOR_INDEX('" + MEMORY_TABLE + "', '" + VECTOR_INDEX_NAME + "', $q, $k)",
+    'WITH node, distance',
+    'MATCH (node)',
+    'WHERE ' + currentSnapshotPredicate('node'),
+    // 评审 P19b（T24）：自身排除下推到查询（与 dedup.ts:117 同一形态）。
+    // 原先在 JS 里 continue 过滤会让自身白占一个 top-K 名额（k=8 实际最多 7 条）。
+    "  AND node.id <> $self_id",
+    ...(withModelFilter ? ['  AND node.embedding_model_id = $model_id'] : []),
+    'RETURN node.id AS id, node.layer AS layer, node.kind AS kind, node.text AS text, distance',
+    'ORDER BY distance',
+  ].join('\n')
+}
 
 /**
  * 临时直连 KNN（brief §5.1）：不经 Epic 3 的 RRF 融合，不新增索引、不新增存储。
@@ -116,12 +126,14 @@ export async function recallNeighbors(
   // 但 0.22.3 的 QUERY_VECTOR_INDEX 把 $k 用在索引扫描内、外层 WHERE 过滤是之后做的，
   // 故自身若落在 top-k 里，光下推仍会少一条。排除时多要一条候选，过滤后再裁到 k。
   const indexK = input.excludeId === undefined ? k : k + 1
-  const rows = await queryRows(connection, RECALL_STATEMENT, {
+  const modelId = input.embeddingModelId?.trim() || null
+  const rows = await queryRows(connection, recallStatement(modelId !== null), {
     q: [...input.embedding],
     k: indexK,
     now: input.now,
     // 空串时恒真（`<> ''` 对非空 id 恒成立），故不传 excludeId 时行为不变。
     self_id: input.excludeId ?? '',
+    ...(modelId === null ? {} : { model_id: modelId }),
   })
   // 取前 k 条再映射：$k 已在索引扫描内，这里只裁掉「排除自身时多要的那一条」。
   return rows.slice(0, k).map((row) => ({
@@ -468,6 +480,8 @@ export interface RelationRunnerOptions {
   readonly llm: RelationLlmPort
   /** embedding 是否可用（enabled 且有 model）。false = 整体跳过 RELATED 并记一条审计。 */
   readonly embeddingEnabled: boolean
+  /** 写入向量时使用的模型 id；给出时 KNN 只召回同模型节点（AD-14 可比性）。 */
+  readonly embeddingModelId?: string
   readonly logger?: { warn(message: string): void }
   /** 关系识别的子预算；缺省 RELATION_LLM_TIMEOUT_MS。 */
   readonly llmTimeoutMs?: number
@@ -516,6 +530,7 @@ export function createRelationRunner(options: RelationRunnerOptions): RelationRu
           k: RELATION_RECALL_TOP_K,
           excludeId: entry.id,
           now: input.now,
+          ...(options.embeddingModelId === undefined ? {} : { embeddingModelId: options.embeddingModelId }),
         })
         // 没有邻接候选 = 没有关系可写，不是降级，不记 skip 审计。
         if (neighbors.length === 0) continue

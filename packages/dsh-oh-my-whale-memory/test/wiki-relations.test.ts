@@ -57,13 +57,13 @@ let store: MemoryDatabase
 
 async function seed(
   key: string,
-  args: { embedding?: readonly number[] | null; kind?: string; layer?: string },
+  args: { embedding?: readonly number[] | null; kind?: string; layer?: string; model?: string },
 ): Promise<string> {
   await upsertMemory(store.connection, {
     layer: args.layer ?? LAYER,
     text: key,
     embedding: args.embedding === undefined ? null : args.embedding,
-    embeddingModelId: args.embedding ? 'test-embed' : null,
+    embeddingModelId: args.embedding ? (args.model ?? 'test-embed') : null,
     kind: args.kind ?? '',
     priority: 0,
     validAt: T0,
@@ -225,6 +225,24 @@ describe('recallNeighbors（真 KNN）', () => {
 
     expect(await recallNeighbors(store.connection, { embedding: [], k: 8, now: NOW })).toEqual([])
     expect(await recallNeighbors(store.connection, { embedding: [1, 0, 0], k: 8, now: NOW })).toEqual([])
+  })
+
+  it('AD-14 同模型可比：给出 embeddingModelId 时只召回同模型节点', async () => {
+    // 用与 E1 正交的查询向量，避免污染上一条用例的 top-k 排序。
+    const q = [0, 0, 1, 0, 0, 0, 0, 0]
+    const qNear = (c: number): number[] => [0, 0, c, Math.sqrt(1 - c * c), 0, 0, 0, 0]
+    await seed('model-old-near', { embedding: qNear(0.99), model: 'old-embed', kind: 'work_fact' })
+    await seed('model-new-near', { embedding: qNear(0.9), model: 'new-embed', kind: 'work_fact' })
+
+    const neighbors = await recallNeighbors(store.connection, {
+      embedding: q,
+      k: RELATION_RECALL_TOP_K,
+      now: NOW,
+      embeddingModelId: 'new-embed',
+    })
+    const ids = neighbors.map((n) => n.id)
+    expect(ids).toContain(nid('model-new-near'))
+    expect(ids).not.toContain(nid('model-old-near'))
   })
 
   it('评审 P19b（T24）：excludeId 下推到查询 ⇒ 自身不占名额，仍能取满 k 条', async () => {

@@ -137,18 +137,27 @@ export class SemanticScanError extends Error {
   }
 }
 
-/** ANN 粗筛：`WITH node, distance MATCH (node) WHERE ...` 的谓词顺序由 brief-2-4:10-93 探针锁定。 */
-const ANN_CANDIDATE_STATEMENT = [
-  `CALL QUERY_VECTOR_INDEX('${MEMORY_TABLE}', '${VECTOR_INDEX_NAME}', $q, $k)`,
-  'WITH node, distance',
-  'MATCH (node)',
-  'WHERE node.layer = $layer',
-  '  AND node.id <> $self_id',
-  '  AND ' + currentSnapshotPredicate('node'),
-  '  AND distance <= $max_distance',
-  'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at',
-  'ORDER BY distance',
-].join('\n')
+/**
+ * ANN 粗筛：`WITH node, distance MATCH (node) WHERE ...` 的谓词顺序由 brief-2-4:10-93 探针锁定。
+ *
+ * `withModelFilter`（AD-14 的同模型可比性）：写入方给出 embedding 模型 id 时，只和库内
+ * `embedding_model_id` 相同的节点比余弦。换模型（dim 不变）时库内旧向量仍在，不过滤会把
+ * 两个不可比的向量空间放在一起，造成错误合并/版本作废；不给模型 id 的低层调用保持旧行为。
+ */
+function annCandidateStatement(withModelFilter: boolean): string {
+  return [
+    `CALL QUERY_VECTOR_INDEX('${MEMORY_TABLE}', '${VECTOR_INDEX_NAME}', $q, $k)`,
+    'WITH node, distance',
+    'MATCH (node)',
+    'WHERE node.layer = $layer',
+    '  AND node.id <> $self_id',
+    '  AND ' + currentSnapshotPredicate('node'),
+    ...(withModelFilter ? ['  AND node.embedding_model_id = $model_id'] : []),
+    '  AND distance <= $max_distance',
+    'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at',
+    'ORDER BY distance',
+  ].join('\n')
+}
 
 const MERGE_SOURCE_REFS_STATEMENT = [
   `MATCH (m:${MEMORY_TABLE})`,
@@ -217,15 +226,16 @@ function preciseSimilarityStatement(dim: number): string {
 /** 同 layer（U6）+ 仍有效的候选；逐条再算精确相似度。 */
 async function findSemanticCandidates(
   connection: MemoryConnection,
-  input: { layer: string; vector: readonly number[]; dim: number; selfId: string; nowIso: string },
+  input: { layer: string; vector: readonly number[]; dim: number; selfId: string; nowIso: string; modelId: string | null },
 ): Promise<DedupCandidate[]> {
-  const rows = await queryRows(connection, ANN_CANDIDATE_STATEMENT, {
+  const rows = await queryRows(connection, annCandidateStatement(input.modelId !== null), {
     q: [...input.vector],
     k: DEDUP_TOP_K,
     layer: input.layer,
     self_id: input.selfId,
     now: input.nowIso,
     max_distance: SEMANTIC_WINDOW_MAX_DISTANCE,
+    ...(input.modelId === null ? {} : { model_id: input.modelId }),
   })
   const precise = await connection.prepare(preciseSimilarityStatement(input.dim))
   const candidates: DedupCandidate[] = []
@@ -350,6 +360,8 @@ export async function writeDeduplicatedMemory(
   // 含空白的 layer 会出现「id 归属 A 层、属性与 ANN 在 B 层」的分叉。
   const layer = input.layer.trim()
   const id = memoryNodeId(layer, input.text)
+  // 本次写入的模型 id（AD-14 可比性）：有值时 ANN 只召回同模型节点，避免跨向量空间误判。
+  const embeddingModelId = input.embeddingModelId?.trim() || null
 
   // ---- 向量可用性（评审 P5 / EC-5）：绑进 FLOAT[dim] 之前先把长度校验掉 ----
   // 原先「维度失配」分支只跳过 ANN、仍把原 input 交给 writeMemoryVersion ⇒ 未校验长度的向量被绑进
@@ -438,6 +450,7 @@ export async function writeDeduplicatedMemory(
         dim,
         selfId: id,
         nowIso,
+        modelId: embeddingModelId,
       })
     } catch (error) {
       // 去重是守门而非致命：向量索引缺失/扩展未装载等失败按「无候选」处理，绝不阻塞写入

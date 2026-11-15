@@ -86,6 +86,7 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     connection: connectionOrNull,
     llm: llmPort,
     embeddingEnabled: embeddingClient !== null,
+    embeddingModelId: embedding.modelId,
     logger: ctx.logger,
   })
 
