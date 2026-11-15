@@ -25,12 +25,21 @@ if (rootPkg.version !== bundle.version || rootPkg.version !== mem.version) {
 } else {
   ok(`版本三处一致（${String(rootPkg.version)}，root 跟随两包）`)
 }
-for (const [pkg, label] of [[bundle, 'bundle'], [mem, 'memory']]) {
-  if (pkg.type !== 'module') fail(label + ": package.json type 应为 'module'（ESM only）")
+// 版本存在性前置：三处同时缺失时 undefined===undefined 会静默通过（评审 STATUS52 第 1 条）。
+for (const [label, value] of [['root', rootPkg.version], ['bundle', bundle.version], ['memory', mem.version]]) {
+  if (typeof value !== 'string' || value.trim() === '') fail(`版本：${label} 的 version 缺失或为空`)
 }
-ok("'type: module（两包）'")
-if (bundle.dependencies?.['dsh-oh-my-whale-memory'] === undefined) {
+let typeOk = true
+for (const [pkg, label] of [[bundle, 'bundle'], [mem, 'memory']]) {
+  if (pkg.type !== 'module') { typeOk = false; fail(label + ": package.json type 应为 'module'（ESM only）") }
+}
+if (typeOk) ok("'type: module（两包）'")
+// AD-1：必须在 dependencies 声明、且不得同时放 peerDependencies（放 peer 在 autoInstallPeers:false 下装不上）。
+const memDep = bundle.dependencies?.['dsh-oh-my-whale-memory']
+if (typeof memDep !== 'string' || memDep.trim() === '') {
   fail("bundle: 必须在 dependencies 声明 dsh-oh-my-whale-memory（AD-1 单向下游，不得放 peer）")
+} else if (bundle.peerDependencies?.['dsh-oh-my-whale-memory'] !== undefined) {
+  fail('bundle: dsh-oh-my-whale-memory 不得同时出现在 peerDependencies（AD-1）')
 } else {
   ok("'bundle → memory 声明在 dependencies（AD-1）'")
 }

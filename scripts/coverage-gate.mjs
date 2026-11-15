@@ -147,6 +147,29 @@ if (argv.includes('--update')) {
       { lines: Number(metrics.lines.toFixed(2)), branches: Number(metrics.branches.toFixed(2)) },
     ]),
   )
+  // 单调性守卫（评审 STATUS52 第 3 条）：`--update` 只能抬高基线。如果这次更新会把某个文件的
+  // lines/branches **调低**，说明是「补测前先降基线」——直接拒绝，除非显式 `--force-lower`
+  //（供「文件真的被删除/重命名后重建基线」这类人工场景使用；CI 永不传任何 update 参数）。
+  const previous = existsSync(baselinePath)
+    ? (JSON.parse(readFileSync(baselinePath, 'utf8')).files ?? {})
+    : {}
+  const lowered = []
+  for (const [file, metrics] of Object.entries(sorted)) {
+    const before = previous[file]
+    if (before === undefined) continue
+    for (const metric of METRICS) {
+      const now = Number(metrics[metric])
+      const was = Number(before[metric] ?? 0)
+      if (now + EPSILON < was) lowered.push(`${file}: ${metric} ${now.toFixed(2)}% < 已有基线 ${was.toFixed(2)}%`)
+    }
+  }
+  if (lowered.length > 0 && !argv.includes('--force-lower')) {
+    for (const line of lowered) console.log(`  FAIL ${line}`)
+    console.log(
+      `coverage-gate: 拒绝降低基线（${lowered.length} 处）。先补测，或确属文件删除/改名时用 --force-lower 显式重建。`,
+    )
+    process.exit(1)
+  }
   writeFileSync(baselinePath, JSON.stringify({ generatedAt: new Date().toISOString(), files: sorted }, null, 2) + '\n', 'utf8')
   console.log(`coverage-gate: 基线已更新（${Object.keys(sorted).length} 文件）→ ${baselinePath}`)
   process.exit(0)
