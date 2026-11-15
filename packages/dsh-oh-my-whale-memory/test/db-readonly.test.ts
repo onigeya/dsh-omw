@@ -10,7 +10,7 @@ import { access, readFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 import { afterAll, describe, expect, it, vi } from 'vitest'
 import { loadStorageBackend } from '../src/db/backend'
-import { openMemoryDatabase } from '../src/db/database'
+import { closeMemoryDatabase, openMemoryDatabase } from '../src/db/database'
 import { MemoryDbError } from '../src/db/errors'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import { READONLY_REASON, acquireWriterLock } from '../src/db/writer-lock'
@@ -288,6 +288,23 @@ describe('只读降级打开（Story 1.5 / AC1、AC2、AC4）', () => {
     } finally {
       await writer.stop()
     }
+  }, 20_000)
+
+  it('只读句柄 close→reopen 同路径（启动竞态重试依赖此能力）', async () => {
+    const dbPath = await freshDbPath('ro-close-reopen')
+    const writer = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID })
+    await writer.close()
+    // 先释放写者句柄，避免同路径模式冲突。
+    await closeMemoryDatabase(dbPath)
+
+    const first = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true })
+    expect(first.readonly).toBe(true)
+    await closeMemoryDatabase(dbPath)
+
+    // 只读 close 后同进程可重开（native 的 Error: 33 只出现在读写句柄重开路径）。
+    const second = await openMemoryDatabase({ dbPath, dim: 8, modelId: MODEL_ID, readOnly: true })
+    expect(second.readonly).toBe(true)
+    await second.close()
   }, 20_000)
 
   it('写者持锁但库文件尚未落盘时，第二实例有界等待后仍降级只读（启动竞态）', async () => {

@@ -185,9 +185,13 @@ const READONLY_DB_POLL_MS = 50
  * 只读实例等待写者建完 schema 的上限（Story 1.5 / AC1）。
  *
  * 库文件落盘 ≠ schema 就绪：写者建出库文件之后还要建表、写元数据。两个实例几乎同时
- * 启动时，只读方可能正好读到"库文件已存在、表还没建"的中间态。该等，不该报错。
+ * 启动时，只读方可能正好读到「库文件已存在、表还没建」的中间态。该等，不该报错。
+ *
+ * 取 5s 而不是 2s：满载 Windows 机器上，写者的 `INSTALL/LOAD` + 建表实测会超过 2s，
+ * 2s 窗口会让第二实例偶发 `schema_mismatch`（db-readonly 的启动竞态用例在满载时变红）。
+ * 只在「写者持锁、库正在初始化」这条路径上付出等待，正常启动无感。
  */
-const READONLY_SCHEMA_WAIT_MS = 2_000
+const READONLY_SCHEMA_WAIT_MS = 5_000
 const READONLY_SCHEMA_POLL_MS = 50
 
 /** 有界等待库文件出现；超时返回 false（由调用方决定 fail-loud 文案）。 */
@@ -395,47 +399,73 @@ async function initializeDatabase(
 }
 
 /**
+ * 只读打开期间的瞬态错误（写者正在 checkpoint / WAL 尚未稳定）。
+ *
+ * 0.22.3 的只读首查会撞上两类启动竞态（实测）：
+ * - `Cannot open database in read-only mode while checkpoint recovery is pending...`
+ *   ——错误本身要求「等 checkpoint 结束再试」；
+ * - `Reading past the end of the file ... .wal with size 0`
+ *   ——写者刚落盘、WAL 还没写完时的读竞态。
+ * 两者都不是 schema/维度错误；在 READONLY_SCHEMA_WAIT_MS 窗口内重建句柄重试，
+ * 超时仍失败才按原错误抛出（不把真实故障吞成永久等待）。
+ */
+function isTransientReadOnlyOpenError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error)
+  return /checkpoint recovery is pending|Reading past the end of the file/i.test(message)
+}
+
+/**
  * 只读 facade（Story 1.5 / AC1、AC2、AC4）：复用与写者路径完全相同的库结构校验
  * （同一维度/元数据优先级），但不建表、不写元数据、不建索引，写入口一律抛
  * `readonly_mode`。校验失败时回收句柄，不留下半可用的 facade。
+ *
+ * 启动竞态（写者持锁但库刚落盘/正在 checkpoint）的首查可能失败且把该 Database 置为
+ * 不可用，故在等待窗内重建句柄重试（见 {@link isTransientReadOnlyOpenError}）。
  */
 async function initializeReadOnlyDatabase(
   dbPath: string,
   dim: number,
   options: OpenMemoryDatabaseOptions,
 ): Promise<MemoryDatabase> {
-  const handle = await acquireHandle(dbPath, true)
-  const { connection } = handle
-  try {
-    const { meta, actualDim } = await readExistingSchema(connection, dim, dbPath)
-    if (actualDim === null) {
-      throw new MemoryDbError(
-        'schema_mismatch',
-        `只读模式打开失败：等待 ${READONLY_SCHEMA_WAIT_MS}ms 后库内仍没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
-      )
-    }
-    // Story 3.1：schema 校验通过（库已成功打开）后再尽力装载扩展，让只读实例保留 recall。
-    await tryLoadReadOnlyExtensions(handle.backend, connection, dbPath, options.logger)
+  const deadline = Date.now() + READONLY_SCHEMA_WAIT_MS
+  for (;;) {
+    const handle = await acquireHandle(dbPath, true)
+    const { connection } = handle
+    try {
+      const { meta, actualDim } = await readExistingSchema(connection, dim, dbPath)
+      if (actualDim === null) {
+        throw new MemoryDbError(
+          'schema_mismatch',
+          `只读模式打开失败：等待 ${READONLY_SCHEMA_WAIT_MS}ms 后库内仍没有 ${MEMORY_TABLE} 表（${dbPath}）——可能来自未完成初始化的实例，或写者实例尚未建库。`,
+        )
+      }
+      // Story 3.1：schema 校验通过（库已成功打开）后再尽力装载扩展，让只读实例保留 recall。
+      await tryLoadReadOnlyExtensions(handle.backend, connection, dbPath, options.logger)
 
-    const store: MemoryDatabase = {
-      dbPath,
-      dim: actualDim,
-      modelId: meta.get(META_KEYS.embeddingModelId) ?? options.modelId,
-      readonly: true,
-      connection,
-      async upsertMemory() {
-        throw createReadonlyModeError(dbPath)
-      },
-      async close() {
-        facades.delete(dbPath)
-      },
+      const store: MemoryDatabase = {
+        dbPath,
+        dim: actualDim,
+        modelId: meta.get(META_KEYS.embeddingModelId) ?? options.modelId,
+        readonly: true,
+        connection,
+        async upsertMemory() {
+          throw createReadonlyModeError(dbPath)
+        },
+        async close() {
+          facades.delete(dbPath)
+        },
+      }
+      facades.set(dbPath, store)
+      return store
+    } catch (error) {
+      handles.delete(dbPath)
+      await closeHandle(handle)
+      if (isTransientReadOnlyOpenError(error) && Date.now() < deadline) {
+        await new Promise((wake) => setTimeout(wake, READONLY_SCHEMA_POLL_MS))
+        continue
+      }
+      throw error
     }
-    facades.set(dbPath, store)
-    return store
-  } catch (error) {
-    handles.delete(dbPath)
-    await closeHandle(handle)
-    throw error
   }
 }
 
