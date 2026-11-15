@@ -10,6 +10,7 @@ import { createReadonlyModeError } from '../db/database.js'
 import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
+import { countEvidenceDegraded } from '../db/redact.js'
 import {
   countMemoriesByLayer,
   countUnembeddedMemories,
@@ -88,11 +89,16 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
 
   // Story 4.1：忘却是写路径。库未就绪与 `writeInbox` 同一句文案；只读实例的拒绝复用 facade
   // 的 `readonly_mode` 错误（同一句话，不新造），命令层 catch 后收敛成 error 结果。
-  const forgetMemory: MemoryAccess['forgetMemory'] = async (id) => {
+  // Story 4.2：`--redact` 透传成库层的 `{ redact: { actor: 'user' } }`（AC:1050 只允许 user）。
+  const forgetMemory: MemoryAccess['forgetMemory'] = async (id, forgetOptions) => {
     const database = options.getDb()
     if (!database) throw new Error(DB_NOT_READY_WRITE)
     if (database.readonly) throw createReadonlyModeError(database.dbPath)
-    return forgetMemoryInDb(database.connection, id)
+    return forgetMemoryInDb(
+      database.connection,
+      id,
+      forgetOptions?.redact === true ? { redact: { actor: 'user' } } : {},
+    )
   }
 
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
@@ -106,7 +112,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     const unembedded = await countUnembeddedMemories(connection)
     // Story 2.6 / F2：边侧差额（EII 违例 + 边↔source_refs 漂移）与关系降级计数。
     // computeEvidenceGap 在边表缺失时返回 null（渲染成未知，不静默报 0）。
-    const evidenceGap = await computeEvidenceGap(connection, new Date().toISOString())
+    const now = new Date().toISOString()
+    const evidenceGap = await computeEvidenceGap(connection, now)
     const relatedSkipped = await countRelatedSkips(connection)
     const inboxCounts = await countInboxByStatus(connection)
     // Story 2.5 / U1：L2_INBOX 行从「memory.layer 的历史计数槽」换成 l2_inbox 的真实队列深度
@@ -136,6 +143,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       auditGap,
       evidenceGap,
       relatedSkipped,
+      // Story 4.2 / D-5：证据被授权抹除的有效记忆数（0 不渲染；列缺失 = null 渲染「未知」）。
+      evidenceDegraded: await countEvidenceDegraded(connection, now),
       // Story 2.5 / 评审 P8：L2 死信（T8：此前 l2InboxCounts.failed 被整个丢弃 ⇒ L2 死信
       // 在 status 完全不可见）与疑似失效账目（T27：U14 只有写侧、没有读取出口）。
       l2Failed: l2InboxCounts.failed,

@@ -9,12 +9,13 @@
  * 查询口径（brief §2.4 推荐形态 + 裁决 U2）：
  * - 一律正集 + 应用层差集，绝不用相关 EXISTS/NOT EXISTS 表达谓词版
  *   （brief §2.3 N2 实测：内层谓词不生效，8 个节点全判违例）。
- * - 路径谓词按标签显式写：`label(x)='l0_raw'` 支判 `raw_text IS NOT NULL`；
+ * - 路径谓词按标签显式写：`label(x)='l0_raw'` 支判「非墓碑」（Story 4.2 起收敛为
+ *   `schema.ts` 的 `l0EvidencePredicate`：`raw_text IS NOT NULL AND redacted_at IS NULL`）；
  *   `label(x)='memory'` 支判 AD-19:175 三条件。不用隐式 NULL 语义，l0_raw 没有
  *   invalid_at/expired_at 列，`x.invalid_at IS NULL` 对缺失属性恒真（U2）。
  * - 有效性谓词（SQL 侧）走 `src/db/snapshot.ts` 的共享四条件（Story 3.1 收敛；
- *   原先按裁决 U7 不含 recorded_at，已在 ledger 记 U7 反转）；JS 侧 `isEffective`
- *   保留 AD-19 三条件不动，它只服务 checkReachableToL0 的早退判定，不拼 SQL。
+ *   原先按裁决 U7 不含 recorded_at，已在 ledger 记 U7 反转）；Story 4.2 起再叠一条
+ *   「非 evidence_degraded」——降级节点不计入 EII 违例与漂移（AC:1055）。
  * - depth 固定 4 字面量（AD-19），不随 FR-12 的 depth 参数漂移。
  *
  * ⚠️ 升版必回归：`all(x IN nodes(p) ...)` 的动态属性语义与 `label(x)` 在 0.22.3 上实测可用
@@ -24,7 +25,17 @@ import type * as lbug from '@ladybugdb/core'
 import { MemoryDbError, isMissingTableError } from './errors.js'
 import { nullishString, queryRows, toStringArray } from './rows.js'
 import { currentSnapshotPredicate } from './snapshot.js'
-import { EVIDENCE_CLOSURE_DEPTH, EVIDENCE_TABLE, L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
+import { schemaColumnPresence, type SchemaColumnPresence } from './column-presence.js'
+import {
+  EVIDENCE_CLOSURE_DEPTH,
+  EVIDENCE_TABLE,
+  L0_RAW_TABLE,
+  MEMORY_TABLE,
+  REDACTED_AT_COLUMN,
+  l0EvidencePredicate,
+  l0RawTextPredicate,
+  notEvidenceDegradedPredicate,
+} from './schema.js'
 
 /** 只读可达性原语的封闭失败枚举（2.5 据此路由到「回滚 INBOX 重试」或「判不合格」）。 */
 export type ReachabilityFailure =
@@ -51,22 +62,42 @@ const DIRECT_IN_EDGE_COUNT = [
   'RETURN count(*) AS c',
 ].join('\n')
 
-const READ_L0_STATEMENT = [
-  'MATCH (l:' + L0_RAW_TABLE + ' {id: $id})',
-  'RETURN l.raw_text AS raw_text',
-].join('\n')
+/**
+ * 单条 L0 的读取投影：`redacted_at` 只在列存在时才 RETURN。
+ *
+ * 0.22.3 对未定义属性直接抛 binder 异常（不是 NULL），所以「按探测拼语句」是这里唯一的
+ * 安全形态：v1 只读库上多读一列就会把整个可达性原语打崩。
+ */
+function readL0Statement(presence: SchemaColumnPresence): string {
+  return [
+    'MATCH (l:' + L0_RAW_TABLE + ' {id: $id})',
+    'RETURN l.raw_text AS raw_text' +
+      (presence.redactedAt ? ', l.' + REDACTED_AT_COLUMN + ' AS ' + REDACTED_AT_COLUMN : ''),
+  ].join('\n')
+}
 
-const EFFECTIVE_MEMORY_IDS = [
-  'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE ' + currentSnapshotPredicate('m'),
-  'RETURN m.id AS id',
-].join('\n')
+/** 有效集：当前快照四条件；降级列存在时再排除 evidence_degraded（Story 4.2 / AC:1055）。 */
+function effectiveWhere(presence: SchemaColumnPresence): string {
+  return presence.evidenceDegraded
+    ? currentSnapshotPredicate('m') + ' AND ' + notEvidenceDegradedPredicate('m')
+    : currentSnapshotPredicate('m')
+}
 
-const EFFECTIVE_MEMORY_REFS = [
-  'MATCH (m:' + MEMORY_TABLE + ')',
-  'WHERE ' + currentSnapshotPredicate('m'),
-  'RETURN m.id AS id, m.source_refs AS source_refs',
-].join('\n')
+function effectiveMemoryIdsStatement(presence: SchemaColumnPresence): string {
+  return [
+    'MATCH (m:' + MEMORY_TABLE + ')',
+    'WHERE ' + effectiveWhere(presence),
+    'RETURN m.id AS id',
+  ].join('\n')
+}
+
+function effectiveMemoryRefsStatement(presence: SchemaColumnPresence): string {
+  return [
+    'MATCH (m:' + MEMORY_TABLE + ')',
+    'WHERE ' + effectiveWhere(presence),
+    'RETURN m.id AS id, m.source_refs AS source_refs',
+  ].join('\n')
+}
 
 const ALL_DIRECT_IN_EDGES = [
   'MATCH (x)-[:' + EVIDENCE_TABLE + ']->(m:' + MEMORY_TABLE + ')',
@@ -96,29 +127,30 @@ function sqlInstant(now: string): string {
  * 现升级为四条件：对真实数据零行为变化，`as-of` 读（U7）在 `valid_at <= now` 之外
  * 还受 `recorded_at <= now` 约束，已在 ledger 记 U7 反转）。
  */
-function pathPredicate(nowLiteral: string): string {
+function pathPredicate(nowLiteral: string, presence: SchemaColumnPresence): string {
   return [
-    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND x.raw_text IS NOT NULL)',
+    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND ' +
+      (presence.redactedAt ? l0EvidencePredicate('x') : l0RawTextPredicate('x')) + ')',
     '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND ' + currentSnapshotPredicate('x', nowLiteral) + ')',
   ].join('\n')
 }
 
 /** 单候选：至少一条有效且可达的向下路径直到 L0（2.5 判据②）。 */
-function reachableToIdStatement(nowLiteral: string): string {
+function reachableToIdStatement(nowLiteral: string, presence: SchemaColumnPresence): string {
   return [
     'MATCH p = (l0:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ' {id: $id})',
     'WHERE all(x IN nodes(p) WHERE',
-    pathPredicate(nowLiteral) + ')',
+    pathPredicate(nowLiteral, presence) + ')',
     'RETURN count(p) AS c',
   ].join('\n')
 }
 
 /** 全库正集：能从非墓碑 L0 走到、且链上节点有效的记忆 id 集。 */
-function reachableIdsStatement(nowLiteral: string): string {
+function reachableIdsStatement(nowLiteral: string, presence: SchemaColumnPresence): string {
   return [
     'MATCH p = (l0:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ')',
     'WHERE all(x IN nodes(p) WHERE',
-    pathPredicate(nowLiteral) + ')',
+    pathPredicate(nowLiteral, presence) + ')',
     'RETURN DISTINCT m.id AS id',
   ].join('\n')
 }
@@ -138,6 +170,7 @@ export async function checkReachableToL0(
   id: string,
   now: string,
 ): Promise<ReachabilityResult> {
+  const presence = await schemaColumnPresence(connection)
   const rows = await queryRows(connection, READ_MEMORY_STATEMENT, { id })
   const row = rows[0]
   if (row === undefined) return { id, pass: false, failingReasons: ['not-found'] }
@@ -147,7 +180,7 @@ export async function checkReachableToL0(
   const edgeRows = await queryRows(connection, DIRECT_IN_EDGE_COUNT, { id })
   const inEdges = Number(edgeRows[0]?.c ?? 0)
   if (!(inEdges > 0)) return { id, pass: false, failingReasons: ['no-evidence-edge'] }
-  const pathRows = await queryRows(connection, reachableToIdStatement(sqlInstant(now)), { id })
+  const pathRows = await queryRows(connection, reachableToIdStatement(sqlInstant(now), presence), { id })
   const paths = Number(pathRows[0]?.c ?? 0)
   if (!(paths > 0)) return { id, pass: false, failingReasons: ['no-valid-path-to-l0'] }
   return { id, pass: true, failingReasons: [] }
@@ -165,10 +198,14 @@ export async function checkRefReachableToL0(
   refId: string,
   now: string,
 ): Promise<ReachabilityResult> {
-  const l0Rows = await queryRows(connection, READ_L0_STATEMENT, { id: refId })
+  const presence = await schemaColumnPresence(connection)
+  const l0Rows = await queryRows(connection, readL0Statement(presence), { id: refId })
   if (l0Rows.length > 0) {
     const raw = l0Rows[0]?.raw_text
-    return raw === null || raw === undefined
+    const redactedAt = l0Rows[0]?.redacted_at
+    // Story 4.2：墓碑有两种形态——指针行（raw_text NULL，Story 10.1）与 redact 过的 inline 行
+    // （raw_text 仍是墓碑文本，redacted_at 非空）。两者都不再是「可达 L0」。
+    return raw === null || raw === undefined || (redactedAt !== null && redactedAt !== undefined)
       ? { id: refId, pass: false, failingReasons: ['l0-tombstone'] }
       : { id: refId, pass: true, failingReasons: [] }
   }
@@ -180,8 +217,9 @@ export async function checkRefReachableToL0(
  * 只读；返回 id 列表（调用方决定计数或展开）。
  */
 export async function computeEiiViolations(connection: lbug.Connection, now: string): Promise<string[]> {
-  const effective = await queryRows(connection, EFFECTIVE_MEMORY_IDS, { now })
-  const reachable = await queryRows(connection, reachableIdsStatement(sqlInstant(now)))
+  const presence = await schemaColumnPresence(connection)
+  const effective = await queryRows(connection, effectiveMemoryIdsStatement(presence), { now })
+  const reachable = await queryRows(connection, reachableIdsStatement(sqlInstant(now), presence))
   const reach = new Set(reachable.map((row) => String(row.id)))
   return effective.map((row) => String(row.id)).filter((id) => !reach.has(id))
 }
@@ -203,7 +241,8 @@ export interface EvidenceDrift {
  * 两条全表查询 + JS 求差集（避免逐节点 N+1）；只读；谓词不含 recorded_at。
  */
 export async function computeEvidenceDrift(connection: lbug.Connection, now: string): Promise<EvidenceDrift> {
-  const nodes = await queryRows(connection, EFFECTIVE_MEMORY_REFS, { now })
+  const presence = await schemaColumnPresence(connection)
+  const nodes = await queryRows(connection, effectiveMemoryRefsStatement(presence), { now })
   const edges = await queryRows(connection, ALL_DIRECT_IN_EDGES)
   const inEdges = new Map<string, Set<string>>()
   for (const edge of edges) {

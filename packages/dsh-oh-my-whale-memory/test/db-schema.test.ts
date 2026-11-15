@@ -51,29 +51,39 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(columns.get('parent_id')).toBe('STRING')
     // Story 2.5 / U16：AD-4 一直要求 support（support 计数），Epic 2 补齐。
     expect(columns.get('support')).toBe('INT64')
-    // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死（2.4 加 parent_id、2.5 加 support 后为 15）。
-    expect(columns.size).toBe(15)
+    // Story 4.2：证据被用户授权抹除的标记（AD-19；BOOL 缺省 NULL = 未降级）。
+    expect(columns.get('evidence_degraded')).toBe('BOOL')
+    // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死
+    //（2.4 加 parent_id、2.5 加 support、4.2 加 evidence_degraded 后为 16）。
+    expect(columns.size).toBe(16)
   })
 
-  it('l0_raw 表含 AC2 列出的四列', async () => {
+  it('l0_raw 表含 AC2 四列 + Story 4.2 墓碑两列', async () => {
     const rows = await queryAll(store.connection, `CALL table_info('l0_raw') RETURN name, type`)
-    const columns = rows.map((r) => String(r.name))
-    expect(columns).toEqual(expect.arrayContaining(['id', 'raw_text', 'recorded_at', 'actor']))
+    const columns = new Map(rows.map((r) => [String(r.name), String(r.type)]))
+    expect([...columns.keys()]).toEqual(expect.arrayContaining(['id', 'raw_text', 'recorded_at', 'actor']))
+    // Story 4.2 / AD-4：墓碑只允许一次改写，靠这两列记录改写者与时刻。
+    expect(columns.get('redacted_by')).toBe('STRING')
+    expect(columns.get('redacted_at')).toBe('STRING')
+    expect(columns.size).toBe(6)
   })
 
-  it('generation_log 表 15 列、类型逐字（Story 1.10 / AD-21）', async () => {
+  it('generation_log 表 16 列、类型逐字（Story 1.10 / AD-21；4.2 加 detail）', async () => {
     const rows = await queryAll(store.connection, `CALL table_info('generation_log') RETURN name, type`)
     const columns = new Map(rows.map((r) => [String(r.name), String(r.type)]))
-    expect(columns.size).toBe(15)
+    expect(columns.size).toBe(16)
     expect([...columns.keys()]).toEqual(expect.arrayContaining([
       'id', 'recorded_at', 'actor', 'kind', 'action', 'policy', 'l0_refs', 'outcome', 'reason',
       'question_key', 'probability', 'threshold', 'passed', 'cascade_depth', 'trigger_id',
+      // Story 4.2：AD-21:295 的净化明细列（本 story 只加列）。
+      'detail',
     ]))
     expect(columns.get('l0_refs')).toBe('STRING[]')
     expect(columns.get('probability')).toBe('DOUBLE')
     expect(columns.get('threshold')).toBe('DOUBLE')
     expect(columns.get('passed')).toBe('BOOL')
     expect(columns.get('cascade_depth')).toBe('INT64')
+    expect(columns.get('detail')).toBe('STRING')
   })
 
   it('keyed_decision 表 10 列、invalidated_by 为 MAP(STRING, STRING[])（Story 1.10 / AD-18）', async () => {
@@ -92,7 +102,7 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
   it('omw_meta 写入了库级元数据（AC2）', async () => {
     const rows = await queryAll(store.connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
     const meta = new Map(rows.map((r) => [String(r.key), String(r.value)]))
-    expect(meta.get('schema_version')).toBe('1')
+    expect(meta.get('schema_version')).toBe('2')
     expect(meta.get('embedding_dim')).toBe('4')
     expect(meta.get('embedding_model_id')).toBe('test-embed-model')
     expect(meta.get('created_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/)

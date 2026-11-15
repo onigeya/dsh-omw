@@ -40,6 +40,7 @@ import { ensureAuditTables } from './audit.js'
 import { loadStorageBackend, runPrepared, runStatement, type StorageBackend, type StorageBackendKind } from './backend.js'
 import { ensureInboxTables, ensureL2InboxTables } from './inbox-tables.js'
 import { ensureEdgeTables } from './edges.js'
+import { assertSchemaVersionSupported, migrateDatabase, readDeclaredSchemaVersion } from './migrate.js'
 import { MemoryDbError, isMissingTableError } from './errors.js'
 import {
   META_KEYS,
@@ -47,7 +48,6 @@ import {
   META_TABLE,
   PARENT_ID_COLUMN,
   SUPPORT_COLUMN,
-  SCHEMA_VERSION,
   FTS_INDEX_NAME,
   VECTOR_INDEX_NAME,
   alterMemoryAddParentIdStatement,
@@ -319,6 +319,10 @@ async function initializeDatabase(
   const meta = await readMetaMap(connection)
   const columns = await readTableColumns(connection, MEMORY_TABLE)
   const { metaDim, actualDim } = verifyExistingSchema(meta, columns, dim, dbPath)
+  // Story 4.2 / AD-34：版本高于本插件必须在任何 DDL 之前拒绝，否则「库不被改写」不可观测
+  // （旧插件打开新库时 CREATE IF NOT EXISTS 可能补出对方没有的表）。只读路径不做此校验：
+  // 旧库（v1）仍要能以只读实例打开并显示「未知」，见 D-5。
+  assertSchemaVersionSupported(await readDeclaredSchemaVersion(connection, dbPath, meta), dbPath)
 
   // 建库/迁移期的 DDL 也走 runStatement：`await connection.query(...)` 的返回值不释放
   // 就是一次 buffer pool pin 泄漏（见 backend.ts closeQueryResult）。
@@ -347,14 +351,17 @@ async function initializeDatabase(
   // 只读实例走 initializeReadOnlyDatabase，不经本函数（AC6 / AD-12）。
   await ensureEdgeTables(connection)
 
+  // Story 4.2 / AD-34：新列一律只经迁移 0002 补；新库（actualDim === null）走 bootstrap
+  // 直建到目标版本。只读实例走 initializeReadOnlyDatabase，绝不经过这里（AD-12 / AC2）。
+  await migrateDatabase(connection, { dbPath, freshDatabase: actualDim === null, now })
+
   if (actualDim === null) {
-    await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)
+    // schema_version 由 migrateDatabase 统一写（bootstrap 与升级同一条路径），这里只补库级 pin。
     await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
     await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
     await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
   } else {
     if (metaDim === undefined) await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
-    if (!meta.has(META_KEYS.schemaVersion)) await mergeMetaValue(connection, META_KEYS.schemaVersion, SCHEMA_VERSION)
     if (!meta.has(META_KEYS.createdAt)) await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
     if (meta.get(META_KEYS.embeddingModelId) !== options.modelId) {
       await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)

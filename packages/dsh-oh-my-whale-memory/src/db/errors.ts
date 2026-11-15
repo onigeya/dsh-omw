@@ -42,6 +42,8 @@ export type MemoryDbErrorCode =
   | 'invalid_instant'
   /** 目标 id 在库里不存在（Story 4.1 / forget：命令面渲染成「未找到 id 为 <id> 的记忆。」）。 */
   | 'memory_not_found'
+  /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
+  | 'schema_migration_failed'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode
