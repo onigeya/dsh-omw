@@ -110,6 +110,20 @@ describe('parseMemoryCommand（remember 分支）', () => {
       .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
     expect(parseMemoryCommand(' remember --kind= 文本'))
       .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    // 契约值域外同样拒绝：kind 必须是七类之一，priority 必须是 -1..100 的安全整数
+    expect(parseMemoryCommand(' remember --kind=note 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember --kind=Persona 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember --priority=-2 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember --priority=101 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    expect(parseMemoryCommand(' remember --priority=9007199254740993 文本'))
+      .toEqual({ kind: 'invalid', usage: MEMORY_REMEMBER_USAGE })
+    // 边界值仍是合法值
+    expect(parseMemoryCommand(' remember --priority=100 文本'))
+      .toEqual({ kind: 'remember', text: '文本', classification: { priority: 100 } })
     // 旗标与正文之间用制表符等空白分隔时同样成立（与子命令切分的 \s+ 一致）
     expect(parseMemoryCommand(' remember --kind=persona\t恒置顶偏好'))
       .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'persona' } })

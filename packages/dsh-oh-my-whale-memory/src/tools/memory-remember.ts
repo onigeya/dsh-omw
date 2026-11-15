@@ -21,7 +21,7 @@ import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tool
 import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
 import type { UpsertMemoryResult } from '../db/memory.js'
 import type { MemoryActor } from '../db/audit.js'
-import { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, type MemoryKind } from '../shared/memory-vocab.js'
+import { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, isMemoryPriority, type MemoryKind } from '../shared/memory-vocab.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
 export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
@@ -127,7 +127,7 @@ const OUTPUT_SCHEMA = {
           required: true,
           additionalProperties: false,
           properties: {
-            code: { type: 'string', required: true, description: '错误码：标识失败原因的稳定枚举值，如 db_unavailable、db_write_failed、empty_fingerprint_text' },
+            code: { type: 'string', required: true, description: '错误码：标识失败原因的稳定枚举值，如 db_unavailable、db_write_failed、empty_fingerprint_text、invalid_priority' },
             message: { type: 'string', required: true, description: '诊断信息，不含凭据' },
             retryable: { type: 'boolean', required: true, description: '是否值得重试' },
           },
@@ -177,6 +177,12 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
         // 由下面的 catch 统一转成 canonical failed 值。
         if (args.content.trim().length === 0) {
           return failed('empty_fingerprint_text', '记忆文本为空或只含空白，拒绝建节点')
+        }
+        // 参数 schema 只约束 type/enum；priority 没有 minimum/maximum 能力，必须在这里
+        // 按契约（-1..100）再校验一次，否则越界值会一路写进库并影响召回排序。
+        // kind 由宿主按 enum 在 execute 之前拒绝，这里不重复校验。
+        if (args.priority !== undefined && !isMemoryPriority(args.priority)) {
+          return failed('invalid_priority', 'priority 必须是 -1..100 的整数（-1 = 全局强规则）')
         }
         const store = getDb()
         if (!store) {

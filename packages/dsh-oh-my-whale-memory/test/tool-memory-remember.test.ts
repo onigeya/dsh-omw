@@ -311,6 +311,18 @@ describe('memory_remember 工具（Story 1.6）', () => {
     expect(Number(rows[0]['priority'])).toBe(0)
   })
 
+  it('参数值域校验：越界 priority 返回 canonical failed，且不写库', async () => {
+    const badPriority = await tool.execute({ content: '越界优先级不应落库', priority: 101 })
+    expect(badPriority.action).toBe('failed')
+    expect(badPriority.error).toMatchObject({ code: 'invalid_priority', retryable: false })
+
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (m:memory) WHERE m.text = '越界优先级不应落库' RETURN count(m) AS total",
+    )
+    expect(Number(rows[0]?.total ?? -1)).toBe(0)
+  })
+
   it('同文本不同分类：同一 id + 以最新写入为准（Story 1.11 / AC4：分类不进指纹）', async () => {
     const first = await tool.execute({ content: '同文本换分类工具样例', kind: 'persona', priority: 10 })
     expect(first.action).toBe('stored')

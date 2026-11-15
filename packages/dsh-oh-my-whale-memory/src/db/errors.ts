@@ -33,6 +33,8 @@ export type MemoryDbErrorCode =
   | 'db_read_failed'
   /** 检索参数无效（空白 query 等，Story 3.1 / F-13；仅作返回值码）。 */
   | 'invalid_query'
+  /** 写入参数无效（priority 越界等；仅作返回值码）。 */
+  | 'invalid_priority'
   | 'audit_record_missing'
   /** 存储后端模块装载失败（native 在 Electron 下不可用、wasm 包缺失等，AD-32）。 */
   | 'db_backend_unavailable'

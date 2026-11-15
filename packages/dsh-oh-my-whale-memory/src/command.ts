@@ -20,7 +20,13 @@
  * 调用 / 结果，运行时形态与宿主 `CommandDefinition` / `CommandInvocation` /
  * `CommandResult` 一致（D:\workspace\deepseek-harness\docs\subsystems\commands.md）。
  */
-import { MEMORY_KINDS } from './tools/memory-remember.js'
+import {
+  MEMORY_KINDS,
+  MEMORY_PRIORITY_MAX,
+  MEMORY_PRIORITY_MIN,
+  isMemoryKind,
+  isMemoryPriority,
+} from './shared/memory-vocab.js'
 import { summarizeMemoryText } from './shared/summarize.js'
 import type { LastInjectionSummary } from './injection/state.js'
 import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
@@ -54,7 +60,8 @@ export const MEMORY_REMEMBER_USAGE = [
   '用法：/memory remember <内容>',
   '',
   '可选分类旗标：/memory remember [--kind=<分类>] [--priority=<整数>] <内容>',
-  '分类（kind）取 ' + MEMORY_KINDS.join(' / ') + ' 之一；priority 取 -1..100，-1 = 全局强规则（恒置顶）。',
+  '分类（kind）取 ' + MEMORY_KINDS.join(' / ') + ' 之一；priority 取 ' +
+  MEMORY_PRIORITY_MIN + '..' + MEMORY_PRIORITY_MAX + '，-1 = 全局强规则（恒置顶）。',
   '省略旗标时 kind 为空、priority 为 0。示例：/memory remember 我偏好 ESM 不要 CJS',
 ].join('\n')
 
@@ -383,7 +390,8 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
     if (rest.startsWith(MEMORY_REMEMBER_KIND_FLAG)) {
       const end = flagValueEnd(rest, MEMORY_REMEMBER_KIND_FLAG)
       const value = (end === -1 ? rest.slice(MEMORY_REMEMBER_KIND_FLAG.length) : rest.slice(MEMORY_REMEMBER_KIND_FLAG.length, end)).trim()
-      if (!value) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      // 非法分类值拒绝：usage 明说 kind 取七类之一，不能把任意串静默写进库。
+      if (!isMemoryKind(value)) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
       kind = value
       rest = end === -1 ? '' : rest.slice(end).trim()
       continue
@@ -392,7 +400,10 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
       const end = flagValueEnd(rest, MEMORY_REMEMBER_PRIORITY_FLAG)
       const raw = (end === -1 ? rest.slice(MEMORY_REMEMBER_PRIORITY_FLAG.length) : rest.slice(MEMORY_REMEMBER_PRIORITY_FLAG.length, end)).trim()
       if (!/^-?\d+$/.test(raw)) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
-      priority = Number(raw)
+      const parsed = Number(raw)
+      // usage 明说 priority 取 -1..100；越界与非安全整数（DB 侧 INT64 会溢出）同样拒绝。
+      if (!isMemoryPriority(parsed)) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      priority = parsed
       rest = end === -1 ? '' : rest.slice(end).trim()
       continue
     }

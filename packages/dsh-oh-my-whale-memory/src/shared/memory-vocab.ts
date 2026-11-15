@@ -24,5 +24,25 @@ export const MEMORY_KINDS = [
 
 export type MemoryKind = (typeof MEMORY_KINDS)[number]
 
+/** 是否是七类分类之一（写路径参数 / 命令旗标的单一判据）。 */
+export function isMemoryKind(value: unknown): value is MemoryKind {
+  return typeof value === 'string' && (MEMORY_KINDS as readonly string[]).includes(value)
+}
+
+/**
+ * priority 值域（-1 = 全局强规则/恒置顶，100 = 最高普通优先级）。
+ *
+ * 放在 shared/ 而不是 distill/llm-refine.ts：工具、命令与精炼三个写入口都要用同一组
+ * 边界，由精炼侧导出会让命令层 import distill（AD-33 目录级环）。
+ */
+export const MEMORY_PRIORITY_MIN = -1
+export const MEMORY_PRIORITY_MAX = 100
+
+/** 是否是合法 priority（-1..100 的整数；非整数/越界/非有限一律 false）。 */
+export function isMemoryPriority(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) &&
+    value >= MEMORY_PRIORITY_MIN && value <= MEMORY_PRIORITY_MAX
+}
+
 /** 直写层：L1（写入即 L1 原子记忆；INBOX 分拣是另一条流水线，layer 取值仍收敛为 'L1'）。 */
 export const MEMORY_REMEMBER_LAYER = 'L1'
