@@ -45,14 +45,16 @@ describe('patch 行与 MEMORY_PLUGIN_MODULE 的一致性', () => {
     }
   })
 
+  // 动态 import 会拉起 memory 插件的整张模块图；并行跑全套时 5s 默认上限会被调度抖动打穿，
+  // 这里按「模块加载」而非业务逻辑给预算（与仓库其它重库用例同口径）。
   it('MEMORY_PLUGIN_MODULE 与 memory 插件入口导出的 name lockstep', async () => {
     // 直接 import memory 包的 src 入口（contract source），不经 lib/ 构建产物。
     const memoryPlugin = await import('../../dsh-oh-my-whale-memory/src/index')
     expect(memoryPlugin.name).toBe(MEMORY_PLUGIN_MODULE)
-  })
+  }, 30_000)
 
   it('memory 插件无 default export（Loader 会丢弃命名空间）', async () => {
     const memoryPlugin = await import('../../dsh-oh-my-whale-memory/src/index')
     expect(Object.keys(memoryPlugin)).not.toContain('default')
-  })
+  }, 30_000)
 })
