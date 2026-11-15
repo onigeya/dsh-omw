@@ -10,7 +10,7 @@ One line: **a memory pipeline that grows its own memory for DeepSeek Harness** �
 
 | Layer | Content | Written by |
 |---|---|---|
-| **L0** | Raw stream (conversation slices, observations). Append-only, never rewritten | Capture hooks (`turn/start`, `turn/end`, …) |
+| **L0** | Raw stream (conversation slices, observations). Append-only, never rewritten | Capture hooks: `step/end` (per step), `compaction/start` (compaction window), `turn/end` (end of turn) |
 | **L1** | Atomic facts (one preference, one decision, one constraint) | LLM refinement of the INBOX queue / `memory_remember` / `/memory remember` |
 | **L2** | Consolidated statements (synthesis over several L1 facts) | L1→L2 promotion (quality gate + faithfulness check) |
 
@@ -107,7 +107,7 @@ The single source of truth is PRD §11.1 — 6 tools, callable by the agent.
 | `memory_remember` | Write one long-lived L1 fact (same content is idempotent, no duplicate node) | Implemented |
 | `memory_recall` | Hybrid semantic + keyword recall, returning layer/kind/priority per hit | Implemented |
 | `memory_related` | Graph traversal from one memory to its neighbours | Implemented |
-| `memory_forget` | **Only** returns `confirmation_required` plus a summary; there is no agent-side execution path — confirmation happens through the user's `/memory forget` | Implemented |
+| `memory_forget` | Returns `confirmation_required` plus a summary (a canonical `failed` envelope when the database is unavailable, read-only, or the id is unknown); **there is no agent-side execution path** — confirmation happens through the user's `/memory forget` | Implemented |
 | `memory_status` | Structured form of status (counts instead of prose) | Planned (not implemented) |
 | `memory_expand` | Expand a collapsed handle `[omw:handle=<id> ~<n> tokens]` back to the full content, byte-for-byte | Planned (not implemented, Epic 8) |
 

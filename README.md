@@ -10,7 +10,7 @@
 
 | 层 | 内容 | 谁写 |
 |---|---|---|
-| **L0** | 原始流水（对话片段、观测原文），只追加、永不改写 | 采集钩子（`turn/start`、`turn/end` 等） |
+| **L0** | 原始流水（对话片段、观测原文），只追加、永不改写 | 采集钩子：`step/end`（每步结算）、`compaction/start`（压缩窗口）、`turn/end`（轮次结束） |
 | **L1** | 原子事实（一条偏好、一个决策、一条约束） | LLM 精炼 INBOX 队列 / `memory_remember` / `/memory remember` |
 | **L2** | 综合陈述（跨多条 L1 的归纳） | L1→L2 提升（质量门 + 忠实性判定） |
 
@@ -107,7 +107,7 @@ embedding:
 | `memory_remember` | 写一条值得长期记住的 L1 事实（同内容幂等，不产生重复节点） | 已实现 |
 | `memory_recall` | 按语义 + 关键词混合召回，返回带层/分类/优先级的条目 | 已实现 |
 | `memory_related` | 从一条记忆出发按图遍历相邻记忆 | 已实现 |
-| `memory_forget` | **只**返回 `confirmation_required` 与待删摘要；Agent 侧没有执行通道，确认必须由用户的 `/memory forget` 完成 | 已实现 |
+| `memory_forget` | 返回 `confirmation_required` 与待删摘要（库不可用/只读/查不到时返回 canonical `failed` 信封）；**Agent 侧没有执行通道**，确认必须由用户的 `/memory forget` 完成 | 已实现 |
 | `memory_status` | 状态的结构化形态（计数而非文案） | 计划中（未实现） |
 | `memory_expand` | 把折叠句柄 `[omw:handle=<id> ~<n> tokens]` 逐字还原为完整内容 | 计划中（未实现，属 Epic 8） |
 
