@@ -242,14 +242,18 @@ describe('audit_gap 的边侧两集', () => {
 
   it('computeEvidenceDrift 双向：refs 有边无 / 边有 refs 无', async () => {
     await seedL0(store, 'd-l0', '原文')
-    await seedMemory(store, { id: 'd-m1', layer: 'L1', refs: ['d-l0', 'd-missing'] })
+    // Story 4.3 / D-5：漂移 A 只统计**可解析**端点的 ref，故夹具的第二条 ref 必须是真实存在
+    // 的 L0（d-l0-orphan，无边 ⇒ 漂移）；此前用的 'd-missing' 既非 l0 也非 memory，
+    // 按新口径不再算漂移，不可解析 ref 的专门用例见 status-health.test.ts 的矩阵行 13。
+    await seedL0(store, 'd-l0-orphan', '没有边的原文')
+    await seedMemory(store, { id: 'd-m1', layer: 'L1', refs: ['d-l0', 'd-l0-orphan'] })
     await seedMemory(store, { id: 'd-m2', layer: 'L1', refs: [] })
     await writeEvidenceEdges(store.connection, [
       { fromId: 'd-l0', fromLayer: 'L0', toId: 'd-m1', toLayer: 'L1' },
       { fromId: 'd-l0', fromLayer: 'L0', toId: 'd-m2', toLayer: 'L1' },
     ])
     const drift = await computeEvidenceDrift(store.connection, NOW)
-    expect(drift.refsWithoutEdges).toContainEqual({ id: 'd-m1', ref: 'd-missing' })
+    expect(drift.refsWithoutEdges).toContainEqual({ id: 'd-m1', ref: 'd-l0-orphan' })
     expect(drift.edgesWithoutRefs).toContainEqual({ id: 'd-m2', ref: 'd-l0' })
     // 自洽的那条既不在 A 也不在 B。
     expect(drift.refsWithoutEdges.some((entry) => entry.ref === 'd-l0')).toBe(false)

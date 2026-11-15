@@ -140,6 +140,15 @@ function statusText(
   else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
   // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入，未知）。
   lines.push('injection: 未知（本实例尚未触发开局注入）')
+  // Story 4.3 / D-1：健康五行追加在末尾（只增不改）。本夹具的两个队列表都是空的
+  //（SEEDS 里带 L1_INBOX 层名的是 memory 行，不是队列条目），故「无积压 / 从未精炼」。
+  lines.push(
+    'inbox_backlog: n/a（无积压）',
+    'last_refine_at: n/a（从未完成精炼）',
+    'rerank_latency: n/a (v1 无精排)',
+    'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
+    'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+  )
   return lines.join('\n')
 }
 
@@ -393,6 +402,12 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'uncertain: 未知（审计表缺失）',
         // Story 3.3 / B4：只读夹具未触发开局注入，末行「未知」（恒打印，便于断言三态）。
         'injection: 未知（本实例尚未触发开局注入）',
+        // Story 4.3 / D-1：健康五行（只读实例同样读得到；队列表在但为空）。
+        'inbox_backlog: n/a（无积压）',
+        'last_refine_at: n/a（从未完成精炼）',
+        'rerank_latency: n/a (v1 无精排)',
+        'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
+        'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)
     } finally {
