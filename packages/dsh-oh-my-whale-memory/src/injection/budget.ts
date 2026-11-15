@@ -65,9 +65,14 @@ export function isInviolableItem(item: RecallResultItem): boolean {
   return item.priority === -1 || item.kind === 'instruction'
 }
 
+/** code point 长度（预算单位是「字符」：代理对算 1，不能按 UTF-16 length 计）。 */
+function charLength(text: string): number {
+  return Array.from(text).length
+}
+
 /** 按 code point 截断正文（最多 maxChars；超限加 `…`，总长含省略号 ≤ maxChars）。 */
 function truncateBody(text: string, maxChars: number): { readonly text: string; readonly truncated: boolean } {
-  if (text.length <= maxChars) return { text, truncated: false }
+  if (charLength(text) <= maxChars) return { text, truncated: false }
   const body = [...text].slice(0, Math.max(0, maxChars - 1)).join('')
   return { text: body + INJECTION_ELLIPSIS, truncated: true }
 }
@@ -102,7 +107,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
     truncated: false,
     inviolable: true,
   }))
-  const inviolableChars = keptInviolableItems.reduce((sum, item) => sum + item.text.length, 0)
+  const inviolableChars = keptInviolableItems.reduce((sum, item) => sum + charLength(item.text), 0)
   const inviolableIds = new Set(inviolable.map((item) => item.id))
 
   // 2) 可删候选：摘要 → evidence → l1（去重、去掉已在不可删集合里的 id）
@@ -127,7 +132,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
     if (perItem.truncated) truncated = true
     // ③ 总长：剩余额度内再裁；剩余 <40 字符时不产生碎片行（停止追加未入列条目）
     const remaining = availableChars - chars
-    if (perItem.text.length > remaining) {
+    if (charLength(perItem.text) > remaining) {
       if (remaining < INJECTION_MIN_ITEM_CHARS) {
         truncated = true
         break
@@ -141,7 +146,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
         truncated: true,
         inviolable: false,
       })
-      chars += fitted.text.length
+      chars += charLength(fitted.text)
       continue
     }
     keptDeletable.push({
@@ -151,7 +156,7 @@ export function applyInjectionBudget(draft: InjectionDraft): InjectionBudgetResu
       truncated: perItem.truncated,
       inviolable: false,
     })
-    chars += perItem.text.length
+    chars += charLength(perItem.text)
   }
 
   const finalChars = chars + inviolableChars

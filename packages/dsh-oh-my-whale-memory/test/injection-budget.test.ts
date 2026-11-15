@@ -49,6 +49,19 @@ describe('applyInjectionBudget：三限制边界', () => {
     expect(result.chars).toBe(INJECTION_MAX_ITEM_CHARS)
   })
 
+  it('① 预算按 code point 计：代理对（emoji）不被 UTF-16 length 提前截断或放大 chars', () => {
+    const result = applyInjectionBudget({
+      ...EMPTY,
+      l1: [item('emoji', '😀'.repeat(2000))],
+    })
+    const body = result.items[0]?.text ?? ''
+    // 1199 个 emoji + 省略号 = 1200 个 code point（UTF-16 length 是 2399，不能拿它计预算）。
+    expect(Array.from(body)).toHaveLength(INJECTION_MAX_ITEM_CHARS)
+    expect(body.endsWith(INJECTION_ELLIPSIS)).toBe(true)
+    expect(result.chars).toBe(INJECTION_MAX_ITEM_CHARS)
+    expect(result.overBudget).toBe(false)
+  })
+
   it(`② 条数 ≤${INJECTION_MAX_ITEMS}：25 条只保留 20 条`, () => {
     const items = Array.from({ length: 25 }, (_, index) => item(`i${String(index).padStart(2, '0')}`, 'x'.repeat(10)))
     const result = applyInjectionBudget({ ...EMPTY, l1: items })
