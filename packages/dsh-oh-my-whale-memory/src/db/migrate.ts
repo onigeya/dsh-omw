@@ -6,9 +6,10 @@
  *   （旧插件不得写新库，拒绝启动且不改库）；
  * - `version < TARGET` ⇒ 先备份库文件，再在**一个**事务里逐条执行未应用的迁移
  *   （含 `schema_migration` 账本行与版本号），任一语句失败整条回滚并抛错；
- * - `version === null` 且库是新建的（bootstrap）⇒ 不备份、不执行 ALTER，只建
- *   `schema_migration` 并把全部迁移记为已应用（新库的列由 `schema.ts` 的建表 DDL 直接带出）；
- * - `version === null` 但有既有表（v1 早期库的极端形态）⇒ 按 v1 处理，正常走迁移。
+ * - `version === null` 且**本次打开前**没有 `memory` 表（bootstrap）⇒ 不备份、不执行 ALTER，
+ *   只建 `schema_migration` 并把全部迁移记为已应用（新库的列由 `schema.ts` 的建表 DDL 直接带出）；
+ * - `version === null` 但表已存在（旧库的极端形态）⇒ **不是 bootstrap**：按 0 号版本走正常
+ *   迁移路径（先备份）；版本记录存在但 `memory` 表缺失 ⇒ `schema_mismatch`（库损坏，不隐式重建）。
  *
  * 备份：`<dbPath>.bak-<fromVersion>-<pid>-<monotonicNs>`，用 `fs.open(path,'wx')`
  * （`O_EXCL`）创建——已存在即失败、拒绝迁移（备份是唯一回滚点，绝不覆盖上一份）。
@@ -24,7 +25,7 @@ import { runPrepared, runStatement } from './backend.js'
 import { MemoryDbError, isMissingTableError } from './errors.js'
 import { MIGRATIONS, TARGET_SCHEMA_VERSION, type Migration } from './migrations.js'
 import { queryRows } from './rows.js'
-import { META_KEYS, SCHEMA_MIGRATION_TABLE, createSchemaMigrationTableStatement } from './schema.js'
+import { META_KEYS, MEMORY_TABLE, SCHEMA_MIGRATION_TABLE, createSchemaMigrationTableStatement } from './schema.js'
 import { runInTransaction } from './transaction.js'
 
 /** 迁移失败时的人话前缀（命令面/日志直接可读，不含凭据也不含正文）。 */
@@ -36,13 +37,20 @@ export interface MigrateOptions {
   /**
    * 本次打开前 `memory` 表尚不存在（bootstrap 判据的一半）。
    * 由 `initializeDatabase` 在 DDL 之前读到的事实传入——本函数执行时表已被建出来。
+   * 不传时按「此刻 memory 表是否存在」推断（矩阵行 5/6 的裸调用）。
    */
   readonly freshDatabase?: boolean
   /** 注入时钟（`schema_migration.applied_at`）；缺省系统时间。 */
   readonly now?: () => Date
-  /** 迁移清单（缺省全量）；测试用：注入一条必定失败的迁移（矩阵行 5）。 */
+  /**
+   * @internal 仅供测试注入迁移清单（矩阵行 5：注入一条必定失败的迁移）。
+   * 生产调用不传，缺省为 `MIGRATIONS`。
+   */
   readonly migrations?: readonly Migration[]
-  /** 备份文件路径（缺省按 `fromVersion/pid/monotonicNs` 生成）；测试用：预置同名文件制造失败（矩阵行 6）。 */
+  /**
+   * @internal 仅供测试覆写备份路径（矩阵行 6：预置同名文件制造 O_EXCL 失败）。
+   * 生产调用不传，缺省按 `<db>.bak-<from>-<pid>-<monotonicNs>` 生成。
+   */
   readonly backupPath?: (dbPath: string, fromVersion: number) => string
 }
 
@@ -147,6 +155,17 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/** 表是否存在（`table_info` 探针；缺失表在 0.22.3 报 "does not exist in catalog"）。 */
+async function tableExists(connection: lbug.Connection, table: string): Promise<boolean> {
+  try {
+    await queryRows(connection, `CALL table_info('${table}') RETURN name`)
+    return true
+  } catch (error) {
+    if (isMissingTableError(error)) return false
+    throw error
+  }
+}
+
 /** 备份路径：`<db>.bak-<from>-<pid>-<monotonicNs>`（同目录；单调纳秒避免同进程同版本重名）。 */
 function defaultBackupPath(dbPath: string, fromVersion: number): string {
   return `${dbPath}.bak-${fromVersion}-${process.pid}-${process.hrtime.bigint()}`
@@ -184,8 +203,22 @@ export async function migrateDatabase(
   const fromVersion = await readDeclaredSchemaVersion(connection, dbPath)
   assertSchemaVersionSupported(fromVersion, dbPath, target)
 
-  const bootstrap = fromVersion === null
-  const pending = bootstrap ? [] : migrations.filter((migration) => migration.version > fromVersion)
+  const memoryExists = await tableExists(connection, MEMORY_TABLE)
+  if (fromVersion !== null && !memoryExists) {
+    // AD-34 的 fail-loud：版本记录在、表却没了 = 库损坏，绝不靠 CREATE IF NOT EXISTS 静默重建。
+    throw new MemoryDbError(
+      'schema_mismatch',
+      `记忆库声明 schema 版本 ${fromVersion}，但 ${MEMORY_TABLE} 表不存在（${dbPath}）：` +
+      '库文件可能损坏或被截断。拒绝启动，不做隐式重建（AD-34）。',
+    )
+  }
+
+  // bootstrap = 「没有版本记录」且「本次打开前也没有表」。新建库的列由建表 DDL 直接带出，
+  // 因此不备份、不执行 ALTER。版本键缺失但表已存在（旧库的极端形态）**不是** bootstrap：
+  // 走正常迁移路径（先备份），否则会跳过备份这个唯一回滚点。
+  const bootstrap = fromVersion === null && (options.freshDatabase ?? !memoryExists)
+  const baseVersion = fromVersion ?? 0
+  const pending = bootstrap ? [] : migrations.filter((migration) => migration.version > baseVersion)
   if (!bootstrap && pending.length === 0) {
     // 已是最新（矩阵行 3）：不建表、不备份、不写任何行。
     return { fromVersion, toVersion: target, applied: [], backupPath: null }
@@ -194,7 +227,7 @@ export async function migrateDatabase(
   // 备份先于任何 DDL / 事务：失败即拒绝迁移（矩阵行 6），此时库内一字未改。
   let backupPath: string | null = null
   if (!bootstrap) {
-    backupPath = (options.backupPath ?? defaultBackupPath)(dbPath, fromVersion)
+    backupPath = (options.backupPath ?? defaultBackupPath)(dbPath, baseVersion)
     try {
       await backupLibraryFile(dbPath, backupPath)
     } catch (error) {
@@ -211,7 +244,7 @@ export async function migrateDatabase(
     await runInTransaction(connection, async () => {
       await runStatement(connection, createSchemaMigrationTableStatement())
       for (const migration of migrations) {
-        const runIt = bootstrap || migration.version > fromVersion!
+        const runIt = bootstrap || migration.version > baseVersion
         if (runIt) {
           for (const statement of migration.statements) {
             // 0.22.3 的 ADD 不支持 IF NOT EXISTS，重复执行会抛 "already has property"

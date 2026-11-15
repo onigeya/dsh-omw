@@ -18,9 +18,13 @@ import { computeAuditGap } from '../src/db/audit'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { computeEiiViolations } from '../src/db/eii'
 import { forgetMemory, type ForgetResult } from '../src/db/forget'
+import { getMemoryById } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
+import { applyL0Tombstones } from '../src/db/redact'
 import { queryRows } from '../src/db/rows'
 import { l0TombstoneText } from '../src/db/schema'
+import { runInTransaction } from '../src/db/transaction'
+import { countSupport } from '../src/distill/promotion'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const T0 = '2026-01-01T00:00:00.000Z'
@@ -143,6 +147,13 @@ beforeAll(async () => {
   await createL0('r3-l0', '无旗标路径的原始观测')
   await createMemory('r3-l1', 'L1', '不带 --redact 的目标', ['r3-l0'])
   await linkL0ToMemory('r3-l0', 'r3-l1')
+
+  // 判据③ support 的回归（评审 FIX-4）：两条存活 L0，供 countSupport 直接观测。
+  await createL0('r4-l0a', 'support 计数用 A')
+  await createL0('r4-l0b', 'support 计数用 B')
+  await createMemory('r4-l1', 'L1', 'support 计数用记忆', ['r4-l0a', 'r4-l0b'])
+  await linkL0ToMemory('r4-l0a', 'r4-l1')
+  await linkL0ToMemory('r4-l0b', 'r4-l1')
 })
 
 afterAll(async () => {
@@ -210,15 +221,24 @@ describe('矩阵行 7/14：单条 L1 + --redact', () => {
     )
     expect(Number(l0Hits[0]?.c)).toBe(0)
 
-    const logHits = await queryRows(
+    // D-6 第二条：账本任何文本列（含 l0_refs 的每个元素）零命中。
+    // 0.22.3 的 `any(x IN list WHERE x CONTAINS $p)` 会撞 parser 内部断言（实测 UNREACHABLE_CODE），
+    // 故整表取回后在 JS 侧逐值判——这同样是「全表扫描」，且不依赖未承诺的列表函数语义。
+    const logRows = await queryRows(
       store.connection,
-      'MATCH (g:generation_log) WHERE g.reason CONTAINS $secret OR g.policy CONTAINS $secret ' +
-      'OR g.action CONTAINS $secret OR g.kind CONTAINS $secret OR g.actor CONTAINS $secret ' +
-      'OR g.outcome CONTAINS $secret OR g.detail CONTAINS $secret OR g.trigger_id CONTAINS $secret ' +
-      'OR g.question_key CONTAINS $secret RETURN count(g) AS c',
-      { secret: SECRET },
+      'MATCH (g:generation_log) RETURN g.id AS id, g.reason AS reason, g.policy AS policy, ' +
+      'g.action AS action, g.kind AS kind, g.actor AS actor, g.outcome AS outcome, ' +
+      'g.detail AS detail, g.trigger_id AS trigger_id, g.question_key AS question_key, ' +
+      'g.l0_refs AS l0_refs',
     )
-    expect(Number(logHits[0]?.c)).toBe(0)
+    const logHits = logRows.filter((row) =>
+      Object.values(row).some((value) =>
+        Array.isArray(value)
+          ? value.some((item) => String(item).includes(SECRET))
+          : value !== null && value !== undefined && String(value).includes(SECRET),
+      ),
+    )
+    expect(logHits).toEqual([])
 
     const fts = await queryRows(
       store.connection,
@@ -258,7 +278,8 @@ describe('矩阵行 7/14：单条 L1 + --redact', () => {
 
   it('矩阵行 11：闭包外的记忆零改动（L0 原文与降级标记都保持原样）', async () => {
     const other = await readMemory('r1-other')
-    expect(other.evidence_degraded).toBeNull()
+    // AC:1053 的 `DEFAULT false`：新库上未标记即 false（迁移前的旧行才可能是 NULL）。
+    expect(other.evidence_degraded).toBe(false)
     expect(other.invalid_at).toBeNull()
     expect(other.expired_at).toBeNull()
     expect((await readL0('r1-l0c')).raw_text).toBe('闭包外的观测')
@@ -307,8 +328,28 @@ describe('矩阵行 15：无 --redact 回归', () => {
     expect(after.raw_text).toBe(before.raw_text)
     expect(after.redacted_at).toBeNull()
     expect(after.redacted_by).toBeNull()
-    expect((await readMemory('r3-l1')).evidence_degraded).toBeNull()
+    // `DEFAULT false`（AC:1053）：不带旗标时保持「未降级」= false。
+    expect((await readMemory('r3-l1')).evidence_degraded).toBe(false)
     expect((await readMemory('r3-l1')).expired_at).toBe(TS)
+  })
+})
+
+/**
+ * 评审 FIX-4：`promotion.ts` 的存活 L0 计数（判据③ support）用的是同一墓碑谓词。
+ * 走整条 promote 流程成本过高，这里直接钉住计数函数：redact 过的 inline 墓碑不算存活。
+ */
+describe('FIX-4：存活 L0 计数排除 redact 墓碑（判据③ support）', () => {
+  it('两条存活 L0 ⇒ 2；墓碑化其中一条 ⇒ 1', async () => {
+    const source = await getMemoryById(store.connection, 'r4-l1')
+    expect(source).not.toBeNull()
+    expect(await countSupport(store.connection, [source!])).toBe(2)
+
+    await runInTransaction(store.connection, () =>
+      applyL0Tombstones(store.connection, { l0Ids: ['r4-l0a'], ts: TS, actor: 'user' }),
+    )
+
+    expect((await readL0('r4-l0a')).redacted_at).toBe(TS)
+    expect(await countSupport(store.connection, [source!])).toBe(1)
   })
 })
 

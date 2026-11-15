@@ -28,7 +28,8 @@ export const MIGRATION_0002 = {
     {
       table: MEMORY_TABLE,
       column: EVIDENCE_DEGRADED_COLUMN,
-      ddl: `ALTER TABLE ${MEMORY_TABLE} ADD ${EVIDENCE_DEGRADED_COLUMN} BOOL`,
+      // AC:1053 逐字要求 `BOOL DEFAULT false`；0.22.3 的 ALTER 接受 DEFAULT（实测）。
+      ddl: `ALTER TABLE ${MEMORY_TABLE} ADD ${EVIDENCE_DEGRADED_COLUMN} BOOL DEFAULT false`,
     },
     {
       table: L0_RAW_TABLE,

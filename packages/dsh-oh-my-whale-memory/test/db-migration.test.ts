@@ -69,18 +69,23 @@ const V1_GENERATION_LOG = [
   ')',
 ].join('')
 
-function metaStatements(version: string): string[] {
-  return [
+function metaStatements(version: string | null): string[] {
+  const rows = [
     createMetaTableStatement(),
-    `MERGE (m:omw_meta {key: '${META_KEYS.schemaVersion}'}) ON CREATE SET m.value = '${version}' ON MATCH SET m.value = '${version}'`,
+  ]
+  if (version !== null) {
+    rows.push(`MERGE (m:omw_meta {key: '${META_KEYS.schemaVersion}'}) ON CREATE SET m.value = '${version}' ON MATCH SET m.value = '${version}'`)
+  }
+  rows.push(
     `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'}) ON CREATE SET m.value = '${DIM}' ON MATCH SET m.value = '${DIM}'`,
     `MERGE (m:omw_meta {key: '${META_KEYS.embeddingModelId}'}) ON CREATE SET m.value = '${MODEL}' ON MATCH SET m.value = '${MODEL}'`,
     `MERGE (m:omw_meta {key: '${META_KEYS.createdAt}'}) ON CREATE SET m.value = '${T0}' ON MATCH SET m.value = '${T0}'`,
-  ]
+  )
+  return rows
 }
 
 /** v1 旧库：三张表都是旧列形态，并写入一行数据（迁移必须保住它）。 */
-function v1Statements(version = '1'): string[] {
+function v1Statements(version: string | null = '1'): string[] {
   return [
     V1_MEMORY_TABLE,
     V1_L0_TABLE,
@@ -163,6 +168,16 @@ async function readMeta(connection: lbug.Connection): Promise<Map<string, string
   return new Map(rows.map((row) => [String(row.key), String(row.value)]))
 }
 
+/** 新列的 BOOL 缺省：AC:1053 逐字要求 `DEFAULT false`（不是 NULL）。 */
+async function degradedFlag(connection: lbug.Connection, id: string): Promise<unknown> {
+  const rows = await queryRows(
+    connection,
+    'MATCH (m:memory {id: $id}) RETURN m.evidence_degraded AS flag',
+    { id },
+  )
+  return rows[0]?.flag
+}
+
 afterAll(cleanupTempDirs)
 
 describe('矩阵行 1：全新空库 bootstrap', () => {
@@ -187,6 +202,10 @@ describe('矩阵行 1：全新空库 bootstrap', () => {
 
     // bootstrap 不备份：备份只在「旧库升级」这条有回滚需求的路径上产生。
     expect(await backupFiles(dbPath)).toEqual([])
+
+    // AC:1053 逐字要求 DEFAULT false：新建节点不写该列时读到 false，不是 NULL。
+    const created = await store.upsertMemory({ layer: 'L1', text: '默认值验证' })
+    expect(await degradedFlag(store.connection, created.id)).toBe(false)
     await store.close()
   }, 30_000)
 })
@@ -222,6 +241,10 @@ describe('矩阵行 2：v1 旧库自动升级', () => {
     expect((backupDump.memoryColumns as string[]).length).toBe(15)
     expect((backupDump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('1')
     expect(backupDump.hasMigrationTable).toBe(false)
+
+    // ALTER 也要带 DEFAULT false（AC:1053 的两处之一）：迁移后新写入的节点读回 false。
+    const created = await store.upsertMemory({ layer: 'L1', text: '迁移后默认值验证' })
+    expect(await degradedFlag(store.connection, created.id)).toBe(false)
 
     await store.close()
   }, 60_000)
@@ -332,5 +355,51 @@ describe('矩阵行 6：备份创建失败', () => {
     await backend.close(database, connection)
   }, 60_000)
 })
+
+describe('FIX-3：bootstrap 判据（版本键缺失 ≠ 新库）', () => {
+  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 2', async () => {
+    const dir = await makeTempDir('omw-migr-noversion-')
+    const dbPath = resolveMemoryDbPath(dir)
+    // 冻结的 v1 表形态，但**不写** schema_version（旧库的极端形态）。
+    runChild('create', dbPath, v1Statements(null))
+
+    const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('2')
+    expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
+    const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
+    expect(applied.map((row) => Number(row.v))).toEqual([2])
+    // 关键差异：走的是升级路径 ⇒ 备份文件名里的 fromVersion 是 0，而不是「不备份」。
+    const backups = await backupFiles(dbPath)
+    expect(backups).toHaveLength(1)
+    expect(backups[0]).toMatch(/^lbug\.db\.bak-0-\d+-\d+$/)
+    await store.close()
+  }, 60_000)
+
+  it('版本记录=2 但 memory 表缺失 ⇒ schema_mismatch（不隐式重建）', async () => {
+    const dir = await makeTempDir('omw-migr-corrupt-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, [
+      createMetaTableStatement(),
+      `MERGE (m:omw_meta {key: '${META_KEYS.schemaVersion}'}) ON CREATE SET m.value = '2' ON MATCH SET m.value = '2'`,
+      `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'}) ON CREATE SET m.value = '${DIM}' ON MATCH SET m.value = '${DIM}'`,
+    ])
+
+    const backend = loadStorageBackend()
+    const database = backend.createDatabase(dbPath, false)
+    const connection = await backend.createConnection(database)
+    await backend.loadExtensions(connection)
+
+    // 直接调迁移运行器：openMemoryDatabase 会在更早的 verifyExistingSchema 就拒绝，测不到这条。
+    await expect(migrateDatabase(connection, { dbPath }))
+      .rejects.toMatchObject({ code: 'schema_mismatch' })
+    await expect(migrateDatabase(connection, { dbPath }))
+      .rejects.toThrow(/表不存在.*损坏|损坏.*表不存在/s)
+    // 没有新建任何表：拒绝发生在 DDL 之前。
+    await expect(queryRows(connection, `CALL table_info('${SCHEMA_MIGRATION_TABLE}') RETURN name`))
+      .rejects.toThrow(/does not exist/i)
+    await backend.close(database, connection)
+  }, 60_000)
+})
+
 
 

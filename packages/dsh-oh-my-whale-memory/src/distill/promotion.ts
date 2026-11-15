@@ -42,7 +42,8 @@ import { checkReachableToL0, checkRefReachableToL0 } from '../db/eii.js'
 import { memoryNodeId, uuid5 } from '../db/id.js'
 import { getMemoryById, type MemoryDetail } from '../db/memory.js'
 import { queryRows } from '../db/rows.js'
-import { GENERATION_LOG_TABLE, L0_RAW_TABLE, l0EvidencePredicate } from '../db/schema.js'
+import { schemaColumnPresence, type SchemaColumnPresence } from '../db/column-presence.js'
+import { GENERATION_LOG_TABLE, L0_RAW_TABLE, l0EvidencePredicate, l0RawTextPredicate } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
@@ -153,14 +154,17 @@ class L2GateFailure extends Error {
 /**
  * 存活 L0 计数：UNWIND 后 MATCH 会丢掉未命中的 ref，故命中数即存活数（并集已去重）。
  * Story 4.2：谓词收敛为 `schema.ts` 的 `l0EvidencePredicate`（redact 墓碑不再是「存活 L0」，
- * 判据③ 的 support 也不该把已抹除的证据算成支撑）。
+ * 判据③ 的 support 也不该把已抹除的证据算成支撑）；旧库缺 `redacted_at` 列时退化为原谓词
+ * （0.22.3 对未定义属性直接抛 binder 异常，必须按 `schemaColumnPresence` 选形态）。
  */
-const LIVE_L0_COUNT_STATEMENT = [
-  'UNWIND $refs AS ref',
-  'MATCH (l:' + L0_RAW_TABLE + ' {id: ref})',
-  'WHERE ' + l0EvidencePredicate('l'),
-  'RETURN count(DISTINCT l.id) AS live',
-].join('\n')
+function liveL0CountStatement(presence: SchemaColumnPresence): string {
+  return [
+    'UNWIND $refs AS ref',
+    'MATCH (l:' + L0_RAW_TABLE + ' {id: ref})',
+    'WHERE ' + (presence.redactedAt ? l0EvidencePredicate('l') : l0RawTextPredicate('l')),
+    'RETURN count(DISTINCT l.id) AS live',
+  ].join('\n')
+}
 
 /** gate-fail 行存在性点查（确定性 id ⇒ O(1) 幂等，崩溃重放不撞主键）。 */
 const GATE_FAIL_EXISTS_STATEMENT =
@@ -169,14 +173,18 @@ const GATE_FAIL_EXISTS_STATEMENT =
 /**
  * 判据③ support：候选 source_refs[] 在 L0 命中且非墓碑的条数（U16 口径）。
  * L2 的 ref 是直接前驱 L1 ⇒ 取各 L1 的 source_refs（L0 id 集）并集去重后计数（brief §2.4）。
+ *
+ * 导出供测试直接钉住「redact 过的 inline 墓碑不进存活计数」（Story 4.2 评审 FIX-4）：
+ * 这是质量门里唯一能观察墓碑谓词的地方，走整条 promote 流程成本过高。
  */
-async function countSupport(
+export async function countSupport(
   connection: lbug.Connection,
   sources: readonly MemoryDetail[],
 ): Promise<number> {
   const refs = [...new Set(sources.flatMap((node) => node.sourceRefs.map(String)))]
   if (refs.length === 0) return 0
-  const rows = await queryRows(connection, LIVE_L0_COUNT_STATEMENT, { refs })
+  const presence = await schemaColumnPresence(connection)
+  const rows = await queryRows(connection, liveL0CountStatement(presence), { refs })
   return Number(rows[0]?.live ?? 0)
 }
 

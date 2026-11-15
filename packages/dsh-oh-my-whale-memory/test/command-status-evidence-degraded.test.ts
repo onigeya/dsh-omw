@@ -140,7 +140,9 @@ function createLegacyDb(dbPath: string): void {
     'CREATE NODE TABLE IF NOT EXISTS memory(id STRING, layer STRING, kind STRING, priority INT64, text STRING, ' +
     `embedding FLOAT[${DIM}], valid_at STRING, recorded_at STRING, invalid_at STRING, expired_at STRING, ` +
     'source_refs STRING[], embedding_model_id STRING, embedding_dim INT64, parent_id STRING, support INT64, PRIMARY KEY(id))',
-    createL0RawTableStatement(),
+    // 冻结的 v1 l0_raw（4 列）：不用 createL0RawTableStatement()，它自带 Story 4.2 的两列，
+    // 会让「旧库缺列」这条轴悄悄失效（评审 FIX-1 的夹具要求）。
+    'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, PRIMARY KEY(id))',
     `MERGE (m:omw_meta {key: '${META_KEYS.schemaVersion}'}) ON CREATE SET m.value = '1' ON MATCH SET m.value = '1'`,
     `MERGE (m:omw_meta {key: '${META_KEYS.embeddingDim}'}) ON CREATE SET m.value = '${DIM}' ON MATCH SET m.value = '${DIM}'`,
     `MERGE (m:omw_meta {key: '${META_KEYS.embeddingModelId}'}) ON CREATE SET m.value = '${MODEL}' ON MATCH SET m.value = '${MODEL}'`,

@@ -75,7 +75,8 @@ export function createMemoryTableStatement(dim: number): string {
     '  embedding_dim INT64,',
     '  parent_id STRING,',
     '  support INT64,',
-    '  evidence_degraded BOOL,',
+    // AC:1053 逐字要求 DEFAULT false（0.22.3 的 CREATE 与 ALTER 都接受 DEFAULT，实测）。
+    '  evidence_degraded BOOL DEFAULT false,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
@@ -100,7 +101,13 @@ export function evidenceDegradedPredicate(alias: string): string {
   return `${alias}.${EVIDENCE_DEGRADED_COLUMN} = true`
 }
 
-/** 未降级（旧库缺列时该属性读出 NULL，同样落进这一支）。 */
+/**
+ * 未降级：NULL（迁移前写入的旧行）或 false（`DEFAULT false` 之后写入的行）。
+ *
+ * ⚠️ 只能在**确认该列存在**的连接上使用：0.22.3 对未定义属性不是读成 NULL，而是 binder
+ * 直接抛 `Cannot find property evidence_degraded`。调用方必须先经
+ * `db/column-presence.ts` 的 `schemaColumnPresence()` 判列，缺列时用不含本列的旧谓词。
+ */
 export function notEvidenceDegradedPredicate(alias: string): string {
   return `(${alias}.${EVIDENCE_DEGRADED_COLUMN} IS NULL OR ${alias}.${EVIDENCE_DEGRADED_COLUMN} = false)`
 }
@@ -110,11 +117,18 @@ export function notEvidenceDegradedPredicate(alias: string): string {
  *
  * 墓碑判据从 AD-36 的「指针行 `raw_text IS NULL` 且 `seq IS NULL`」扩展：redact 过的
  * inline 行保留 `raw_text` 列但落墓碑文本，必须靠 `redacted_at IS NULL` 才能与真实原文区分。
- * 对旧库（无 `redacted_at` 列）该属性恒 NULL ⇒ 谓词退化成原来的 `raw_text IS NOT NULL`，
- * 只读旧库不因缺列而失效。
+ *
+ * ⚠️ 0.22.3 对未定义属性直接抛 binder 异常（实测 `Invalid struct field name: redacted_at`），
+ * 不会退化成 NULL。所以本谓词只用于**已确认有该列**的连接；v1 旧库（只读、未迁移）请改用
+ * {@link l0RawTextPredicate}，选择逻辑在 `db/column-presence.ts`。
  */
 export function l0EvidencePredicate(alias: string): string {
   return `${alias}.raw_text IS NOT NULL AND ${alias}.${REDACTED_AT_COLUMN} IS NULL`
+}
+
+/** 缺 `redacted_at` 列的旧库用的 L0 存活谓词（等价 Story 4.2 之前的行为）。 */
+export function l0RawTextPredicate(alias: string): string {
+  return `${alias}.raw_text IS NOT NULL`
 }
 
 /**

@@ -19,7 +19,7 @@
  * 凭据纪律（NFR9）：墓碑文本只含 L0 id 与时刻；`redacted_by` 只放 actor 枚举。
  */
 import type * as lbug from '@ladybugdb/core'
-import { isMissingTableError } from './errors.js'
+import { schemaColumnPresence } from './column-presence.js'
 import { queryRows } from './rows.js'
 import {
   EVIDENCE_CLOSURE_DEPTH,
@@ -106,11 +106,19 @@ export interface MarkEvidenceDegradedOptions {
   readonly now: string
 }
 
-const DEGRADED_CANDIDATES = [
-  'MATCH p=(l:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ')',
-  'WHERE l.id IN $ids AND ' + currentSnapshotPredicate('m') + ' AND ' + notEvidenceDegradedPredicate('m'),
-  'RETURN DISTINCT m.id AS id',
-].join('\n')
+/**
+ * 降级候选：证据链经过这些 L0 的有效记忆。
+ * 「尚未降级」这半句只在列存在时拼进去——0.22.3 缺列直接 binder 报错（不是 NULL）。
+ */
+function degradedCandidatesStatement(hasDegradedColumn: boolean): string {
+  const where = [currentSnapshotPredicate('m')]
+  if (hasDegradedColumn) where.push(notEvidenceDegradedPredicate('m'))
+  return [
+    'MATCH p=(l:' + L0_RAW_TABLE + ')-[:' + EVIDENCE_TABLE + '*1..' + EVIDENCE_CLOSURE_DEPTH + ']->(m:' + MEMORY_TABLE + ')',
+    'WHERE l.id IN $ids AND ' + where.join(' AND '),
+    'RETURN DISTINCT m.id AS id',
+  ].join('\n')
+}
 
 const READ_DEGRADED_FLAG = [
   'MATCH (m:' + MEMORY_TABLE + ' {id: $id})',
@@ -130,7 +138,6 @@ const READ_EFFECTIVE_DEGRADED = [
   'RETURN count(m) AS c',
 ].join('\n')
 
-const MEMORY_COLUMNS_PROBE = `CALL table_info('${MEMORY_TABLE}') RETURN name`
 
 /**
  * 标记证据降级，返回**本次新标**的条数（重放时 0，不虚报）。
@@ -144,7 +151,8 @@ export async function markEvidenceDegraded(
 ): Promise<number> {
   const ids = new Set<string>()
   if (options.l0Ids.length > 0) {
-    const rows = await queryRows(connection, DEGRADED_CANDIDATES, {
+    const presence = await schemaColumnPresence(connection)
+    const rows = await queryRows(connection, degradedCandidatesStatement(presence.evidenceDegraded), {
       ids: [...options.l0Ids],
       now: options.now,
     })
@@ -169,13 +177,9 @@ export async function countEvidenceDegraded(
   connection: lbug.Connection,
   now: string,
 ): Promise<number | null> {
-  try {
-    const columns = await queryRows(connection, MEMORY_COLUMNS_PROBE)
-    if (!columns.some((row) => String(row.name) === EVIDENCE_DEGRADED_COLUMN)) return null
-  } catch (error) {
-    if (isMissingTableError(error)) return null
-    throw error
-  }
+  const presence = await schemaColumnPresence(connection)
+  if (!presence.evidenceDegraded) return null
   const rows = await queryRows(connection, READ_EFFECTIVE_DEGRADED, { now })
   return Number(rows[0]?.c ?? 0)
 }
+
