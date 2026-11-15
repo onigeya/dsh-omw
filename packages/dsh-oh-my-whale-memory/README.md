@@ -33,6 +33,43 @@ Git for Windows 的 `C:\Program Files\Git\mingw64\bin` 带这两个 DLL，任何
 
 DSH 宿主进程也必须继承这个 PATH——插件运行期 `INSTALL/LOAD vector|fts` 同样依赖它。
 
+## 安装与分发（安装期构建）
+
+`lib/` 不入库（根 `.gitignore` 只忽略 `packages/*/lib/`）。产物由包内 `prepare` 在**打包期/安装期**从 `src/`
+重建：`prepare` = `pnpm run build` = `tsdown` 出 `lib/index.js` + `tsc -p tsconfig.build.json` 出 `lib/types`。
+它只依赖本包自己的 `devDependencies` 与 `tsdown.config.ts` / `tsconfig.build.json`，不引用工作区其他包——
+这是 git 安装能在 pnpm 的临时目录里独立构建成功的前提（已实测）。
+
+| 形态 | 命令 | 谁触发构建 |
+|------|------|-----------|
+| npm 包 | `dsh plugin add dsh-oh-my-whale` | `pnpm publish` 时 `prepare`，tarball 自带 `lib/` |
+| 本地 tarball | `pnpm pack` 后 `dsh plugin add ./dsh-oh-my-whale-0.1.0.tgz` | `pnpm pack` 时 `prepare`（`pnpm pack:smoke` 断言 tarball 含 `lib/index.js`） |
+| git 源（目前仅 memory 包） | `dsh plugin add github:<owner>/dsh-omw#path:/packages/dsh-oh-my-whale-memory` | pnpm 安装期跑包内 `prepare` |
+| 本地目录 | `dsh plugin add D:\…\packages\dsh-oh-my-whale-memory` | **不构建**：pnpm 只把目录 junction 进 `node_modules`，得先在仓库跑 `pnpm -r build`（实测 `file:` 安装前后 `lib/` 状态不变） |
+
+`prepare` 同时覆盖 `pnpm pack` 与 `pnpm publish`，所以不再单独写 `prepack`（两个都写会构建两遍）。
+
+### git 安装要放行两条 allowBuilds
+
+pnpm ≥10 默认拒绝执行依赖的构建脚本，且键名是**完整 spec**（含 `#<sha>` 与 `&path:`），不是包名。
+第一次 `add` 会失败并原样打印键名，复制进 profile 的 `pnpm-workspace.yaml` 再重跑：
+
+```yaml
+allowBuilds:
+  # ① git 包自身要跑 prepare
+  "dsh-oh-my-whale-memory@git+file:///…/omw-clone#944b581&path:/packages/dsh-oh-my-whale-memory": true
+  # ② @ladybugdb/core 带 install 脚本（拷贝原生 addon），缺它会 ERR_PNPM_IGNORED_BUILDS
+  "@ladybugdb/core": true
+```
+
+放行等于允许在安装期执行该包代码；用 `#<sha>` 钉住 commit，只装信任的源。
+
+**限制**：bundle 包 `dsh-oh-my-whale` 用 `dependencies: { "dsh-oh-my-whale-memory": "workspace:*" }`
+指向 memory 包，pnpm 在 git 安装时不加载工作区，无法解析 `workspace:` 协议（实测报
+`Cannot resolve package from workspace because workspace packages were not loaded into the resolver`），
+所以 git 源目前只能装 memory 包。装 bundle 走 npm 或 tarball：`pnpm pack` 会把 `workspace:*`
+重写成精确版本 `0.1.0`，两个包的版本因此天然对齐。
+
 ## Config（Story 1.3 / FR-18）
 
 Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
