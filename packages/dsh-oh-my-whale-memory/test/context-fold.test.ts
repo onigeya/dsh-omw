@@ -10,6 +10,7 @@ import {
   estimateTokens,
   foldIfOversized,
   shouldFoldInReadonly,
+  foldToolResult,
 } from '../src/context/fold'
 import { parseHandle } from '../src/context/handle'
 
@@ -86,5 +87,22 @@ describe('readOnly 不折叠（INV-7）', () => {
   it('只读实例 ⇒ shouldFoldInReadonly=false', () => {
     expect(shouldFoldInReadonly(true)).toBe(false)
     expect(shouldFoldInReadonly(false)).toBe(true)
+  })
+
+  it('只读实例：超阈值也原样返回，且**不调用** write（INV-7 可执行断言）', async () => {
+    const write = makeWriter()
+    const text = 'w'.repeat(10_000)
+    const outcome = await foldToolResult({ text, sessionId: 's-1', seq: 1, thresholdTokens: 2000, write, readonly: true })
+    expect(outcome.folded).toBe(false)
+    expect(outcome.text).toBe(text)
+    expect(outcome.note).toBe('readonly')
+    expect(write).not.toHaveBeenCalled()
+  })
+
+  it('非只读：走正常折叠路径（同一入口）', async () => {
+    const write = makeWriter('h-rw')
+    const outcome = await foldToolResult({ text: 'v'.repeat(10_000), sessionId: 's-1', seq: 2, thresholdTokens: 2000, write, readonly: false })
+    expect(outcome.folded).toBe(true)
+    expect(outcome.handle).toBe('h-rw')
   })
 })

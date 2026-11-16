@@ -81,3 +81,16 @@ export async function foldIfOversized(input: FoldInput): Promise<FoldOutcome> {
 export function shouldFoldInReadonly(readonly: boolean): boolean {
   return !readonly
 }
+
+/**
+ * 工具结果的折叠入口（带 readOnly 判定）：只读实例**原样返回、不调用 write**（INV-7 可执行断言）。
+ * 调用方（各工具）只需传 `readonly` 与 `write`，不必各自重复这条 if。
+ */
+export async function foldToolResult(
+  input: FoldInput & { readonly readonly: boolean },
+): Promise<FoldOutcome> {
+  if (!shouldFoldInReadonly(input.readonly)) {
+    return { text: input.text, folded: false, handle: null, note: 'readonly' }
+  }
+  return foldIfOversized(input)
+}
