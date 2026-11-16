@@ -95,8 +95,8 @@ embedding:
 | `/memory list [query]` | 列最近的记忆（字面包含匹配，默认 20 条） | 已实现 |
 | `/memory remember [--kind=..] [--priority=..] <内容>` | 手动写一条 L1 记忆 | 已实现 |
 | `/memory forget <id> [--redact]` | 软删除一条记忆并级联作废其上层；`--redact` 额外把证据链上的 L0 原文替换为墓碑并标 `evidence_degraded` | 已实现 |
-| `/memory resolve <id>` | 处理 `await-confirmation` 待裁决冲突（接受新值 / 保留并存） | 计划中（未实现，属 Epic 7） |
-| `/memory strategy` | 列策略候选区与采纳门结果 | 计划中（未实现，属 Epic 7） |
+| `/memory resolve <id> --accept\|--keep` | 处理 persona 冲突的待裁决记录：`--accept` 接受新值（旧值置 `invalid_at`）、`--keep` 保留并存；`resolution_source` 记 `user`，与版本写入同事务 | 已实现 |
+| `/memory strategy` | 列策略候选区与采纳门结果（候选数 / 过门 / 未过门 / 过期 + 三项配置） | 已实现 |
 
 ## 模型工具
 
@@ -109,9 +109,9 @@ embedding:
 | `memory_related` | 从一条记忆出发按图遍历相邻记忆 | 已实现 |
 | `memory_forget` | 返回 `confirmation_required` 与待删摘要（库不可用/只读/查不到时返回 canonical `failed` 信封）；**Agent 侧没有执行通道**，确认必须由用户的 `/memory forget` 完成 | 已实现 |
 | `memory_status` | 状态的结构化形态（计数而非文案） | 计划中（未实现） |
-| `memory_expand` | 把折叠句柄 `[omw:handle=<id> ~<n> tokens]` 逐字还原为完整内容 | 计划中（未实现，属 Epic 8） |
+| `memory_expand` | 把折叠句柄 `[omw:handle=<id> ~<n> tokens]` 逐字还原为完整内容（100% 还原，不截断；句柄不存在/已失效/跨会话时返回 `restored:false` 与错误码，不抛异常） | 已实现 |
 
-召回类工具（`memory_recall` + `memory_related`，将来加 `memory_expand`）共享**每回合最多 3 次**的配额。
+召回类工具（`memory_recall` + `memory_related` + `memory_expand`）共享**每回合最多 3 次**的配额；`memory_expand` 的入参非法或库未就绪时**不消耗**配额。
 
 ## 只读模式与降级行为
 

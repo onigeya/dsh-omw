@@ -95,8 +95,8 @@ The single source of truth is PRD §11.2 — 9 commands. The command is `memory`
 | `/memory list [query]` | List recent memories (literal substring match, 20 by default) | Implemented |
 | `/memory remember [--kind=..] [--priority=..] <content>` | Manually write one L1 memory | Implemented |
 | `/memory forget <id> [--redact]` | Soft-delete a memory and cascade-invalidate its dependents; `--redact` also replaces the L0 raw text on its evidence chain with a tombstone and marks `evidence_degraded` | Implemented |
-| `/memory resolve <id>` | Resolve an `await-confirmation` conflict (accept new value / keep both) | Planned (not implemented, Epic 7) |
-| `/memory strategy` | List strategy candidates and adoption-gate results | Planned (not implemented, Epic 7) |
+| `/memory resolve <id> --accept\|--keep` | Resolve a pending persona conflict: `--accept` takes the new value (old gets `invalid_at`), `--keep` keeps both; `resolution_source` is recorded as `user`, in the same transaction as the version write | Implemented |
+| `/memory strategy` | List strategy candidates and adoption-gate results (candidates / adopted / rejected / expired plus the three gate settings) | Implemented |
 
 ## Model tools
 
@@ -109,9 +109,9 @@ The single source of truth is PRD §11.1 — 6 tools, callable by the agent.
 | `memory_related` | Graph traversal from one memory to its neighbours | Implemented |
 | `memory_forget` | Returns `confirmation_required` plus a summary (a canonical `failed` envelope when the database is unavailable, read-only, or the id is unknown); **there is no agent-side execution path** — confirmation happens through the user's `/memory forget` | Implemented |
 | `memory_status` | Structured form of status (counts instead of prose) | Planned (not implemented) |
-| `memory_expand` | Expand a collapsed handle `[omw:handle=<id> ~<n> tokens]` back to the full content, byte-for-byte | Planned (not implemented, Epic 8) |
+| `memory_expand` | Expand a folded handle `[omw:handle=<id> ~<n> tokens]` back to the verbatim content (100% restore, no truncation; unknown/expired/cross-session handles return `restored:false` with an error code and never throw) | Implemented |
 
-Recall tools (`memory_recall` + `memory_related`, plus `memory_expand` later) share a **3 calls per turn** quota.
+Recall tools (`memory_recall` + `memory_related` + `memory_expand`) share a **3 calls per turn** quota; `memory_expand` does **not** consume it when the argument is invalid or the database is not ready.
 
 ## Read-only mode and degradation
 
