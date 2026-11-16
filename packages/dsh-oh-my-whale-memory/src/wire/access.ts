@@ -11,6 +11,7 @@ import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
 import { collectHealthMetrics } from '../db/health.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
+import { countPendingDecisions, listPendingDecisions, resolvePendingDecision as resolvePendingDecisionInDb } from '../db/pending.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
   countMemoriesByLayer,
@@ -52,6 +53,8 @@ export interface MemoryAccess {
   readonly getStatus: MemoryCommandDependencies['getStatus']
   /** Story 4.1：软删除 + EII 定序级联（写路径，只读实例必须先拒）。 */
   readonly forgetMemory: MemoryCommandDependencies['forgetMemory']
+  /** Story 7.1：裁决待裁决冲突（写路径，只读实例先拒）。 */
+  readonly resolvePendingDecision: MemoryCommandDependencies['resolvePendingDecision']
 }
 
 /** 库未就绪的统一文案：写入与读取各一句，逐字保留命令层既有输出。 */
@@ -100,6 +103,14 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       id,
       forgetOptions?.redact === true ? { redact: { actor: 'user' } } : {},
     )
+  }
+
+  // Story 7.1：裁决同样是写路径（与 forget 同一只读守卫与同一句文案）。
+  const resolvePendingDecision: MemoryAccess['resolvePendingDecision'] = async (id, resolution) => {
+    const database = options.getDb()
+    if (!database) throw new Error(DB_NOT_READY_WRITE)
+    if (database.readonly) throw createReadonlyModeError(database.dbPath)
+    return resolvePendingDecisionInDb(database.connection, id, resolution)
   }
 
   // Story 1.9：只读层计数 + 本实例运行态（readonly/reason）+ 配置态（apply 时 resolve 的
@@ -158,11 +169,14 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 4.3：健康指标（积压 / 最近精炼完成）。collectHealthMetrics 自身对每个采集点
       // best-effort，异常与超预算都收敛成该点 `n/a`，绝不让 status 失败（AC:1105-1107）。
       health: await collectHealthMetrics({ connection }),
+      // Story 7.1 / D-4：待裁决冲突（条数 + 最新 5 条清单）；表缺失时 count 为 null = 未知。
+      pendingConflicts: await countPendingDecisions(connection),
+      pendingConflictEntries: await listPendingDecisions(connection, { limit: 5 }),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),
     }
   }
 
-  return { readConnection, writeInbox, listMemories, getMemoryById, getStatus, forgetMemory }
+  return { readConnection, writeInbox, listMemories, getMemoryById, getStatus, forgetMemory, resolvePendingDecision }
 }

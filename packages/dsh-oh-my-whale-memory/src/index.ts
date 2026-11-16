@@ -206,6 +206,8 @@ export async function apply(
     relatedMemories: retrieval.relatedMemories,
     // Story 4.1：遗忘（写路径；只读实例在 access 里先拒）。
     forgetMemory: access.forgetMemory,
+    // Story 7.1：裁决待裁决冲突（写路径；只读实例在 access 里先拒）。
+    resolvePendingDecision: access.resolvePendingDecision,
   }))
   // Story 3.1：每轮召回配额的双点重置（只读实例也提供召回，故在只读早退之前注册）；
   // `ctx.on` 自动挂 disposer，不新增 ctx.effect（entry-exports 钉死 closer 数）。

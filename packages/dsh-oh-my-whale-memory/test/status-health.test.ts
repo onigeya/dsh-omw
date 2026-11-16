@@ -95,7 +95,7 @@ describe('矩阵行 2/3/6：积压时长取较大者，精炼时刻逐字回显'
 })
 
 describe('矩阵行 4：空库的健康行是 n/a 形态，不是 0', () => {
-  it('全新库 → 无积压 / 从未精炼 / 两项 Epic 7 占位；计数全 0', async () => {
+  it('全新库 → 无积压 / 从未精炼 / pending_conflicts 真实 0、strategy_gate 仍是占位；计数全 0', async () => {
     const fixture = await openFixture('omw-status-health-empty-')
     try {
       const result = await fixture.handler({ rawInput: ' status' })
@@ -105,7 +105,7 @@ describe('矩阵行 4：空库的健康行是 n/a 形态，不是 0', () => {
       expect(result.text).toContain('inbox_backlog: n/a（无积压）')
       expect(result.text).toContain('last_refine_at: n/a（从未完成精炼）')
       expect(result.text).toContain('rerank_latency: n/a (v1 无精排)')
-      expect(result.text).toContain('pending_conflicts: n/a（Epic 7 真源在 Story 7.1）')
+      expect(result.text).toContain('pending_conflicts: 0')
       expect(result.text).toContain('strategy_gate: n/a（Epic 7 真源在 Story 7.3）')
       expect(result.text).not.toContain('rerank_latency: 0ms')
     } finally {

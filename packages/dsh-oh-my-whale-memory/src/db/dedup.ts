@@ -38,6 +38,7 @@
  * 待首周冒烟用真实语料标定，改动只允许动本文件的常量。
  */
 import {
+  AWAIT_CONFIRMATION_ACTION,
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
   INVALIDATE_VERSION_ACTION,
@@ -50,6 +51,7 @@ import {
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
+import { insertPendingDecision, PERSONA_CONFLICT_POLICY } from './pending.js'
 import {
   DEFAULT_MEMORY_KIND,
   DEFAULT_MEMORY_PRIORITY,
@@ -89,6 +91,8 @@ export type DedupOutcome =
   | 'fingerprint-merge'
   | 'semantic-merge'
   | 'version-invalidated'
+  /** Story 7.1：命中人设记忆的冲突 ⇒ 进待裁决集，本次不写节点、不动旧值。 */
+  | 'await-confirmation'
   | 'created'
 
 export interface DedupWriteResult {
@@ -154,7 +158,8 @@ function annCandidateStatement(withModelFilter: boolean): string {
     '  AND ' + currentSnapshotPredicate('node'),
     ...(withModelFilter ? ['  AND node.embedding_model_id = $model_id'] : []),
     '  AND distance <= $max_distance',
-    'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at',
+    'RETURN node.id AS id, node.source_refs AS source_refs, node.valid_at AS valid_at,',
+    '  node.kind AS kind, node.priority AS priority',
     'ORDER BY distance',
   ].join('\n')
 }
@@ -193,6 +198,9 @@ interface DedupCandidate {
   /** 旧节点自身的 valid_at（评审 P3）：作废上界必须不早于它，否则造出倒置区间。 */
   validAt: string | null
   similarity: number
+  /** Story 7.1：旧节点的分类与优先级（判「是不是人设记忆」）。 */
+  kind: string
+  priority: number
 }
 
 /**
@@ -248,9 +256,69 @@ async function findSemanticCandidates(
       sourceRefs: toStringArray(row.source_refs),
       validAt: nullishString(row.valid_at),
       similarity: typeof sim === 'number' ? sim : Number(sim ?? 0),
+      kind: String(row.kind ?? ''),
+      priority: Number(row.priority ?? 0),
     })
   }
   return candidates
+}
+
+/**
+ * Story 7.1：人设记忆的冲突路由——不自动覆盖，落一条 await-confirmation 的 keyed 裁决 + 一条待裁决行。
+ *
+ * 判据（spec D-2）：命中的人设节点是 `kind='persona'` 或 `priority=-1`。真正的「逻辑不相容」需要极性/本体
+ *（v2 / Epic 9），这里用「同一话题的语义近邻」作为可实施的最小判据：误判的代价是多一条待裁决记录，
+ * 用户 `--keep` 即可，不会丢数据。
+ */
+async function routePersonaConflict(
+  connection: MemoryConnection,
+  input: UpsertMemoryInput,
+  target: DedupCandidate,
+  sourceRefs: readonly string[],
+  nowIso: string,
+): Promise<DedupWriteResult> {
+  const layer = input.layer.trim()
+  const newId = memoryNodeId(layer, input.text)
+  const judgeKey = buildJudgeKey(PERSONA_CONFLICT_POLICY, 'await-confirmation', target.id, newId)
+  await insertKeyedDecision(connection, {
+    judgeKey,
+    newId,
+    oldId: target.id,
+    action: 'await-confirmation',
+    policy: PERSONA_CONFLICT_POLICY,
+    l0Refs: sourceRefs,
+    resolutionSource: 'auto',
+    // 不写 `write_pending: true`：persona 冲突**没有发布点**（本次不写节点），
+    // 该标记找不到任何会把它翻回 false 的路径，写 true 只会在恢复消费者上线后被当成「待重放」（评审 R71）。
+    ts: nowIso,
+  })
+  await insertPendingDecision(connection, {
+    id: judgeKey,
+    oldId: target.id,
+    newId,
+    payload: input.text,
+    kind: input.kind ?? DEFAULT_MEMORY_KIND,
+    priority: Math.trunc(input.priority ?? DEFAULT_MEMORY_PRIORITY),
+    actor: input.actor ?? 'system',
+    createdAt: nowIso,
+  })
+  await auditWriter(connection, {
+    recordedAt: nowIso,
+    actor: input.actor ?? 'system',
+    kind: CAPTURE_KIND,
+    policy: PERSONA_CONFLICT_POLICY,
+    l0Refs: sourceRefs,
+  })({
+    action: AWAIT_CONFIRMATION_ACTION,
+    outcome: 'uncertain',
+    reason: `persona-conflict old=${target.id} pending=${judgeKey}`,
+  })
+  return { id: newId, recordedAt: nowIso, outcome: 'await-confirmation' }
+}
+
+/** 人设守卫：`kind='persona'` 或 `priority=-1`（FR-20 的恒置顶两类）。 */
+function isPersonaCandidate(candidate: DedupCandidate): boolean {
+  return candidate.kind === 'persona' || candidate.priority === -1
 }
 
 /** 两条 source_refs 是否有非空交集（U2 的亲缘判据②）。 */
@@ -468,6 +536,10 @@ export async function writeDeduplicatedMemory(
       ? undefined
       : duplicates.reduce((best, candidate) => (candidate.similarity > best.similarity ? candidate : best))
   if (duplicate !== undefined) {
+    // Story 7.1：命中人设记忆 ⇒ 转待裁决，不自动合并。
+    if (isPersonaCandidate(duplicate)) {
+      return await routePersonaConflict(connection, input, duplicate, sourceRefs, nowIso)
+    }
     await audit(
       MERGE_SEMANTIC_ACTION,
       'success',
@@ -492,6 +564,10 @@ export async function writeDeduplicatedMemory(
   }
   const oldVersion = versionHits[0]
   if (oldVersion !== undefined) {
+    // Story 7.1：旧版本是人设记忆 ⇒ 转待裁决（用户确认前旧值保持有效）。
+    if (isPersonaCandidate(oldVersion)) {
+      return await routePersonaConflict(connection, input, oldVersion, sourceRefs, nowIso)
+    }
     // X4（评审 P3）：候选谓词已排除 invalid_at / expired_at 非空的节点，旧版本此刻必无上界区间，
     // 所以 invalid_at 对齐触发事实的 valid_at；同时绝不早于旧节点自身 valid_at（EC-2 的
     // 倒置区间：2.5 复用本原语时可能传入更早的 validAt）。

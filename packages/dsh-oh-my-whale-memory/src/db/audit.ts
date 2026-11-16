@@ -69,6 +69,9 @@ export const REFINE_INBOX_ACTION = 'refine_inbox'
 /** 语义去重（路径②，Story 2.4 / U10）：向既有节点追加 source_refs，不新建节点。 */
 export const MERGE_SEMANTIC_ACTION = 'merge_semantic'
 
+/** 人设冲突转待裁决（Story 7.1 / FR-20、AD-18 的 await-confirmation 档）：本次不写节点，等用户裁决。 */
+export const AWAIT_CONFIRMATION_ACTION = 'await-confirmation'
+
 /** 版本作废（路径③，Story 2.4 / U10）：旧版本置 invalid_at、新节点记 parent_id。 */
 export const INVALIDATE_VERSION_ACTION = 'invalidate_version'
 
@@ -252,7 +255,10 @@ const SET_INVALIDATED_BY = [
 const AUDIT_GAP_STATEMENT = [
   'MATCH (m:' + MEMORY_TABLE + ')',
   '  WHERE m.invalid_at IS NOT NULL OR m.expired_at IS NOT NULL',
-  '  OPTIONAL MATCH (k:' + KEYED_DECISION_TABLE + ') WHERE k.old_id = m.id',
+  // Story 7.1：await-confirmation 是**中间态**（用户还没裁决），它不能替被作废节点作证，
+  // 否则一条永不结案的待裁决行会永久掩盖该节点将来任何漏账（评审 R71 第 4 条）。
+  '  OPTIONAL MATCH (k:' + KEYED_DECISION_TABLE + ')' +
+    "  WHERE k.old_id = m.id AND k.action <> 'await-confirmation'",
   '  WITH m, k WHERE k IS NULL',
   '  RETURN count(DISTINCT m) AS gap',
 ].join('\n')
