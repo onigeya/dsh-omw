@@ -164,7 +164,7 @@ describe('审计账本：同事务与只 append（AD-10 / AD-21）', () => {
 
 describe('失效因果与 keyed 裁决（AD-18 / AD-19）', () => {
   it('invalidated_by：同 (source, target) 键下追加触发 id 不覆盖，同触发重放幂等，反向键独立', async () => {
-    const judgeKey = buildJudgeKey('last-writer-wins', 'old-a', 'new-a')
+    const judgeKey = buildJudgeKey('last-writer-wins', 'supersede', 'old-a', 'new-a')
     await insertKeyedDecision(store.connection, {
       judgeKey, newId: 'new-a', oldId: 'old-a', action: 'supersede',
       policy: 'last-writer-wins', resolutionSource: 'auto', ts: TS,
@@ -183,16 +183,18 @@ describe('失效因果与 keyed 裁决（AD-18 / AD-19）', () => {
   })
 
   it('buildJudgeKey 与新旧 id 先后无关、对 policy 敏感；buildInvalidatedByKey 有向', () => {
-    const key = buildJudgeKey('last-writer-wins', 'old-1', 'new-1')
-    expect(buildJudgeKey('last-writer-wins', 'new-1', 'old-1')).toBe(key)
-    expect(buildJudgeKey('merge-policy', 'old-1', 'new-1')).not.toBe(key)
+    const key = buildJudgeKey('last-writer-wins', 'supersede', 'old-1', 'new-1')
+    expect(buildJudgeKey('last-writer-wins', 'supersede', 'new-1', 'old-1')).toBe(key)
+    expect(buildJudgeKey('merge-policy', 'supersede', 'old-1', 'new-1')).not.toBe(key)
+    // Story 5.4 / AC:1299-1301：同一节点对的 merge 与 supersede 必须不共键。
+    expect(buildJudgeKey('last-writer-wins', 'merge', 'old-1', 'new-1')).not.toBe(key)
     expect(key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
     expect(buildInvalidatedByKey('src', 'tgt')).toBe('src|tgt')
     expect(buildInvalidatedByKey('tgt', 'src')).toBe('tgt|src')
   })
 
   it('keyed 裁决幂等（MERGE 保留首次字段）、write_pending 翻转与待重放清单', async () => {
-    const judgeKey = buildJudgeKey('merge-policy', 'old-9', 'new-9')
+    const judgeKey = buildJudgeKey('merge-policy', 'merge', 'old-9', 'new-9')
     await insertKeyedDecision(store.connection, {
       judgeKey, newId: 'new-9', oldId: 'old-9', action: 'merge', policy: 'merge-policy',
       resolutionSource: 'auto', writePending: true, ts: TS,
@@ -228,7 +230,7 @@ describe('audit_gap 只读校验器（AD-21）', () => {
     await rows('MATCH (m:memory {id: $id}) SET m.invalid_at = $ts', { id: written.id, ts: TS })
     expect(await computeAuditGap(store.connection)).toBe((base ?? 0) + 1)
     await insertKeyedDecision(store.connection, {
-      judgeKey: buildJudgeKey('last-writer-wins', written.id, 'new-node'),
+      judgeKey: buildJudgeKey('last-writer-wins', 'supersede', written.id, 'new-node'),
       newId: 'new-node', oldId: written.id, action: 'supersede',
       policy: 'last-writer-wins', resolutionSource: 'review', ts: TS,
     })
@@ -257,7 +259,7 @@ describe('NFR9：记忆原文与凭据值绝不进账本', () => {
     const plaintext = '偏好：深色主题-' + randomUUID()
     const ref = 'msg-nfr9-' + randomUUID()
     await store.upsertMemory({ layer: 'L1', text: plaintext + secret, embedding: null, sourceRefs: [ref], actor: 'user' })
-    const judgeKey = buildJudgeKey('last-writer-wins', 'old-nfr9', 'new-nfr9')
+    const judgeKey = buildJudgeKey('last-writer-wins', 'supersede', 'old-nfr9', 'new-nfr9')
     await insertKeyedDecision(store.connection, {
       judgeKey, newId: 'new-nfr9', oldId: 'old-nfr9', action: 'supersede',
       policy: 'last-writer-wins', l0Refs: [ref], resolutionSource: 'auto', ts: TS,

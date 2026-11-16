@@ -13,7 +13,7 @@ import {
   REFINE_INBOX_ACTION,
   REFINE_KIND,
   WRITE_EVIDENCE_SKIPPED_ACTION,
-  insertGenerationLog,
+  auditWriter,
   type GenerationLogOutcome,
 } from '../db/audit.js'
 import { memoryNodeId } from '../db/id.js'
@@ -146,15 +146,12 @@ function insertRefineAudit(
    */
   action: string = REFINE_INBOX_ACTION,
 ): Promise<string> {
-  return insertGenerationLog(connection, {
+  return auditWriter(connection, {
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
-    action,
-    outcome,
-    reason,
     l0Refs: [itemId],
-  })
+  })({ action, outcome, reason })
 }
 
 /** 失败审计行：必须另开事务写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */

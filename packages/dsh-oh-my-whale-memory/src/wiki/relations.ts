@@ -28,7 +28,7 @@ import {
   SKIP_RELATED_ACTION,
   WRITE_EVIDENCE_SKIPPED_ACTION,
   WRITE_RELATED_ACTION,
-  insertGenerationLog,
+  auditWriter,
 } from '../db/audit.js'
 import { readPinnedEmbeddingDim } from '../db/dedup.js'
 import { writeRelatedEdges, type RelatedEdgeInput } from '../db/edges.js'
@@ -354,16 +354,13 @@ async function insertRelationAudit(
   reason: string | null,
   now: string,
 ): Promise<void> {
-  await insertGenerationLog(connection, {
+  await auditWriter(connection, {
     recordedAt: now,
     actor: 'system',
     kind: CAPTURE_KIND,
-    action,
     policy: DEFAULT_CAPTURE_POLICY,
     l0Refs: [itemId],
-    outcome,
-    reason,
-  })
+  })({ action, outcome, reason })
 }
 
 export interface ApplyRelationsResult {

@@ -44,7 +44,7 @@ import {
   MERGE_SEMANTIC_ACTION,
   RESURRECT_MEMORY_ACTION,
   buildJudgeKey,
-  insertGenerationLog,
+  auditWriter,
   insertKeyedDecision,
   type GenerationLogOutcome,
 } from './audit.js'
@@ -387,16 +387,13 @@ export async function writeDeduplicatedMemory(
   // 五条路径的审计行共用同一组记账字段（U10）：只有 action / outcome / reason 不同。
   // 与 processor.ts 同一契约，不自开事务，事务边界由调用方决定（本原语整体在同一事务内）。
   const audit = (action: string, outcome: GenerationLogOutcome, reason: string): Promise<string> =>
-    insertGenerationLog(connection, {
+    auditWriter(connection, {
       recordedAt: nowIso,
       actor: input.actor ?? 'system',
       kind: CAPTURE_KIND,
-      action,
       policy: DEFAULT_CAPTURE_POLICY,
       l0Refs: sourceRefs,
-      outcome,
-      reason,
-    })
+    })({ action, outcome, reason })
 
   // ---- 路径①：指纹幂等（FR-15 路径①）+ 墓碑语义（评审 P1）----
   const existing = await getMemoryById(connection, id)
@@ -510,7 +507,7 @@ export async function writeDeduplicatedMemory(
     // 评审 P4：这次版本替换必须留下可重建的键式裁决，否则 AUDIT_GAP_STATEMENT
     //（已失效且无 k.old_id = m.id 的裁决行）会把每一次正常替换都永久计成缺口。
     await insertKeyedDecision(connection, {
-      judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, oldVersion.id, id),
+      judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, 'supersede', oldVersion.id, id),
       newId: id,
       oldId: oldVersion.id,
       action: 'supersede',

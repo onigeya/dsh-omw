@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '2'
+export const SCHEMA_VERSION = '3'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -163,7 +163,19 @@ export function alterMemoryAddParentIdStatement(): string {
   return `ALTER TABLE ${MEMORY_TABLE} ADD ${PARENT_ID_COLUMN} STRING`
 }
 
-/** Epic 2 新增列（Story 2.5 / U16）：support 的旧库补列目标（与 parent_id 同一模式）。 */
+/**
+ * Epic 2 新增列（Story 2.5 / U16）：support 的旧库补列目标（与 parent_id 同一模式）。
+ *
+ * **取值契约（Story 5.4 / AC:1319-1321 的显式声明）**：
+ * - **L2**：提升写入时算一次 = 其来源 L1 各自「存活 L0 集」的并集去重计数（`promotion.ts` 的
+ *   `countSupport`）；合并语义取较大者且单调不减（`memory.ts` 的 ON MATCH 子句）。
+ * - **L1：该列恒为 NULL，且不适用**。L1 的支撑本来就是它自己 `source_refs` 里存活 L0 的条数，
+ *   读侧必须**现算**（`countSupport([detail])`），**不得把 NULL 读成 0**——0 的含义是「有来源但全
+ *   不可达」，与「没算过 / 不适用」完全不同。
+ * - **重算时机**：只有 L2 提升那一刻算一次；redact 之后存活 L0 会变化，但本列不后台重算（避免与
+ *   墓碑重写竞争）。需要最新值的读侧一律用 `countSupport` 现算，本列只作写入时的历史快照。
+ */
+
 export const SUPPORT_COLUMN = 'support'
 
 /**
@@ -245,7 +257,7 @@ export const GENERATION_LOG_TABLE = 'generation_log'
 /**
  * 审计账本：keyed_decision（Story 1.10 / AD-18、AD-19、AD-21）。
  *
- * - judge_key：AD-18 内容键（uuid5('judge:' + policy + ':' + 排序后的 ids)），主键
+ * - judge_key：AD-18 内容键（Story 5.4 起**含 action**：`uuid5('judge:' + policy + ':' + action + ':' + 排序后的 ids)`），主键；迁移 0003 已把旧键行就地重算
  * - resolution_source：auto|review|user 三档（v1 只加字段不加流程）
  * - write_pending：中间态，崩溃恢复优先重放
  * - invalidated_by：MAP(STRING, STRING[]) 的多对一失效因果，键 source_id|target_id

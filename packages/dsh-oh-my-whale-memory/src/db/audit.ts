@@ -188,6 +188,11 @@ export interface KeyedDecisionEntry {
 /** 回填一次失效因果所需的最小信息。 */
 export interface InvalidationCauseInput {
   /** keyed_decision 主键（AD-18 键式）。 */
+  /**
+   * 旧键回退（Story 5.4）：迁移 0003 之前落库的行用不含 action 的键。按顺序尝试，第一个命中的
+   * 就是目标行；全部不命中才报 `audit_record_missing`。新写入一律用 `buildJudgeKey` 的新键。
+   */
+  fallbackJudgeKeys?: readonly string[]
   judgeKey: string
   /** 有向边对的 source：新事实（触发者）。 */
   sourceId: string
@@ -261,10 +266,25 @@ const COUNT_UNCERTAIN_STATEMENT =
 const KEYED_DECISION_PROBE = `CALL table_info('${KEYED_DECISION_TABLE}') RETURN name`
 
 /**
- * AD-18 键式，逐字：uuid5('judge:' + policy + ':' + [old_id, new_id].sort().join(':'))。
- * 键与新旧 id 的先后无关，重放/重裁决得到同一个键。
+ * AD-18 键式（Story 5.4 / AC:1299-1301 修正后逐字）：
+ * `uuid5('judge:' + policy + ':' + action + ':' + [old_id, new_id].sort().join(':'))`。
+ *
+ * **`action` 必须入键**：同一节点对的 `merge` 与 `supersede` 是两条不同裁决，键相同会互相吞
+ *（后到的 MERGE 命中已有键 → 字段保持首次写入的值，第二条裁决静默丢失）。键与新旧 id 的先后无关，
+ * 重放/重裁决得到同一个键。
+ *
+ * 旧键形态（不含 action）由 {@link buildLegacyJudgeKey} 提供：迁移 0003 之前落库的行用它算出的键，
+ * 读侧在找不到新键时回退查一次旧键（旧键只读兼容，新写入一律新键）。
  */
-export function buildJudgeKey(policy: string, oldId: string, newId: string): string {
+export function buildJudgeKey(policy: string, action: string, oldId: string, newId: string): string {
+  return uuid5('judge:' + policy + ':' + action + ':' + [oldId, newId].sort().join(':'))
+}
+
+/**
+ * Story 5.4 迁移前的旧键形态（不含 action）：**只用于读兼容**，不得用于新写入。
+ * 与 `buildJudgeKey` 的差别只有分隔段：`judge:<policy>:<old:new>`。
+ */
+export function buildLegacyJudgeKey(policy: string, oldId: string, newId: string): string {
   return uuid5('judge:' + policy + ':' + [oldId, newId].sort().join(':'))
 }
 
@@ -333,6 +353,38 @@ export async function insertGenerationLog(
     trigger_id: entry.triggerId ?? null,
   })
   return id
+}
+
+/**
+ * 一次审计写路径的固定上下文（Story 5.4 / AC:1295-1297 的收敛点）。
+ *
+ * 13 处调用此前各自重复 `recordedAt` / `actor` / `kind` / `policy` / `l0Refs` 五个字段，
+ * 收敛后每个调用点只声明「这次动作是什么」（action/outcome/reason 及少量特有列）。
+ * 事务契约不变：本构造器返回的函数**不自开事务**，与 `insertGenerationLog` 同一契约。
+ */
+export interface AuditContext {
+  /** 本次操作时间（UTC ISO-8601），不是节点最终 recorded_at。 */
+  readonly recordedAt: string
+  readonly actor: MemoryActor
+  /** capture | refine | verify | cascade | redact（AD-21）。 */
+  readonly kind: string
+  readonly policy?: string | null
+  readonly l0Refs?: readonly string[]
+}
+
+/** 一次审计事件的差异部分（动作/结果/原因 + 少量特有列）。 */
+export type AuditEvent = Omit<GenerationLogEntry, 'recordedAt' | 'actor' | 'kind' | 'policy' | 'l0Refs'>
+
+/**
+ * 绑定上下文，返回一个只收事件的写函数。
+ *
+ * 用法：`const audit = auditWriter(connection, { recordedAt, actor, kind }); await audit({ action, outcome })`。
+ */
+export function auditWriter(
+  connection: lbug.Connection,
+  context: AuditContext,
+): (event: AuditEvent) => Promise<string> {
+  return (event) => insertGenerationLog(connection, { ...context, ...event })
 }
 
 /**

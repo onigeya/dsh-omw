@@ -59,6 +59,7 @@ import {
   createMetaTableStatement,
   createVectorIndexStatement,
 } from './schema.js'
+import { readMetaMap, writeMetaValue } from './meta.js'
 import { ensureMemoryDbDirectory } from './paths.js'
 import { READONLY_REASON } from './writer-lock.js'
 import {
@@ -188,10 +189,17 @@ const READONLY_DB_POLL_MS = 50
  * 启动时，只读方可能正好读到「库文件已存在、表还没建」的中间态。该等，不该报错。
  *
  * 取 5s 而不是 2s：满载 Windows 机器上，写者的 `INSTALL/LOAD` + 建表实测会超过 2s，
+ *
+ * Story 5.4 / AC:1311-1313 的复现与决定（2026-11-16）：
+ * - 确定性复现**失败**：`db-readonly.test.ts` 单文件连跑 6 次 + 3 路并发跑 3 次，0 次失败；
+ *   它只在**全量 97 文件并行**时偶发（写者的 `INSTALL/LOAD` + 建表 + 建索引被抢 CPU）。
+ * - 因此不是逻辑错误，而是**满载下的时序预算不足**。决定：把有界窗口从 5s 抬到 10s（仍然是有界
+ *   重试、失败照旧 fail-loud），而不是把用例重跑到绿或放宽断言——重跑会掩盖、放宽会失去守护。
+ * - 为什么不是无限等待：只读实例必须有界退出，否则写者崩溃时第二实例会永久挂住。
  * 2s 窗口会让第二实例偶发 `schema_mismatch`（db-readonly 的启动竞态用例在满载时变红）。
  * 只在「写者持锁、库正在初始化」这条路径上付出等待，正常启动无感。
  */
-const READONLY_SCHEMA_WAIT_MS = 5_000
+const READONLY_SCHEMA_WAIT_MS = 10_000
 const READONLY_SCHEMA_POLL_MS = 50
 
 /** 有界等待库文件出现；超时返回 false（由调用方决定 fail-loud 文案）。 */
@@ -302,7 +310,7 @@ async function applyFacadeOptions(
   // 只读实例不写库级元数据，AC2 要求它不执行任何写语句。
   if (readOnly) return store
   if (store.modelId !== modelId) {
-    await mergeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
+    await writeMetaValue(store.connection, META_KEYS.embeddingModelId, modelId)
     store.modelId = modelId
   }
   return store
@@ -357,14 +365,14 @@ async function initializeDatabase(
 
   if (actualDim === null) {
     // schema_version 由 migrateDatabase 统一写（bootstrap 与升级同一条路径），这里只补库级 pin。
-    await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
-    await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
-    await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
+    await writeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
+    await writeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
+    await writeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
   } else {
-    if (metaDim === undefined) await mergeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
-    if (!meta.has(META_KEYS.createdAt)) await mergeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
+    if (metaDim === undefined) await writeMetaValue(connection, META_KEYS.embeddingDim, String(dim))
+    if (!meta.has(META_KEYS.createdAt)) await writeMetaValue(connection, META_KEYS.createdAt, now().toISOString())
     if (meta.get(META_KEYS.embeddingModelId) !== options.modelId) {
-      await mergeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
+      await writeMetaValue(connection, META_KEYS.embeddingModelId, options.modelId)
     }
   }
 
@@ -621,16 +629,13 @@ async function readTableColumns(connection: MemoryConnection, table: string): Pr
   }
 }
 
-async function readMetaMap(connection: MemoryConnection): Promise<Map<string, string>> {
-  try {
-    const rows = await queryAll(connection, `MATCH (m:${META_TABLE}) RETURN m.key AS key, m.value AS value`)
-    return new Map(rows.map((row) => [String(row.key), String(row.value)]))
-  } catch (error) {
-    if (isMissingTableError(error)) return new Map()
-    throw error
-  }
-}
+/**
+ * 库级元数据的读写已收敛到 `db/meta.ts`（Story 5.4 / AC:1307-1309）：此前 `database.ts` 的
+ * `readMetaMap` / `mergeMetaValue`、`memory.ts` 的游标语句、`wiki/evidence-backfill.ts` 的游标语句
+ * 是三套同形实现。本文件只保留调用，不再拼语句。
+ */
 
+/** 以下三个 helper 与 `db/meta.ts` 的收敛无关（列/维度/索引），保持原位语义；Story 5.4 只删本地元数据读写实现。 */
 function readMetaDim(meta: Map<string, string>, dbPath: string): number | undefined {
   const raw = meta.get(META_KEYS.embeddingDim)
   if (raw === undefined) return undefined
@@ -661,11 +666,4 @@ async function ensureIndexes(connection: MemoryConnection): Promise<void> {
   const names = new Set(rows.map((row) => String(row.index_name)))
   if (!names.has(VECTOR_INDEX_NAME)) await runStatement(connection, createVectorIndexStatement())
   if (!names.has(FTS_INDEX_NAME)) await runStatement(connection, createFtsIndexStatement())
-}
-
-async function mergeMetaValue(connection: MemoryConnection, key: string, value: string): Promise<void> {
-  const statement = await connection.prepare(
-    `MERGE (m:${META_TABLE} {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value`,
-  )
-  await runPrepared(connection, statement, { key, value })
 }

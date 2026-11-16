@@ -27,13 +27,14 @@ import {
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
   UPSERT_MEMORY_ACTION,
-  insertGenerationLog,
+  auditWriter,
   type MemoryActor,
 } from './audit.js'
 import { runPrepared } from './backend.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { collectRows, nullishString, queryAll, queryRows, toStringArray } from './rows.js'
+import { readCursor, writeCursor } from './meta.js'
 import { currentSnapshotPredicate } from './snapshot.js'
 import { MEMORY_TABLE, META_KEYS, META_TABLE } from './schema.js'
 import { runInTransaction } from './transaction.js'
@@ -219,15 +220,13 @@ export async function writeMemoryVersion(
   }
   // AD-10 置序：节点的 source_refs 是「从属记录」、随上面的 MERGE 一起落齐；本行是同
   // 一事务里的账目追加。写日志失败 → 引擎回滚整个事务，节点也留不下。
-  await insertGenerationLog(connection, {
+  await auditWriter(connection, {
     recordedAt: now.toISOString(),
     actor: input.actor ?? 'system',
     kind: CAPTURE_KIND,
-    action: UPSERT_MEMORY_ACTION,
     policy: DEFAULT_CAPTURE_POLICY,
     l0Refs: sourceRefs,
-    outcome: 'success',
-  })
+  })({ action: UPSERT_MEMORY_ACTION, outcome: 'success' })
   return { id: String(row.id), recordedAt: String(row.recorded_at) }
 }
 
@@ -423,18 +422,12 @@ export async function listEffectiveMemoryIdsByLayer(
   return { ids, nextCursor: formatCursor(String(last.recorded_at ?? ''), String(last.id)) }
 }
 
-const READ_META_STATEMENT = 'MATCH (m:' + META_TABLE + ' {key: $key}) RETURN m.value AS value'
-const MERGE_META_STATEMENT =
-  'MERGE (m:' + META_TABLE + ' {key: $key}) ON CREATE SET m.value = $value ON MATCH SET m.value = $value'
-
 /**
  * 读 L1→L2 提升候选的断点游标（评审 P1）：`omw_meta.l2_promotion_cursor`，空串 = 从起点开始。
- * 纯逻辑水位，不新增存储（与 2.6 的 `evidence_backfill_cursor` 同一惯用法）。
+ * 纯逻辑水位，不新增存储。语句与缺省转换统一在 `db/meta.ts`（Story 5.4 / AC:1307-1309 收敛）。
  */
 export async function readL2PromotionCursor(connection: MemoryConnection): Promise<string> {
-  const rows = await queryRows(connection, READ_META_STATEMENT, { key: META_KEYS.l2PromotionCursor })
-  const value = rows[0]?.value
-  return value === undefined || value === null ? '' : String(value)
+  return readCursor(connection, META_KEYS.l2PromotionCursor)
 }
 
 /**
@@ -445,9 +438,7 @@ export async function writeL2PromotionCursor(
   connection: MemoryConnection,
   value: string,
 ): Promise<void> {
-  const prepared = await connection.prepare(MERGE_META_STATEMENT)
-  // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
-  await runPrepared(connection, prepared, { key: META_KEYS.l2PromotionCursor, value })
+  await writeCursor(connection, META_KEYS.l2PromotionCursor, value)
 }
 
 /**

@@ -252,6 +252,8 @@ export async function migrateDatabase(
             if (await columnExists(connection, statement.table, statement.column)) continue
             await runStatement(connection, statement.ddl)
           }
+          // 数据改写（Story 5.4）：同一事务、statements 之后；幂等由迁移自己保证。
+          if (migration.run !== undefined) await migration.run(connection)
           await recordMigration(connection, migration, now().toISOString())
           applied.push(migration.version)
         }
