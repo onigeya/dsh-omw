@@ -30,6 +30,7 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
+import { shouldWireCompaction } from './context/status.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
 import { auditWriter } from './db/audit.js'
@@ -445,7 +446,7 @@ export async function apply(
     /**
    * Story 8.1：压缩事件接线（INV-7：只读实例不注册——它既不能写 INBOX，也没有压缩动作）。
    */
-  const compactionWiring = readonlyMode
+  const compactionWiring = shouldWireCompaction(readonlyMode)
     ? null
     : createCompactionWiring({
         getConnection: () => getDb()?.connection ?? null,

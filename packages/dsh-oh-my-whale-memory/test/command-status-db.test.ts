@@ -150,6 +150,9 @@ function statusText(
     'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
     'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
     'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
+    // Story 8.1：上下文归因（本夹具未采集 ⇒ n/a）与压缩运行（0 次）。
+    'context_ledger: n/a（本实例尚未采集）',
+    'compaction: runs=0',
     'backend: native',
   )
   return lines.join('\n')
@@ -412,6 +415,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'pending_conflicts: 未知（库缺少 pending_decision 表）',
         'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
         'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
+        'context_ledger: n/a（本实例尚未采集）',
+        'compaction: runs=0',
         'backend: native',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)

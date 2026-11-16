@@ -14,7 +14,8 @@ import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
 import { countPendingDecisions, listPendingDecisions, resolvePendingDecision as resolvePendingDecisionInDb } from '../db/pending.js'
 import { slowQueueStats } from '../strategy/slow-queue.js'
 import { expireStrategyCandidates, strategyStats } from '../strategy/candidates.js'
-import type { MemoryReflectionView } from '../command.js'
+import { readCompactionStatus, type AttributionSnapshot } from '../context/status.js'
+import type { MemoryContextLedgerView, MemoryReflectionView } from '../command.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
   countMemoriesByLayer,
@@ -38,6 +39,8 @@ import type { SystemOneClient } from '../distill/system-one.js'
 export interface MemoryAccessOptions {
   /** Story 7.2：反思触发状态提供者（缺省 ⇒ status 不渲染 reflection 行）。 */
   readonly reflectionView?: () => MemoryReflectionView
+  /** Story 8.1：归因账本快照提供者（缺省 ⇒ 渲染 `n/a（本实例尚未采集）`）。 */
+  readonly contextLedgerView?: () => AttributionSnapshot | null
   /** 惰性取库句柄（建库之前为 undefined）。 */
   readonly getDb: () => MemoryDatabase | undefined
   /** apply 时 resolve 的配置（status 的 embeddingMode 与 System One 开关）。 */
@@ -184,6 +187,15 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       reflection: options.reflectionView?.() ?? null,
       // Story 7.3：策略采纳门（AC:1494/1498）；缺表时全 0，不阻塞 status。
       strategyGate: await getStrategyStats().catch(() => null),
+      // Story 8.1：上下文归因（进程内快照）与压缩运行（落库）。
+      contextLedger: mapContextLedger(options.contextLedgerView?.() ?? null),
+      compaction: await readCompactionStatus(connection)
+        .then((status) => ({
+          runs: status.compactionRuns,
+          lastCompactionId: status.lastCompaction?.compactionId ?? null,
+          lastStartedAt: status.lastCompaction?.startedAt ?? null,
+        }))
+        .catch(() => null),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),
@@ -212,6 +224,21 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       minConfidence: gate.minConfidence,
       expiryDays: gate.expiryDays,
       maxPendingPerSession: gate.maxPendingPerSession,
+    }
+  }
+
+  /** 把归因快照摊平成命令层的扁平视图（避开跨层类型依赖）。 */
+  const mapContextLedger = (snapshot: AttributionSnapshot | null): MemoryContextLedgerView | null => {
+    if (snapshot === null) return null
+    return {
+      system: snapshot.ledger.bySource.system,
+      user: snapshot.ledger.bySource.user,
+      tool: snapshot.ledger.bySource.tool,
+      assistant: snapshot.ledger.bySource.assistant,
+      unknown: snapshot.ledger.bySource.unknown,
+      total: snapshot.ledger.totalTokens,
+      capturedAt: snapshot.capturedAt,
+      indexedSeqs: snapshot.indexedSeqs,
     }
   }
 

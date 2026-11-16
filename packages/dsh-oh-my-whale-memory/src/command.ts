@@ -370,6 +370,10 @@ export interface MemoryStatusSnapshot {
   readonly slowQueue?: MemorySlowQueueView | null
   /** Story 7.3：策略候选区与采纳门（缺省 = 保留占位文案）。 */
   readonly strategyGate?: MemoryCommandStrategyResult | null
+  /** Story 8.1：上下文归因账本（缺省 = 本实例尚未采集）。 */
+  readonly contextLedger?: MemoryContextLedgerView | null
+  /** Story 8.1：压缩运行账本（缺省 = 不渲染）。 */
+  readonly compaction?: MemoryCompactionView | null
   /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
@@ -967,6 +971,50 @@ function renderInboxBacklogValue(metric: MemoryHealthMetric<MemoryHealthBacklog>
   return `${Math.floor(maxMs / 1000)}s（L1 ${renderBacklogQueue(l1Ms)} / L2 ${renderBacklogQueue(l2Ms)}）`
 }
 
+/** 归因账本视图（命令层镜像 `context/status.ts` 的 `AttributionSnapshot`）。 */
+export interface MemoryContextLedgerView {
+  readonly system: number
+  readonly user: number
+  readonly tool: number
+  readonly assistant: number
+  readonly unknown: number
+  readonly total: number
+  readonly capturedAt: string
+  readonly indexedSeqs: number
+}
+
+/** 压缩运行视图（命令层镜像 `context/status.ts` 的 `readCompactionStatus`）。 */
+export interface MemoryCompactionView {
+  readonly runs: number
+  readonly lastCompactionId: string | null
+  readonly lastStartedAt: string | null
+}
+
+/**
+ * `context_ledger:` 行（Story 8.1 / AC:1566-1568）。
+ * INV-5：这里只展示 `measure()` 的归因结果，**不**提供任何压力启发式。
+ */
+function renderContextLedgerLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.contextLedger
+  if (view === undefined) return []
+  if (view === null) return ['context_ledger: n/a（本实例尚未采集）']
+  return [
+    `context_ledger: system=${String(view.system)} user=${String(view.user)} tool=${String(view.tool)} ` +
+      `assistant=${String(view.assistant)} unknown=${String(view.unknown)} total=${String(view.total)} ` +
+      `indexedSeqs=${String(view.indexedSeqs)} captured=${view.capturedAt}`,
+  ]
+}
+
+/** `compaction:` 行（Story 8.1：压缩次数 = SM-8 ④ 的可观测口径）。 */
+function renderCompactionLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.compaction
+  if (view === undefined || view === null) return []
+  if (view.runs === 0) return ['compaction: runs=0']
+  return [
+    `compaction: runs=${String(view.runs)} last=${view.lastCompactionId ?? 'n/a'}@${view.lastStartedAt ?? 'n/a'}`,
+  ]
+}
+
 /** 反思触发状态（命令层镜像 `reflection/state.ts` 的视图）。 */
 export interface MemoryReflectionView {
   readonly windowScore: number
@@ -1087,6 +1135,9 @@ function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   // 这样 4.3 钉死的五行顺序与文案逐字不变。
   lines.push(...renderReflectionLines(snapshot))
   lines.push(...renderSlowQueueLines(snapshot))
+  // Story 8.1：上下文归因与压缩运行（追加在最后，保持既有行序不变）。
+  lines.push(...renderContextLedgerLines(snapshot))
+  lines.push(...renderCompactionLines(snapshot))
   return lines
 }
 
