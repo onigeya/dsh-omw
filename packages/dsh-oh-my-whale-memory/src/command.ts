@@ -1048,9 +1048,12 @@ function renderPendingConflictLines(snapshot: MemoryStatusSnapshot): string[] {
 function renderStrategyGateLines(snapshot: MemoryStatusSnapshot): string[] {
   const view = snapshot.strategyGate
   if (view === undefined || view === null) return ['strategy_gate: n/a（Epic 7 真源在 Story 7.3）']
+  // AC:1493-1494：三项配置都要可见（评审 R73 FAIL 第 5 条：原先只输出 minConfidence）。
   const line =
     `strategy_gate: candidates=${String(view.candidates)} pending=${String(view.pending)} adopted=${String(view.adopted)} ` +
-    `rejected=${String(view.rejected)} noEvidence=${String(view.noEvidence)} minConfidence=${String(view.minConfidence)}`
+    `rejected=${String(view.rejected)} expired=${String(view.expired)} noEvidence=${String(view.noEvidence)} ` +
+    `minConfidence=${String(view.minConfidence)} expiryDays=${String(view.expiryDays)} ` +
+    `maxPendingPerSession=${String(view.maxPendingPerSession)}`
   const lines = [line]
   if (view.noEvidence > 0) lines.push('strategy_gate: 部分候选无 case 集（evidence: none）——只记录不采纳')
   return lines

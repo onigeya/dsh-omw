@@ -161,6 +161,14 @@ export async function recordGateResult(
   if (candidate === null) {
     throw new MemoryDbError('strategy_candidate_not_found', '策略候选不存在（id=' + input.id + '）')
   }
+  // 状态守卫（评审 R73 第 3 条）：只有 pending 能被门判定；已 adopted/rejected/expired 不得改判，
+  // 否则一条已采纳的候选能被第二次判定「改判」，审计上等于篡改历史。
+  if (candidate.state !== 'pending') {
+    throw new MemoryDbError(
+      'strategy_candidate_not_pending',
+      `策略候选状态为 ${candidate.state}，只有 pending 可被采纳门判定`,
+    )
+  }
   const statement = await connection.prepare(
     [
       'MATCH (c:' + STRATEGY_CANDIDATE_TABLE + ' {id: $id})',
@@ -188,6 +196,14 @@ export async function rewriteStrategyCandidate(
   if (candidate === null) {
     throw new MemoryDbError('strategy_candidate_not_found', '策略候选不存在（id=' + input.id + '）')
   }
+  if (candidate.state !== 'pending') {
+    // 状态守卫（评审 R73 第 3 条）：已采纳/已拒绝的候选不允许再改正文，否则「正式区正文不可重写」
+    // 的精神在候选层被绕过（改完不重过门就等于静默发布）。
+    throw new MemoryDbError(
+      'strategy_candidate_not_pending',
+      `策略候选状态为 ${candidate.state}，只有 pending 可重写`,
+    )
+  }
   if (candidate.rewrites >= MAX_STRATEGY_REWRITES) {
     throw new MemoryDbError(
       'strategy_rewrite_exhausted',
@@ -213,7 +229,10 @@ export async function discardStrategyCandidate(
   const statement = await connection.prepare(
     [
       'MATCH (c:' + STRATEGY_CANDIDATE_TABLE + ' {id: $id})',
-      "  SET c.state = 'rejected', c.outcome = 'failure', c.reasons = $reason, c.updated_at = $now",
+      // reasons 追加而不是覆盖（评审 R73 第 4 条：覆盖会丢掉 'no-cases'，让 noEvidence 计数静默归零）。
+      "  SET c.state = 'rejected', c.outcome = 'failure',",
+      "    c.reasons = CASE WHEN c.reasons = '' THEN $reason ELSE c.reasons + '；' + $reason END,",
+      '    c.updated_at = $now',
     ].join('\n'),
   )
   await runPrepared(connection, statement, { id: input.id, reason: input.reason, now: input.nowIso })

@@ -88,14 +88,28 @@ describe('采纳门主判定（AC:1479-1490）', () => {
     expect(decision.reasons[0]).toContain('no-cases')
   })
 
-  it('全等 ⇒ 采纳（非回归 + 分数 ≥ minConfidence）', () => {
+  it('全等 + 两次独立计算一致 ⇒ 采纳（非回归 + 分数 ≥ minConfidence）', () => {
     const decision = evaluateCandidate({
       cases: [gateCase('c1', [m('a', true), p('b', true)], [m('a', true), p('b', true)])],
       minConfidence: 0.6,
+      // AD-20 要求两轮独立回测：省略复算值 ⇒ 不采纳（评审 R73 第 2 条）。
+      recomputedScore: 1,
     })
     expect(decision.adopted).toBe(true)
     expect(decision.challengerScore).toBe(1)
+    expect(decision.recomputed).toBe(true)
+  })
+
+  it('缺少第二次独立计算 ⇒ 不采纳（AD-20：回测必须两轮）', () => {
+    const decision = evaluateCandidate({
+      cases: [gateCase('c1', [m('a', true)], [m('a', true)])],
+      minConfidence: 0.6,
+    })
+    expect(decision.adopted).toBe(false)
     expect(decision.recomputed).toBe(false)
+    expect(decision.reasons.some((reason) => reason.includes('no-recompute'))).toBe(true)
+    // reduced：即便分数满分也不能采纳（没有复算就没有证据）
+    expect(decision.challengerScore).toBe(1)
   })
 
   it('低于 minConfidence ⇒ 不采纳（即使非回归）', () => {

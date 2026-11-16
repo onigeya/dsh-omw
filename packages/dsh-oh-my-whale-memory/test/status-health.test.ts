@@ -106,7 +106,7 @@ describe('矩阵行 4：空库的健康行是 n/a 形态，不是 0', () => {
       expect(result.text).toContain('last_refine_at: n/a（从未完成精炼）')
       expect(result.text).toContain('rerank_latency: n/a (v1 无精排)')
       expect(result.text).toContain('pending_conflicts: 0')
-      expect(result.text).toContain('strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 noEvidence=0 minConfidence=0.6')
+      expect(result.text).toContain('strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5')
       expect(result.text).not.toContain('rerank_latency: 0ms')
     } finally {
       await fixture.store.close()

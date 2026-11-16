@@ -126,7 +126,7 @@ export interface GateDecision {
   readonly cases: readonly CaseEvaluation[]
 }
 
-/** 跨 case 汇总：把所有 check 摊平后按权重求和（与逐 case 平均不同，AD-20 的公式是后者）。 */
+/** 跨 case 汇总：把所有 check **摊平**后按权重求和（AD-20 的公式是「Σ通过权重/Σ全部权重」）。 */
 export function aggregateScore(cases: readonly GateCaseInput[], side: 'champion' | 'challenger'): number {
   const all = cases.flatMap((entry) => entry[side])
   return normalizedScore(all)
@@ -165,6 +165,11 @@ export function evaluateCandidate(input: GateInput): GateDecision {
     reasons.push(`分数低于 minConfidence：${challengerScore.toFixed(6)} < ${input.minConfidence.toFixed(6)}`)
   }
   const recomputed = input.recomputedScore !== undefined
+  // AD-20：「必须对既有 champion 做**两轮独立回测**」；评审 R73 第 2 条指出原先省略复算仍可采纳，
+  // 等于把强制判据降级为调用方自觉。这里改为「未提供复算值 ⇒ 不采纳」，并在 reasons 里说明。
+  if (!recomputed) {
+    reasons.push('no-recompute：缺少第二次独立计算，按 AD-20 不得采纳（回测必须两轮）')
+  }
   if (input.recomputedScore !== undefined && !recomputeMatches(challengerScore, input.recomputedScore)) {
     reasons.push(
       `复算不一致：${challengerScore.toFixed(12)} vs ${input.recomputedScore.toFixed(12)}（差 ≥ ${RECOMPUTE_TOLERANCE}）`,
