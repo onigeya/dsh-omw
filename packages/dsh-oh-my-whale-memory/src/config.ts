@@ -36,6 +36,8 @@ const MEMORY_CONFIG_DEFAULTS = {
   strategyMaxPendingPerSession: 5,
   // Story 8.1 / AC:1544：compaction/start 未配对时的解阻塞超时（与 AD-6 lease 同量级）。
   compactionOrphanTimeoutMs: 60_000,
+  // Story 8.2 / FR-23：工具结果折叠阈值（tokens）；超阈值折成句柄，全文入图。
+  foldThresholdTokens: 2000,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -120,6 +122,8 @@ export const Config = Schema.object({
   strategyGate: StrategyGateSchema,
   /** Story 8.1 / AC:1544：compaction/start 未配对的解阻塞超时（ms，与 AD-6 lease 同量级）。 */
   compactionOrphanTimeoutMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.compactionOrphanTimeoutMs).volatile(),
+  /** Story 8.2：工具结果折叠阈值（tokens）。 */
+  foldThresholdTokens: Schema.number().default(MEMORY_CONFIG_DEFAULTS.foldThresholdTokens).volatile(),
 })
 
 /**
@@ -147,6 +151,8 @@ export interface RuntimeConfig {
   strategyGate: { minConfidence: number; expiryDays: number; maxPendingPerSession: number }
   /** Story 8.1：compaction/start 未配对的解阻塞超时（ms，已校验为正整数）。 */
   compactionOrphanTimeoutMs: number
+  /** Story 8.2：工具结果折叠阈值（tokens）。 */
+  foldThresholdTokens: number
   warnings: string[]
 }
 
@@ -220,6 +226,7 @@ export function resolveRuntimeConfig(config: {
     reflection?: Getter<{ threshold?: number; idleWaitMs?: number; intervalMs?: number }>
     strategyGate?: Getter<{ minConfidence?: number; expiryDays?: number; maxPendingPerSession?: number }>
     compactionOrphanTimeoutMs?: Getter<number>
+    foldThresholdTokens?: Getter<number>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -270,6 +277,10 @@ export function resolveRuntimeConfig(config: {
   const compactionOrphanTimeoutMs = requirePositiveInt(
     'compactionOrphanTimeoutMs',
     Math.trunc(read(config.compactionOrphanTimeoutMs ?? MEMORY_CONFIG_DEFAULTS.compactionOrphanTimeoutMs)),
+  )
+  const foldThresholdTokens = requirePositiveInt(
+    'foldThresholdTokens',
+    Math.trunc(read(config.foldThresholdTokens ?? MEMORY_CONFIG_DEFAULTS.foldThresholdTokens)),
   )
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
@@ -337,6 +348,7 @@ export function resolveRuntimeConfig(config: {
       intervalMs: Number(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
     },
     compactionOrphanTimeoutMs,
+    foldThresholdTokens,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),

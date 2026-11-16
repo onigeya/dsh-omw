@@ -30,6 +30,7 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
+import { writeHandle } from './context/handles.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
 import { auditWriter } from './db/audit.js'
@@ -243,6 +244,25 @@ export async function apply(
     recallStore: retrieval.recallStore,
     relatedStore: retrieval.relatedStore,
     quota: retrieval.quota,
+    // Story 8.2：`memory_related` 结果超阈值 ⇒ 折成句柄（全文入图，表面只留句柄）。
+    fold: {
+      thresholdTokens: resolved.foldThresholdTokens,
+      // 惰性：wiring 发生在写者锁之前，此刻 instance.readonly 还没定（INV-7 必须靠运行期判定）。
+      readonly: () => instance.readonly,
+      write: async (input) => {
+        const database = getDb()
+        if (database === undefined) throw new Error('db unavailable')
+        const record = await writeHandle(database.connection, {
+          sessionId: input.sessionId,
+          seq: input.seq,
+          text: input.text,
+          recordedAt: new Date().toISOString(),
+          tokens: input.tokens,
+        })
+        return { id: record.id }
+      },
+      logger: ctx.logger,
+    },
   }))
   // Story 3.3：注入面（section + context）与生成入口（`agent/pre-step`）同样在只读早退之
   // 前注册，写者与只读实例都要有注入面（纯读 + 可选 LLM）。裸 ctx 时整面/监听跳过，
