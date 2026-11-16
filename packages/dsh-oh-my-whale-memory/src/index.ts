@@ -28,6 +28,9 @@ import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 import { createIdleGate } from './inbox/idle-gate.js'
 import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
+import { createReflectionExecutor } from './reflection/executor.js'
+import { foldStream } from './shared/stream-fold.js'
+import { queryRows } from './db/rows.js'
 import { auditWriter } from './db/audit.js'
 import { createRetrievalWiring } from './wire/retrieval.js'
 import { wireMemoryCommand } from './wire/commands.js'
@@ -227,8 +230,11 @@ export async function apply(
     // Story 7.3：策略候选区与采纳门计数（只读可查）。
     getStrategyStats: access.getStrategyStats,
   }))
+  // teardown 钩子：lifecycle 在 executor 之前注册，所以先用可变 ref 占位，executor 建好后赋值。
+  let cancelReflectionTimer: (() => void) | null = null
   // Story 3.1：每轮召回配额的双点重置（只读实例也提供召回，故在只读早退之前注册）；
   // `ctx.on` 自动挂 disposer，不新增 ctx.effect（entry-exports 钉死 closer 数）。
+  // （赋值在 executor 建好之后：此处只占位，避免 TDZ。）
   await wireStep('recall-quota', retrieval.wireQuotaReset)
   await wireStep('tools', () => wireMemoryTools(ctx, {
     getDb,
@@ -290,7 +296,14 @@ export async function apply(
   instance.readonly = readonlyMode
   instance.reason = lock.reason
 
-  await wireStep('lifecycle', () => wireMemoryLifecycle({ ctx, dbPath, lock, slots }))
+  // Story 7.3：反思定时器在 lifecycle 的既有 teardown 里释放（不新增 closer）。
+  await wireStep('lifecycle', () => wireMemoryLifecycle({
+    ctx,
+    dbPath,
+    lock,
+    slots,
+    onTeardown: () => cancelReflectionTimer?.(),
+  }))
 
   if (readonlyMode) {
     // 只读实例不能改写库级 model id：配置与库内记录不一致时必须显式告知，不静默降级
@@ -347,7 +360,61 @@ export async function apply(
       ctx.logger.warn('反思计分账本写入失败：' + String(error))
     })
   }
-  const capture = await wireStep('capture', () => wireCapture({ ctx, dbPath, getDb, resolved, onTurnCaptured }))
+  /**
+   * Story 7.3：反思执行器——候选区的**唯一生产者**（评审 R73 的 P1：此前候选区无写入方）。
+   *
+   * - 取材只读最近 8 条 inline L0（ref = `l0:<id>`，可回溯到 L0，满足 AC:1458）；
+   * - LLM 走宿主 `ctx.llm` 单通道（AD-5），provider/model 取 resolved 配置；
+   * - 调度：每个 turn 结束都「重置」一个 idleWaitMs 的定时器 —— 新 turn 会把反思推到下一个停顿（AD-37）。
+   */
+  // teardown 钩子：先声明再赋值（lifecycle 在 executor 创建之前注册）。
+  const reflectionExecutor = createReflectionExecutor({
+    connection: () => getDb()?.connection ?? null,
+    collectSamples: async () => {
+      const connection = getDb()?.connection
+      if (connection === undefined) return []
+      const rows = await queryRows(
+        connection,
+        [
+          'MATCH (l:l0_raw)',
+          '  WHERE l.raw_text IS NOT NULL',
+          '  RETURN l.id AS id, l.raw_text AS text',
+          '  ORDER BY l.recorded_at DESC LIMIT 8',
+        ].join('\n'),
+      ).catch(() => [])
+      return rows.map((row) => ({ ref: 'l0:' + String(row.id), text: String(row.text ?? '') }))
+    },
+    extract: async (messages) => {
+      const provider = resolved.llmProvider
+      const model = resolved.llmModel
+      if (provider === undefined || model === undefined) {
+        // AD-5：插件不自带 key/路由；未配置就明确失败（不编造候选）。
+        throw new Error('未配置 llmProvider/llmModel，无法提炼策略候选')
+      }
+      const folded = await foldStream(ctx.llm.stream({ provider, model, messages, maxTokens: 1200 }))
+      if (folded.finish === undefined || folded.finish.kind !== 'stop') {
+        throw new Error('策略提炼的 LLM 调用未正常结束：' + String(folded.finish?.kind ?? 'unknown'))
+      }
+      return folded.text
+    },
+    state: reflectionState,
+    thresholds: resolved.reflection,
+    gate: resolved.strategyGate,
+    logger: ctx.logger,
+  })
+  cancelReflectionTimer = () => reflectionExecutor.cancel()
+
+  const capture = await wireStep('capture', () => wireCapture({
+    ctx,
+    dbPath,
+    getDb,
+    resolved,
+    onTurnCaptured: (input) => {
+      onTurnCaptured(input)
+      // 新 turn 把反思推到下一个停顿（AD-37：新 turn 会把 review 推到下一个 pause）。
+      reflectionExecutor.scheduleAfterIdle()
+    },
+  }))
   // Story 2.3–2.6：精炼处理器、关系跑者、向量/EVIDENCE 回填（不注册 effect/定时器）。
   const distill = await wireStep('distill', () => createDistillWiring({
     ctx,

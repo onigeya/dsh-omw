@@ -23,6 +23,8 @@ export interface MemoryLifecycleOptions {
   readonly dbPath: string
   readonly lock: MemoryWriterLock
   readonly slots: MemoryRuntimeSlots
+  /** 额外的 teardown 动作（Story 7.3：反思定时器）；放进既有 effect 的 teardown，不新增 closer。 */
+  readonly onTeardown?: () => void
 }
 
 /**
@@ -37,6 +39,13 @@ export function wireMemoryLifecycle(options: MemoryLifecycleOptions): void {
   const backendKind = memoryDatabaseBackendKind(dbPath)
 
   const teardownResources = async (): Promise<void> => {
+    // Story 7.3：先停自建定时器（幂等；未创建时是 no-op）。放在既有 effect 里而不是新挂一个，
+    // 因为 entry-exports 用例把每次 apply 的 closer 数钉死了。
+    try {
+      options.onTeardown?.()
+    } catch {
+      // teardown 不许把错误抛回宿主。
+    }
     // 每一步都不许把错误抛回宿主 dispose 流程：回收失败只告警，否则后续步骤（含锁释放）不执行。
     slots.inboxConsumer?.stop()
     slots.inboxConsumer = null
