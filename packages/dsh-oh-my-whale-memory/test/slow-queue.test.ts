@@ -14,7 +14,9 @@ import {
   SLOW_PATH_MAX_ATTEMPTS,
   SLOW_PATH_MAX_WINDOW_ROUNDS,
   backoffDelayMs,
+  clearSlowQueueShortCircuit,
   completeSlowTask,
+  markSlowQueueShortCircuit,
   enqueueSlowTask,
   failSlowTask,
   leaseNextSlowTask,
@@ -178,5 +180,14 @@ describe('队列可观测性（AC:1433-1435）', () => {
     expect(stats.exhausted).toBe(1)
     expect(stats.retrySet).toBe(0)
     expect(stats.shortCircuited).toBe(false)
+  })
+})
+
+describe('运行级短路标记（评审 R72 第 4 条：不能恒 false）', () => {
+  it('markSlowQueueShortCircuit 后 stats.shortCircuited=true；clear 后回 false', async () => {
+    await markSlowQueueShortCircuit(store.connection, T0)
+    expect((await slowQueueStats(store.connection)).shortCircuited).toBe(true)
+    await clearSlowQueueShortCircuit(store.connection)
+    expect((await slowQueueStats(store.connection)).shortCircuited).toBe(false)
   })
 })

@@ -52,6 +52,11 @@ export interface CaptureRecorderOptions {
   readonly logger?: { warn(message: string): void; info?(message: string): void }
   /** turn/end 采集前的持久化屏障（ctx.sessions.flush；宿主无该能力时缺省 no-op）。 */
   readonly flush?: (session: unknown) => Promise<unknown>
+  /**
+   * turn/end 落库成功后的回调（Story 7.2 / AC:1406：兴趣分与触发决策要写进账本）。
+   * 只接收已落库的正文与时刻，不传 session（避免回调方持有宿主对象）。
+   */
+  readonly onTurnCaptured?: (input: { readonly text: string; readonly recordedAt: Date }) => void
 }
 
 export interface CaptureRecorder {
@@ -208,6 +213,8 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
           }
         }
         await persist(entry)
+        // Story 7.2：落库成功后才喂给反思计分（失败的那一轮下次会重带，不能重复计分）。
+        options.onTurnCaptured?.({ text: entry.text, recordedAt: entry.recordedAt })
         // P4：只有落库成功才推进「已采集的最大 turn」，失败的内容会被下一次采集重新带上。
         lastTurn.set(sessionId, turn)
       })(), 'turn/end')

@@ -27,7 +27,8 @@ import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 import { createIdleGate } from './inbox/idle-gate.js'
 import { createMemoryAccess } from './wire/access.js'
-import { createReflectionState, readReflectionView } from './reflection/state.js'
+import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
+import { auditWriter } from './db/audit.js'
 import { createRetrievalWiring } from './wire/retrieval.js'
 import { wireMemoryCommand } from './wire/commands.js'
 import { wireMemoryTools } from './wire/tools.js'
@@ -314,7 +315,37 @@ export async function apply(
   const promotion = createPromotionWiring({ ctx, getDb })
   await wireStep('inbox-reclaim', () => reclaimInboxOnStartup({ ctx, getDb }))
   // Story 2.1：三钩子采集器 + 孤儿快照重放（AC5）。
-  const capture = await wireStep('capture', () => wireCapture({ ctx, dbPath, getDb, resolved }))
+  // Story 7.2 / AC:1406：每个 turn 落库后计兴趣分并写一条账本行（可检视「为什么触发/没触发」）。
+  // 注意：本 seam 只有会话正文，工具调用维度拿不到（记 0）——那部分在 7.3 的反思执行器接 step 事件后补齐；
+  // 此处 idle=0（turn 刚结束），因此决策原因通常是 idle，这是对当前时刻的**如实**记录，不是缺陷掩盖。
+  const onTurnCaptured = (input: { readonly text: string; readonly recordedAt: Date }): void => {
+    const now = input.recordedAt
+    const decision = recordTurn(reflectionState, {
+      signals: { userChars: input.text.length, toolCalls: 0, distinctTools: 0 },
+      idleMs: 0,
+      now,
+    })
+    const connection = getDb()?.connection
+    if (connection === undefined) return
+    void auditWriter(connection, {
+      recordedAt: now.toISOString(),
+      actor: 'system',
+      kind: 'reflection',
+      policy: 'reflection-trigger',
+    })({
+      action: 'reflection_tick',
+      outcome: decision.trigger ? 'success' : 'uncertain',
+      reason:
+        'score=' + String(reflectionState.lastTurnScore ?? 0) +
+        ' window=' + String(reflectionState.windowScore) +
+        ' trigger=' + (decision.trigger ? 'yes' : 'no') +
+        ' reason=' + decision.reason,
+    }).catch((error: unknown) => {
+      // 账本写失败不阻塞采集（观测 fire-and-forget，AD-10）。
+      ctx.logger.warn('反思计分账本写入失败：' + String(error))
+    })
+  }
+  const capture = await wireStep('capture', () => wireCapture({ ctx, dbPath, getDb, resolved, onTurnCaptured }))
   // Story 2.3–2.6：精炼处理器、关系跑者、向量/EVIDENCE 回填（不注册 effect/定时器）。
   const distill = await wireStep('distill', () => createDistillWiring({
     ctx,

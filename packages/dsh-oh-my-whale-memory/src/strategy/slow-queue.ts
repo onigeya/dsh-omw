@@ -16,6 +16,7 @@ import { MemoryDbError } from '../db/errors.js'
 import { queryRows } from '../db/rows.js'
 import { runPrepared } from '../db/backend.js'
 import { SLOW_TASK_TABLE } from '../db/schema.js'
+import { readMetaValue, writeMetaValue } from '../db/meta.js'
 
 /** Q-4 锁定的慢路径默认值（代码里不得另写字面量）。 */
 export const SLOW_PATH_MAX_ATTEMPTS = 3
@@ -253,6 +254,26 @@ export async function rescanSlowTaskWindow(
   return { requeued: rows.length, windowRound: nextRound }
 }
 
+/** `omw_meta` 里的运行级短路标记（值 `yes` = 本轮已短路）。 */
+export const SLOW_SHORT_CIRCUIT_META_KEY = 'slow.shortCircuit'
+
+/**
+ * 记一次运行级短路（`budget_exhausted`）：本轮不再逐个重试，直到下一次成功运行清除标记。
+ * 存 `omw_meta` 而不是建表：它是一个布尔观测位，不参与任何状态机。
+ */
+export async function markSlowQueueShortCircuit(
+  connection: lbug.Connection,
+  nowIso: string,
+): Promise<void> {
+  await writeMetaValue(connection, SLOW_SHORT_CIRCUIT_META_KEY, 'yes')
+  await writeMetaValue(connection, SLOW_SHORT_CIRCUIT_META_KEY + '.at', nowIso)
+}
+
+/** 清除短路标记（下一次慢路径成功跑完一轮时调用）。 */
+export async function clearSlowQueueShortCircuit(connection: lbug.Connection): Promise<void> {
+  await writeMetaValue(connection, SLOW_SHORT_CIRCUIT_META_KEY, 'no')
+}
+
 /** 队列可观测性（AC:1433-1435）：`/memory status` 的 `slow_queue:` 行数据源。 */
 export async function slowQueueStats(connection: lbug.Connection): Promise<SlowQueueStats> {
   // 0.22.3 里 `count(CASE WHEN …)` 返回 0（实测量不到分支），必须用 `sum(CASE … THEN 1 ELSE 0 END)`。
@@ -263,20 +284,26 @@ export async function slowQueueStats(connection: lbug.Connection): Promise<SlowQ
       '  RETURN count(t) AS total,',
       "  sum(CASE WHEN t.state = 'pending' THEN 1 ELSE 0 END) AS pending_count,",
       "  sum(CASE WHEN t.state = 'processing' THEN 1 ELSE 0 END) AS processing_count,",
-      "  sum(CASE WHEN t.state = 'failed' AND t.attempts < " + String(SLOW_PATH_MAX_ATTEMPTS) + " THEN 1 ELSE 0 END) AS retry_set,",
-      "  sum(CASE WHEN t.state = 'failed' AND t.attempts >= " + String(SLOW_PATH_MAX_ATTEMPTS) + " THEN 1 ELSE 0 END) AS exhausted,",
+      // 重试集 = 已失败过、还没到上限、**已退回 pending** 的条目。评审 R72 第 4 条：原口径取
+      // `failed && attempts < max` 结构性恒 0（`failed` 只在达上限时写入），会把「有重试在飞」显示成 0。
+      "  sum(CASE WHEN t.state = 'pending' AND t.attempts > 0 THEN 1 ELSE 0 END) AS retry_set,",
+      // 终态失败（= 死信候选）：`failed` 只会在 attempts ≥ 上限时出现。
+      "  sum(CASE WHEN t.state = 'failed' THEN 1 ELSE 0 END) AS exhausted,",
       '  max(t.window_round) AS max_round',
     ].join('\n'),
   )
   const row = rows[0] ?? {}
   const processing = Number(row.processing_count ?? 0)
   const pending = Number(row.pending_count ?? 0)
+  // 运行级短路是**真状态**（存 `omw_meta`），不是恒 false：评审 R72 第 4 条指出恒 false 会被
+  // 用例钉成「期望值」= 未实现却当作已测。
+  const shortCircuitFlag = await readMetaValue(connection, SLOW_SHORT_CIRCUIT_META_KEY).catch(() => null)
   return {
     depth: pending + processing,
     retrySet: Number(row.retry_set ?? 0),
     exhausted: Number(row.exhausted ?? 0),
     deadLetters: Number(row.exhausted ?? 0),
     windowRound: Number(row.max_round ?? 0),
-    shortCircuited: false,
+    shortCircuited: shortCircuitFlag === 'yes',
   }
 }

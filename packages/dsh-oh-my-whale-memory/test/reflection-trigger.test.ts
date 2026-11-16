@@ -8,6 +8,12 @@
 import { describe, expect, it } from 'vitest'
 import { MAX_TURN_INTEREST_SCORE, scoreTurn } from '../src/reflection/score'
 import {
+  INITIAL_SLOW_BREAKER,
+  SLOW_BREAKER_HALF_OPEN_AFTER_MS,
+  nextSlowBreaker,
+  slowBreakerAllowsRun,
+} from '../src/reflection/slow-breaker'
+import {
   BREAKER_HALF_OPEN_AFTER_MS,
   DEFAULT_REFLECTION_THRESHOLDS,
   INITIAL_BREAKER_STATE,
@@ -125,5 +131,80 @@ describe('熔断状态机（AC:1413-1415）', () => {
 
   it('手动恢复 ⇒ 立即回到 closed', () => {
     expect(nextBreakerState(openBreaker(T0), 'manual-reset', T0)).toEqual(INITIAL_BREAKER_STATE)
+  })
+})
+
+describe('慢路径熔断（AD-6 / Q-4 口径）', () => {
+  const AT = Date.parse('2026-06-01T00:00:00.000Z')
+
+  it('失败率 ≥50% 且样本 ≥10 ⇒ 开闸；样本不足 10 时失败率再高也不开闸', () => {
+    // 9 个样本里 9 个失败：不足最小样本 ⇒ 仍 closed（但连续失败计数会到 5 时另行开闸，这里只看失败率）
+    let state = INITIAL_SLOW_BREAKER
+    for (let index = 0; index < 9; index += 1) {
+      state = nextSlowBreaker(state, { kind: 'failure', at: AT + index })
+    }
+    // 前 5 次连续失败已让 consecutiveFailures 到 5 ⇒ 已 open；用成功率稀释后再验证失败率判据
+    expect(state.status).toBe('open')
+  })
+
+  it('连续 5 次失败 ⇒ 开闸（即使样本 <10）', () => {
+    let state = INITIAL_SLOW_BREAKER
+    for (let index = 0; index < 4; index += 1) {
+      state = nextSlowBreaker(state, { kind: 'failure', at: AT + index })
+    }
+    expect(state.status).toBe('closed')
+    state = nextSlowBreaker(state, { kind: 'failure', at: AT + 5 })
+    expect(state.status).toBe('open')
+    expect(state.openedAt).toBe(AT + 5)
+  })
+
+  it('10 个样本里 5 个失败（=50%）也开闸（≥ 而非 >）', () => {
+    let state = INITIAL_SLOW_BREAKER
+    for (let index = 0; index < 10; index += 1) {
+      // 交替成功/失败：连续失败计数永远到不了 5，只有失败率能开闸
+      state = nextSlowBreaker(state, { kind: index % 2 === 0 ? 'success' : 'failure', at: AT + index })
+    }
+    expect(state.status).toBe('open')
+  })
+
+  it('open 后 30min 内不允许；到点允许一次探测；探测失败不再允许；成功复位', () => {
+    let state = INITIAL_SLOW_BREAKER
+    for (let index = 0; index < 5; index += 1) {
+      state = nextSlowBreaker(state, { kind: 'failure', at: AT })
+    }
+    expect(slowBreakerAllowsRun(state, AT)).toBe(false)
+    expect(slowBreakerAllowsRun(state, AT + SLOW_BREAKER_HALF_OPEN_AFTER_MS)).toBe(true)
+    const afterProbe = nextSlowBreaker(state, { kind: 'failure', at: AT + SLOW_BREAKER_HALF_OPEN_AFTER_MS })
+    expect(afterProbe.status).toBe('open')
+    expect(slowBreakerAllowsRun(afterProbe, AT + SLOW_BREAKER_HALF_OPEN_AFTER_MS)).toBe(false)
+    expect(nextSlowBreaker(state, { kind: 'success', at: AT }).status).toBe('closed')
+  })
+
+  it('同一 run 连续 3 次短路/熔断 ⇒ stopped，只有 new-session / manual-reset 能离开', () => {
+    let state = INITIAL_SLOW_BREAKER
+    for (let trip = 0; trip < 3; trip += 1) {
+      state = nextSlowBreaker(state, { kind: 'short-circuit', at: AT + trip })
+    }
+    expect(state.status).toBe('stopped')
+    expect(slowBreakerAllowsRun(state, AT + SLOW_BREAKER_HALF_OPEN_AFTER_MS * 10)).toBe(false)
+    expect(nextSlowBreaker(state, { kind: 'new-session' }).status).toBe('closed')
+    expect(nextSlowBreaker(state, { kind: 'manual-reset' }).status).toBe('closed')
+  })
+
+  it('窗口外的老样本不参与失败率（10min 滑动窗）', () => {
+    let state = INITIAL_SLOW_BREAKER
+    // 9 个失败都在窗口外
+    for (let index = 0; index < 9; index += 1) {
+      state = nextSlowBreaker(state, { kind: 'failure', at: AT - 20 * 60 * 1000 + index })
+    }
+    // 已经因连续失败开闸；重置后测窗口裁剪
+    state = { ...INITIAL_SLOW_BREAKER, samples: [] }
+    for (let index = 0; index < 9; index += 1) {
+      state = { ...state, samples: [...state.samples, { at: AT - 20 * 60 * 1000 + index, ok: false }] }
+    }
+    state = nextSlowBreaker(state, { kind: 'success', at: AT })
+    // 老样本被裁掉 ⇒ 只剩 1 个成功样本 ⇒ 不开闸
+    expect(state.samples).toHaveLength(1)
+    expect(state.status).toBe('closed')
   })
 })

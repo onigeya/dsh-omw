@@ -7,27 +7,15 @@
  * 纯函数：时钟由调用方传入（`now`），状态由调用方持有 —— 这样判定可单测、也可被 status 复用。
  */
 
-/** AD-37 锁定的默认阈值（Config 的默认值来源；代码里不得另写字面量）。 */
-export interface ReflectionThresholds {
-  /** 窗口兴趣分门槛，默认 6。 */
-  readonly threshold: number
-  /** 会话空闲门槛（ms），默认 90_000。 */
-  readonly idleWaitMs: number
-  /** 距上次反思的最小间隔（ms），默认 900_000。 */
-  readonly intervalMs: number
-}
-
-export const DEFAULT_REFLECTION_THRESHOLDS: ReflectionThresholds = {
-  threshold: 6,
-  idleWaitMs: 90_000,
-  intervalMs: 900_000,
-} as const
-
-/** 熔断开闸后多久允许半开探测（AD-37：30 min，与 AD-6 的 half-open 同尺度）。 */
-export const BREAKER_HALF_OPEN_AFTER_MS = 30 * 60 * 1000
-
-/** 连续失败多少次熔断（AC:1413-1415：3 次）。 */
-export const BREAKER_FAILURE_THRESHOLD = 3
+// 默认值只有一份，放在 shared/（AD-33：kernel 与 domain 都不能互相 import）。
+export { BREAKER_FAILURE_THRESHOLD, BREAKER_HALF_OPEN_AFTER_MS, DEFAULT_REFLECTION_THRESHOLDS }
+export type { ReflectionThresholds } from '../shared/reflection-defaults.js'
+import {
+  BREAKER_FAILURE_THRESHOLD,
+  BREAKER_HALF_OPEN_AFTER_MS,
+  DEFAULT_REFLECTION_THRESHOLDS,
+} from '../shared/reflection-defaults.js'
+import type { ReflectionThresholds } from '../shared/reflection-defaults.js'
 
 export type BreakerStatus = 'closed' | 'open'
 
