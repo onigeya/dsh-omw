@@ -416,7 +416,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
         'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
         'context_ledger: n/a（本实例尚未采集）',
-        'compaction: runs=0',
+        // Story 8.3 / AC:1683：只读实例的引擎委托 stock，status 逐字标 readOnly-delegate。
+        'compaction: runs=0 mode=readOnly-delegate',
         'backend: native',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)

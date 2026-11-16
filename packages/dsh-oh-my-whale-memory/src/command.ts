@@ -988,6 +988,11 @@ export interface MemoryCompactionView {
   readonly runs: number
   readonly lastCompactionId: string | null
   readonly lastStartedAt: string | null
+  /**
+   * Story 8.3 / AC:1683：引擎运行态标签。只读实例必须显示 `readOnly-delegate`
+   * （委托 stock，零写）；缺省 = 还没接管，不渲染该字段（避免把"未装配"说成某种模式）。
+   */
+  readonly mode?: string
 }
 
 /**
@@ -1009,9 +1014,10 @@ function renderContextLedgerLines(snapshot: MemoryStatusSnapshot): string[] {
 function renderCompactionLines(snapshot: MemoryStatusSnapshot): string[] {
   const view = snapshot.compaction
   if (view === undefined || view === null) return []
-  if (view.runs === 0) return ['compaction: runs=0']
+  const modeSuffix = view.mode === undefined ? '' : ' mode=' + view.mode
+  if (view.runs === 0) return ['compaction: runs=0' + modeSuffix]
   return [
-    `compaction: runs=${String(view.runs)} last=${view.lastCompactionId ?? 'n/a'}@${view.lastStartedAt ?? 'n/a'}`,
+    `compaction: runs=${String(view.runs)} last=${view.lastCompactionId ?? 'n/a'}@${view.lastStartedAt ?? 'n/a'}` + modeSuffix,
   ]
 }
 
