@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '6'
+export const SCHEMA_VERSION = '7'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -417,6 +417,24 @@ export function createStrategyCandidateTableStatement(): string {
     // AC:1458：候选必须能回溯到产生它的轨迹 / 反思（可回溯到 L0）——没有这列就是口头满足。
     'outcome STRING, reasons STRING, source_refs STRING[], created_at STRING, expires_at STRING, ' +
     'updated_at STRING, ' +
+    'PRIMARY KEY(id))'
+  )
+}
+/**
+ * 压缩运行账本（Story 8.1 / AD-26、AD-21、INV-22）：每次 compaction 的 Config 快照。
+ *
+ * Epic 8 的首张新表，owner = `context/`。为什么必须落表：压缩行为随配置漂移，事后要能回答
+ * 「那次压缩是在什么配置下做的」——只存当前 Config 无法回答历史问题。
+ *
+ * `(session_id, compaction_id)` 是业务唯一键（AC:1532 的幂等判据），但 LadybugDB 的复合唯一约束不可靠，
+ * 故唯一性由写路径（先查后写、同事务）保证，本表只声明 PRIMARY KEY(id)。
+ */
+export const COMPACTION_RUN_TABLE = 'compaction_run'
+
+export function createCompactionRunTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + COMPACTION_RUN_TABLE + '(' +
+    'id STRING, compaction_id STRING, session_id STRING, config_snapshot_json STRING, started_at STRING, ' +
     'PRIMARY KEY(id))'
   )
 }
