@@ -129,6 +129,8 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'rerank_latency: n/a (v1 无精排)',
       'pending_conflicts: 0',
       'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+      'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
+      'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
       // Story 5.1 / AC:1171：存储后端行追加在末尾。
       'backend: native',
     ].join('\n'))

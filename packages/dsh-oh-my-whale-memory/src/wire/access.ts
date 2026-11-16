@@ -12,6 +12,8 @@ import { computeEvidenceGap } from '../db/eii.js'
 import { collectHealthMetrics } from '../db/health.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
 import { countPendingDecisions, listPendingDecisions, resolvePendingDecision as resolvePendingDecisionInDb } from '../db/pending.js'
+import { slowQueueStats } from '../strategy/slow-queue.js'
+import type { MemoryReflectionView } from '../command.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
   countMemoriesByLayer,
@@ -33,6 +35,8 @@ import type { InjectionStore } from '../injection/state.js'
 import type { SystemOneClient } from '../distill/system-one.js'
 
 export interface MemoryAccessOptions {
+  /** Story 7.2：反思触发状态提供者（缺省 ⇒ status 不渲染 reflection 行）。 */
+  readonly reflectionView?: () => MemoryReflectionView
   /** 惰性取库句柄（建库之前为 undefined）。 */
   readonly getDb: () => MemoryDatabase | undefined
   /** apply 时 resolve 的配置（status 的 embeddingMode 与 System One 开关）。 */
@@ -172,6 +176,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 7.1 / D-4：待裁决冲突（条数 + 最新 5 条清单）；表缺失时 count 为 null = 未知。
       pendingConflicts: await countPendingDecisions(connection),
       pendingConflictEntries: await listPendingDecisions(connection, { limit: 5 }),
+      // Story 7.2：慢路径队列统计（表缺失时返回全 0，不阻塞 status）。
+      slowQueue: await slowQueueStats(connection).catch(() => null),
+      reflection: options.reflectionView?.() ?? null,
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),

@@ -27,6 +27,7 @@ import { openMemoryDatabase, type MemoryDatabase } from './db/database.js'
 import { acquireWriterLock, READONLY_REASON } from './db/writer-lock.js'
 import { createIdleGate } from './inbox/idle-gate.js'
 import { createMemoryAccess } from './wire/access.js'
+import { createReflectionState, readReflectionView } from './reflection/state.js'
 import { createRetrievalWiring } from './wire/retrieval.js'
 import { wireMemoryCommand } from './wire/commands.js'
 import { wireMemoryTools } from './wire/tools.js'
@@ -179,6 +180,8 @@ export async function apply(
     }
   }
 
+  // Story 7.2：反思窗口分与熔断状态只在内存里（重启即冷静），由 status 读取。
+  const reflectionState = createReflectionState()
   const access = createMemoryAccess({
     getDb,
     resolved,
@@ -186,6 +189,18 @@ export async function apply(
     getSystemOneClient: () => slots.systemOneClient,
     // Story 3.3：status 读注入观测摘要（进程内，null=本实例尚未触发注入）。
     injectionStore,
+    // Story 7.2：reflection 行数据源（窗口分 / 最近决策 / 熔断态）。
+    reflectionView: () => {
+      const view = readReflectionView(reflectionState)
+      return {
+        windowScore: view.windowScore,
+        lastTurnScore: view.lastTurnScore,
+        lastReflectionAt: view.lastReflectionAt,
+        trigger: view.lastDecision?.reason ?? null,
+        breaker: view.breaker.status,
+        consecutiveFailures: view.breaker.consecutiveFailures,
+      }
+    },
   })
   const retrieval = createRetrievalWiring({
     ctx,

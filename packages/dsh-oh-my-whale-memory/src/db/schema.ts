@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '4'
+export const SCHEMA_VERSION = '5'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -376,5 +376,25 @@ export function createRelatedTableStatement(): string {
   return (
     'CREATE REL TABLE IF NOT EXISTS ' + RELATED_TABLE + '(' +
     'FROM ' + MEMORY_TABLE + ' TO ' + MEMORY_TABLE + ', reason STRING)'
+  )
+}
+/**
+ * 慢路径任务队列（Story 7.2 / AD-6 的「慢路径独立队列与预算」、AD-20、Q-4）。
+ *
+ * 为什么单独一张表而不是复用 `l2_inbox`：AD-6 明确慢路径**不共用**快路径 FIFO（lease 60s / 重试 3 次 /
+ * 24h stale 只约束快路径），混用会让慢任务的 15–45min 级回测把采集/精炼挤住。反思（本 story）是它的
+ * 第一个生产者，7.3 的策略候选与 champion-challenger 回测复用它。
+ *
+ * 状态机：`pending → processing(lease_owner, lease_until) → done | failed`（与 AD-6 同形，但取自本表）。
+ * `attempts` 计单任务已重试次数（上限 3）；`window_round` 记整窗重扫已发生轮次（上限 2）。
+ */
+export const SLOW_TASK_TABLE = 'slow_task'
+
+export function createSlowTaskTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + SLOW_TASK_TABLE + '(' +
+    'id STRING, kind STRING, payload STRING, state STRING, attempts INT64, window_round INT64, ' +
+    'lease_owner STRING, lease_until STRING, last_error STRING, created_at STRING, updated_at STRING, ' +
+    'PRIMARY KEY(id))'
   )
 }
