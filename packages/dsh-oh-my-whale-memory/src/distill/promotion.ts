@@ -33,7 +33,7 @@ import {
   REFINE_KIND,
   WRITE_EVIDENCE_SKIPPED_ACTION,
   buildGateFailLogId,
-  insertGenerationLog,
+  auditWriter,
   type GenerationLogOutcome,
 } from '../db/audit.js'
 import { SemanticScanError, writeDeduplicatedMemory } from '../db/dedup.js'
@@ -223,13 +223,14 @@ async function insertL2Audit(
   now: () => Date,
   extra: { readonly questionKey?: string | null, readonly probability?: number | null, readonly threshold?: number | null, readonly passed?: boolean | null } = {},
 ): Promise<string> {
-  return insertGenerationLog(connection, {
+  return auditWriter(connection, {
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
-    action,
     policy: L2_PROMOTION_POLICY,
     l0Refs: [...refs],
+  })({
+    action,
     outcome,
     reason,
     questionKey: extra.questionKey ?? null,
@@ -253,18 +254,19 @@ async function markGateFail(
   const id = buildGateFailLogId(l1Id)
   const existing = await queryRows(connection, GATE_FAIL_EXISTS_STATEMENT, { id })
   if (existing.length > 0) return
-  await insertGenerationLog(connection, {
-    id,
+  await auditWriter(connection, {
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
-    action: GATE_FAIL_ACTION,
     // 评审 P16③（T35）：与同族的 insertL2Audit 同 policy，否则按 policy 过滤审计的消费者
     // 会漏掉全部 gate-fail 行（spec §3.6 声明的口径）。
     policy: L2_PROMOTION_POLICY,
+    l0Refs: [l1Id],
+  })({
+    id,
+    action: GATE_FAIL_ACTION,
     outcome: 'failure',
     reason: GATE_FAIL_REASON_PREFIX + ': ' + reason,
-    l0Refs: [l1Id],
   })
 }
 

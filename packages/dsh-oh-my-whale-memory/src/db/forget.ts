@@ -11,7 +11,7 @@
  *   0.22.3 的 `*1..$depth` 是 Parser exception（同 `edges.ts:275`）。同一 id 的多条路径会让
  *   查询重行，且 0.22.3 的 `min()` 聚合未验证 ⇒ 跳数在 JS 侧按 id 归并取最小。
  * - 全部写入在**一个** `runInTransaction` 内（AC「无半级联状态」）。事务内只允许「由调用方
- *   开事务」的原语：`insertGenerationLog` / `insertKeyedDecision` / 裸 `MATCH … SET`；
+ *   开事务」的原语：`auditWriter` / `insertKeyedDecision` / 裸 `MATCH … SET`；
  *   `runInTransaction` 不可重入，`upsertMemory` 这类自开事务的写入一律不碰。
  * - AD-10 次序：先写全部从属记录（generation_log + keyed_decision），再写指针
  *   （`invalid_at` 自顶向下 = 跳数降序），最后写目标的 `expired_at`。
@@ -30,7 +30,7 @@ import {
   REDACT_KIND,
   REDACT_L0_ACTION,
   buildJudgeKey,
-  insertGenerationLog,
+  auditWriter,
   insertKeyedDecision,
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
@@ -216,15 +216,12 @@ async function insertRedactLogs(
   ts: string,
 ): Promise<void> {
   for (const l0Id of l0Ids) {
-    await insertGenerationLog(connection, {
+    await auditWriter(connection, {
       recordedAt: ts,
       actor: 'user',
       kind: REDACT_KIND,
-      action: REDACT_L0_ACTION,
-      outcome: 'success',
       l0Refs: [l0Id],
-      reason: `redact root=${rootId} l0=${l0Id}`,
-    })
+    })({ action: REDACT_L0_ACTION, outcome: 'success', reason: `redact root=${rootId} l0=${l0Id}` })
   }
 }
 
@@ -291,13 +288,14 @@ export async function forgetMemory(
       .sort(compareAffected)
 
     // ① 从属记录：先落目标（级联行要用它的 log 行 id 作 trigger_id），再落每个受害者。
-    const rootLogId = await insertGenerationLog(connection, {
+    const rootLogId = await auditWriter(connection, {
       recordedAt: ts,
       actor: 'user',
       kind: FORGET_CASCADE_KIND,
-      action: FORGET_ACTION,
       policy: FORGET_POLICY,
       l0Refs: target.sourceRefs,
+    })({
+      action: FORGET_ACTION,
       outcome: 'success',
       reason: `forget root=${id} depth=0`,
       cascadeDepth: 0,
@@ -314,13 +312,14 @@ export async function forgetMemory(
       ts,
     })
     for (const victim of victims) {
-      await insertGenerationLog(connection, {
+      await auditWriter(connection, {
         recordedAt: ts,
         actor: 'user',
         kind: FORGET_CASCADE_KIND,
-        action: FORGET_ACTION,
         policy: FORGET_POLICY,
         l0Refs: victim.sourceRefs,
+      })({
+        action: FORGET_ACTION,
         outcome: 'success',
         reason: `forget root=${id} depth=${victim.hops}`,
         cascadeDepth: victim.hops,

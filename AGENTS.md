@@ -84,3 +84,25 @@ DSH 记忆插件 v1，由 Zettelkasten 原子记忆、LLM Wiki 和 SCD-2 双时�
 - 不可妥协：信任边界的校验、防数据丢失的错误处理、安全、无障碍、真实硬件校准、用户明确要求的一切。
 - 回复末尾用 1–2 行写明：跳过了什么/未检查什么，以及用户需要知道的风险。
 <!-- /bmad:context -->
+
+<!-- 以下不在 bmad:context 托管块内：bmad-project-context 刷新只替换上面的块，本段保留。 -->
+
+## 模块依赖方向（AD-33）与反向边的现状
+
+Story 5.4 / AC:1303-1305、AC:1327-1329 的收口记录（2026-11-16）。分层模型见 `scripts/check-deps.mjs`：
+
+- `kernel` = `db/`、`config.ts`；`domain` = `capture|inbox|distill|wiki|recall|embedding|strategy|context|ontology`；
+  `surface` = `tools/`、`command.ts`、`summarize.ts`。规则：`surface → domain → kernel` 单向，禁止反向与环。
+- **当前状态：例外清单为空**（`scripts/check-deps.mjs` 的 `EXCEPTIONS = []`），门禁对任何反向边零容忍。
+  实测 `node scripts/check-deps.mjs`：77 文件 / 327 相对 import 边 / 分层违规 0 / 循环 SCC 0。
+
+历史三处反向边的**正确方向**与消除方式（再往这三处加边就是新违规）：
+
+| 历史反向边 | 正确方向 | 当时为什么会反向 | 怎么消掉的 |
+|---|---|---|---|
+| `db/ → inbox/`（`database.ts` 依赖 `inbox/queue.ts`） | `inbox → db` | 建库时要把两张 INBOX 表一起建，图方便直接用了队列模块 | 把建表 DDL 抽到 `db/inbox-tables.ts`（kernel 内），`database.ts` 只依赖它；`inbox/queue.ts` 仍是状态机的唯实现 |
+| `distill/ → tools/` ×3（`llm-refine` / `processor` / `promotion` 依赖 `tools/memory-remember.ts` 的 `MEMORY_REMEMBER_LAYER`） | `tools → distill`（或共用的更低层） | 写 L1 时要用「L1 层名」这个常量，而它当时只导出在工具层 | 常量迁到 `shared/memory-vocab.ts`，`distill` 与 `tools` 都只依赖 `shared` |
+| `wiki ↔ distill`（`distill` 依赖 `wiki/relations` 的类型、`wiki` 与 `distill` 互相取用） | 同层允许，但**不得成环** | 关系识别在 `wiki`、精炼编排在 `distill`，两边都想要对方的类型 | 只保留 `distill → wiki` 的单向类型依赖；`check-deps` 的循环 SCC 为 0 即证明无环 |
+
+维护规则：新增违规必须先在同一数组登记一条 `[from, to]` 并写理由与到期复核，**禁止用通配把整层掩掉**；
+能消除就消除（本次把 4 条历史例外全部消成了 0 条）。

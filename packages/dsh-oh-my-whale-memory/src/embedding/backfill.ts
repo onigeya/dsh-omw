@@ -29,7 +29,7 @@ import {
   BACKFILL_EMBEDDING_ACTION,
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
-  insertGenerationLog,
+  auditWriter,
 } from '../db/audit.js'
 import { readPinnedEmbeddingDim } from '../db/dedup.js'
 import { listUnembeddedMemories, setMemoryEmbedding } from '../db/memory.js'
@@ -78,12 +78,13 @@ async function recordRoundFailure(
   nowIso: string,
 ): Promise<void> {
   await runInTransaction(connection, async () => {
-    await insertGenerationLog(connection, {
+    await auditWriter(connection, {
       recordedAt: nowIso,
       actor: 'system',
       kind: CAPTURE_KIND,
-      action: BACKFILL_EMBEDDING_ACTION,
       policy: DEFAULT_CAPTURE_POLICY,
+    })({
+      action: BACKFILL_EMBEDDING_ACTION,
       outcome: 'failure',
       reason: `failed=${failed} first=${firstReason}`,
     })
@@ -150,12 +151,13 @@ export function createEmbeddingBackfill(options: EmbeddingBackfillOptions): Embe
           const applied = await runInTransaction(connection, async () => {
             const updated = await setMemoryEmbedding(connection, entry.id, vector, options.modelId)
             if (!updated) return false
-            await insertGenerationLog(connection, {
+            await auditWriter(connection, {
               recordedAt: nowIso,
               actor: 'system',
               kind: CAPTURE_KIND,
-              action: BACKFILL_EMBEDDING_ACTION,
               policy: DEFAULT_CAPTURE_POLICY,
+            })({
+              action: BACKFILL_EMBEDDING_ACTION,
               outcome: 'success',
               reason: `node=${entry.id} dim=${vector.length}`,
             })

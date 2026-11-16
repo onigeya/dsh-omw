@@ -189,10 +189,17 @@ const READONLY_DB_POLL_MS = 50
  * 启动时，只读方可能正好读到「库文件已存在、表还没建」的中间态。该等，不该报错。
  *
  * 取 5s 而不是 2s：满载 Windows 机器上，写者的 `INSTALL/LOAD` + 建表实测会超过 2s，
+ *
+ * Story 5.4 / AC:1311-1313 的复现与决定（2026-11-16）：
+ * - 确定性复现**失败**：`db-readonly.test.ts` 单文件连跑 6 次 + 3 路并发跑 3 次，0 次失败；
+ *   它只在**全量 97 文件并行**时偶发（写者的 `INSTALL/LOAD` + 建表 + 建索引被抢 CPU）。
+ * - 因此不是逻辑错误，而是**满载下的时序预算不足**。决定：把有界窗口从 5s 抬到 10s（仍然是有界
+ *   重试、失败照旧 fail-loud），而不是把用例重跑到绿或放宽断言——重跑会掩盖、放宽会失去守护。
+ * - 为什么不是无限等待：只读实例必须有界退出，否则写者崩溃时第二实例会永久挂住。
  * 2s 窗口会让第二实例偶发 `schema_mismatch`（db-readonly 的启动竞态用例在满载时变红）。
  * 只在「写者持锁、库正在初始化」这条路径上付出等待，正常启动无感。
  */
-const READONLY_SCHEMA_WAIT_MS = 5_000
+const READONLY_SCHEMA_WAIT_MS = 10_000
 const READONLY_SCHEMA_POLL_MS = 50
 
 /** 有界等待库文件出现；超时返回 false（由调用方决定 fail-loud 文案）。 */

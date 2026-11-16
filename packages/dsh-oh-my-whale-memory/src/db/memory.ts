@@ -27,7 +27,7 @@ import {
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
   UPSERT_MEMORY_ACTION,
-  insertGenerationLog,
+  auditWriter,
   type MemoryActor,
 } from './audit.js'
 import { runPrepared } from './backend.js'
@@ -220,15 +220,13 @@ export async function writeMemoryVersion(
   }
   // AD-10 置序：节点的 source_refs 是「从属记录」、随上面的 MERGE 一起落齐；本行是同
   // 一事务里的账目追加。写日志失败 → 引擎回滚整个事务，节点也留不下。
-  await insertGenerationLog(connection, {
+  await auditWriter(connection, {
     recordedAt: now.toISOString(),
     actor: input.actor ?? 'system',
     kind: CAPTURE_KIND,
-    action: UPSERT_MEMORY_ACTION,
     policy: DEFAULT_CAPTURE_POLICY,
     l0Refs: sourceRefs,
-    outcome: 'success',
-  })
+  })({ action: UPSERT_MEMORY_ACTION, outcome: 'success' })
   return { id: String(row.id), recordedAt: String(row.recorded_at) }
 }
 

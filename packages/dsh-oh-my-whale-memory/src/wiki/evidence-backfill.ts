@@ -22,7 +22,7 @@ import {
   BACKFILL_EVIDENCE_ACTION,
   CAPTURE_KIND,
   DEFAULT_CAPTURE_POLICY,
-  insertGenerationLog,
+  auditWriter,
 } from '../db/audit.js'
 import { readMetaValue, writeMetaValue } from '../db/meta.js'
 import { isEvidenceLayerOrder, L0_LAYER, writeEvidenceEdges, type EvidenceEdgeInput } from '../db/edges.js'
@@ -181,15 +181,12 @@ export function createEvidenceBackfill(options: EvidenceBackfillOptions): Eviden
     let written = 0
     await runInTransaction(connection, async () => {
       // AD-10 置序：先写日志后写边。日志与边同事务，崩溃后不产生「有边无账」。
-      await insertGenerationLog(connection, {
+      await auditWriter(connection, {
         recordedAt: new Date().toISOString(),
         actor: 'system',
         kind: CAPTURE_KIND,
-        action: BACKFILL_EVIDENCE_ACTION,
         policy: DEFAULT_CAPTURE_POLICY,
-        outcome,
-        reason,
-      })
+      })({ action: BACKFILL_EVIDENCE_ACTION, outcome, reason })
       const result = await writeEvidenceEdges(connection, entries)
       written = result.written
       // 评审 P7（T7）：游标推进移入同一事务（写在写边与审计之后）。放在事务外时

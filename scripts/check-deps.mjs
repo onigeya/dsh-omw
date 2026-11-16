@@ -6,12 +6,11 @@ const src = join(root, 'packages/dsh-oh-my-whale-memory/src')
 const DOMAIN = ['capture', 'inbox', 'distill', 'wiki', 'recall', 'embedding', 'strategy', 'context', 'ontology']
 const KERNEL = ['db', 'config.ts']
 const SURFACES = ['tools', 'command.ts', 'summarize.ts']
-const EXCEPTIONS = [
-  ['db/database.ts', 'inbox/queue.ts'],
-  ['distill/llm-refine.ts', 'tools/memory-remember.ts'],
-  ['distill/processor.ts', 'tools/memory-remember.ts'],
-  ['distill/promotion.ts', 'tools/memory-remember.ts'],
-]
+// AD-33 依赖方向与循环门禁。Story 5.4 / AC:1303-1305：原 4 条过渡例外（db→inbox、distill→tools ×3）
+// 已随 `MEMORY_REMEMBER_LAYER` 迁到 `shared/memory-vocab.ts`、以及 `database.ts` 改依赖 db 内的
+// `inbox-tables.ts` 而全部消失——清单清空后本门禁对**任何**反向边都零容忍（不是整片豁免，也不是放宽）。
+// 新增违规必须先在本数组登记一条 `[from, to]` 并说明理由，禁止用通配把整层掩掉。
+const EXCEPTIONS = []
 const CYCLE_BASELINE = []
 
 const files = []

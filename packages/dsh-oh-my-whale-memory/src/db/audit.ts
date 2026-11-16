@@ -356,6 +356,38 @@ export async function insertGenerationLog(
 }
 
 /**
+ * 一次审计写路径的固定上下文（Story 5.4 / AC:1295-1297 的收敛点）。
+ *
+ * 13 处调用此前各自重复 `recordedAt` / `actor` / `kind` / `policy` / `l0Refs` 五个字段，
+ * 收敛后每个调用点只声明「这次动作是什么」（action/outcome/reason 及少量特有列）。
+ * 事务契约不变：本构造器返回的函数**不自开事务**，与 `insertGenerationLog` 同一契约。
+ */
+export interface AuditContext {
+  /** 本次操作时间（UTC ISO-8601），不是节点最终 recorded_at。 */
+  readonly recordedAt: string
+  readonly actor: MemoryActor
+  /** capture | refine | verify | cascade | redact（AD-21）。 */
+  readonly kind: string
+  readonly policy?: string | null
+  readonly l0Refs?: readonly string[]
+}
+
+/** 一次审计事件的差异部分（动作/结果/原因 + 少量特有列）。 */
+export type AuditEvent = Omit<GenerationLogEntry, 'recordedAt' | 'actor' | 'kind' | 'policy' | 'l0Refs'>
+
+/**
+ * 绑定上下文，返回一个只收事件的写函数。
+ *
+ * 用法：`const audit = auditWriter(connection, { recordedAt, actor, kind }); await audit({ action, outcome })`。
+ */
+export function auditWriter(
+  connection: lbug.Connection,
+  context: AuditContext,
+): (event: AuditEvent) => Promise<string> {
+  return (event) => insertGenerationLog(connection, { ...context, ...event })
+}
+
+/**
  * 落一条 keyed 裁决记录，返回 judge_key。
  *
  * 用 MERGE 而非 CREATE：judge_key 是内容键（AD-18），崩溃重放同一裁决必须幂等，
