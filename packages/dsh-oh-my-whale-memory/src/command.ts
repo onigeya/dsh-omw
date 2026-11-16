@@ -48,6 +48,8 @@ export const MEMORY_RECALL_SUBCOMMAND = 'recall'
 export const MEMORY_RELATED_SUBCOMMAND = 'related'
 /** `resolve` 子命令：裁决一条待裁决冲突（Story 7.1 / FR-20）。 */
 export const MEMORY_RESOLVE_SUBCOMMAND = 'resolve'
+/** `strategy` 子命令：策略候选区与采纳门计数（Story 7.3 / AC:1498）。 */
+export const MEMORY_STRATEGY_SUBCOMMAND = 'strategy'
 /** `forget` 子命令：软删除一条记忆并级联作废其上层引用者（Story 4.1）。 */
 export const MEMORY_FORGET_SUBCOMMAND = 'forget'
 
@@ -115,6 +117,12 @@ export const MEMORY_RELATED_USAGE = [
 ].join('\n')
 
 /** `forget` 子命令缺少 id 时的 usage 提示（Story 4.1；Story 4.2 加 `--redact` 说明）。 */
+export const MEMORY_STRATEGY_USAGE = [
+  '用法：/memory strategy',
+  '',
+  '查看策略候选数与采纳门结果（与 /memory status 同口径）。',
+].join('\n')
+
 export const MEMORY_RESOLVE_USAGE = [
   '用法：/memory resolve <待裁决 id> --accept | --keep',
   '',
@@ -148,6 +156,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_FORGET_USAGE,
   '',
   MEMORY_RESOLVE_USAGE,
+  '',
+  MEMORY_STRATEGY_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -358,6 +368,8 @@ export interface MemoryStatusSnapshot {
   readonly reflection?: MemoryReflectionView | null
   /** Story 7.2：慢路径队列统计（缺省 = 不渲染该行）。 */
   readonly slowQueue?: MemorySlowQueueView | null
+  /** Story 7.3：策略候选区与采纳门（缺省 = 保留占位文案）。 */
+  readonly strategyGate?: MemoryCommandStrategyResult | null
   /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
@@ -463,6 +475,8 @@ export interface MemoryCommandDependencies {
    * 抛错由 handler 收敛为 error 结果（不存在 = `pending_decision_not_found`）。
    */
   resolvePendingDecision(id: string, resolution: 'accept' | 'keep'): Promise<MemoryCommandResolveResult>
+  /** 策略候选区与采纳门计数（Story 7.3）；库未就绪时由 deps 抛错。 */
+  getStrategyStats(): Promise<MemoryCommandStrategyResult>
 }
 
 /** 解析结果：七个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
@@ -475,6 +489,7 @@ export type MemoryCommandParseResult =
   | { kind: 'related', id: string, depth?: number }
   | { kind: 'forget', id: string, redact?: boolean }
   | { kind: 'resolve', id: string, resolution: 'accept' | 'keep' }
+  | { kind: 'strategy' }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -596,6 +611,8 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return parseForgetPayload(payload)
     case MEMORY_RESOLVE_SUBCOMMAND:
       return parseResolvePayload(payload)
+    case MEMORY_STRATEGY_SUBCOMMAND:
+      return payload ? { kind: 'invalid', usage: MEMORY_STRATEGY_USAGE } : { kind: 'strategy' }
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -724,6 +741,36 @@ function renderMemoryRecall(result: MemoryCommandRecallResult): string {
  *   `已改写 L0 墓碑 <k> 条，证据降级 <m> 条记忆`——不带旗标时该行绝不出现（矩阵行 15）。
  * 摘要走 `summarizeMemoryText`（折叠换行 + 60 code point 截断），保证「每行一个条目」。
  */
+/** 策略候选区与采纳门的计数（命令层镜像 `strategy/candidates.ts` 的 `StrategyStats`）。 */
+export interface MemoryCommandStrategyResult {
+  readonly candidates: number
+  readonly pending: number
+  readonly adopted: number
+  readonly rejected: number
+  readonly expired: number
+  /** `evidence: none` 的候选数（无 case 集，按 AD-20 不得宣称有效）。 */
+  readonly noEvidence: number
+  readonly minConfidence: number
+  readonly expiryDays: number
+  readonly maxPendingPerSession: number
+}
+
+/**
+ * `/memory strategy` 渲染（AC:1498：候选数 / 过门数 / 未过门数，与 status 同口径）。
+ *
+ * 无 case 集是**允许的降级态**（AD-20）：必须显式写出来，不能让它看起来像「0 个失败」。
+ */
+function renderMemoryStrategy(result: MemoryCommandStrategyResult): string {
+  const lines = [
+    `策略候选：${String(result.candidates)}（pending ${String(result.pending)} / 过门 ${String(result.adopted)} / 未过门 ${String(result.rejected)} / 过期 ${String(result.expired)}）`,
+    `采纳门：minConfidence=${String(result.minConfidence)} expiryDays=${String(result.expiryDays)} maxPendingPerSession=${String(result.maxPendingPerSession)}`,
+  ]
+  if (result.noEvidence > 0) {
+    lines.push(`注意：${String(result.noEvidence)} 条候选无 case 集（evidence: none）——按 AD-20 只记录不采纳，不得据此宣称策略有效`)
+  }
+  return lines.join('\n')
+}
+
 /** 裁决结果（命令层镜像 `db/pending.ts` 的返回值；不 import db 模块）。 */
 export interface MemoryCommandResolveResult {
   readonly id: string
@@ -995,6 +1042,21 @@ function renderPendingConflictLines(snapshot: MemoryStatusSnapshot): string[] {
 }
 
 /**
+ * `strategy_gate:` 行（Story 7.3 / AC:1494、1498）。
+ * 未提供数据（undefined/null）时回退到 4.3 的占位文案，保持既有钉死块不变。
+ */
+function renderStrategyGateLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.strategyGate
+  if (view === undefined || view === null) return ['strategy_gate: n/a（Epic 7 真源在 Story 7.3）']
+  const line =
+    `strategy_gate: candidates=${String(view.candidates)} pending=${String(view.pending)} adopted=${String(view.adopted)} ` +
+    `rejected=${String(view.rejected)} noEvidence=${String(view.noEvidence)} minConfidence=${String(view.minConfidence)}`
+  const lines = [line]
+  if (view.noEvidence > 0) lines.push('strategy_gate: 部分候选无 case 集（evidence: none）——只记录不采纳')
+  return lines
+}
+
+/**
  * 健康指标五行（Story 4.3，spec 钉死的顺序与文案）：
  * `inbox_backlog` / `last_refine_at` / `rerank_latency` / `pending_conflicts` / `strategy_gate`。
  *
@@ -1016,7 +1078,7 @@ function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   // 因为它是真实数据而不是健康指标。
   lines.push(...renderPendingConflictLines(snapshot))
   if (health !== undefined) {
-    lines.push('strategy_gate: n/a（Epic 7 真源在 Story 7.3）')
+    lines.push(...renderStrategyGateLines(snapshot))
   }
   // Story 7.2：反思触发与慢路径队列追加在**所有既有行之后**（AC:1406 / 1433-1435），
   // 这样 4.3 钉死的五行顺序与文案逐字不变。
@@ -1093,6 +1155,10 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
               : { id: parsed.id, depth: parsed.depth }
             const result = await deps.relatedMemories(input)
             return { kind: 'success', text: renderMemoryRelated(result) }
+          }
+          case 'strategy': {
+            const result = await deps.getStrategyStats()
+            return { kind: 'success', text: renderMemoryStrategy(result) }
           }
           case 'resolve': {
             // 裁决是写路径：库未就绪/只读/不存在由 deps 抛错，下面的 catch 收敛为 error 结果。

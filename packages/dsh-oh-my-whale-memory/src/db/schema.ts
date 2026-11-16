@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '5'
+export const SCHEMA_VERSION = '6'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -395,6 +395,26 @@ export function createSlowTaskTableStatement(): string {
     'CREATE NODE TABLE IF NOT EXISTS ' + SLOW_TASK_TABLE + '(' +
     'id STRING, kind STRING, payload STRING, state STRING, attempts INT64, window_round INT64, ' +
     'lease_owner STRING, lease_until STRING, last_error STRING, created_at STRING, updated_at STRING, ' +
+    'PRIMARY KEY(id))'
+  )
+}
+/**
+ * 策略候选区（Story 7.3 / AD-20）。
+ *
+ * AD-20 逐字：「队列落 `strategy_candidate` 表 `{id, strategy_id, payload, created_at, expires_at, outcome}`，
+ * `(strategy_id, state)` 计 pending」。本 story 在其上加 `state`（pending/adopted/rejected/expired）、
+ * `rewrites`（最多 2 次重写，改写对象仅限候选本身）与 `score`（采纳门分数，便于 status 与审计）。
+ *
+ * **禁止整体重写正文**：`payload` 只在 `rewrites < 2` 时由 `rewriteCandidate` 改写；
+ * 已入正式区的策略是 `memory` 节点，本表永远不会动它。
+ */
+export const STRATEGY_CANDIDATE_TABLE = 'strategy_candidate'
+
+export function createStrategyCandidateTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + STRATEGY_CANDIDATE_TABLE + '(' +
+    'id STRING, strategy_id STRING, payload STRING, state STRING, rewrites INT64, score DOUBLE, ' +
+    'outcome STRING, reasons STRING, created_at STRING, expires_at STRING, updated_at STRING, ' +
     'PRIMARY KEY(id))'
   )
 }

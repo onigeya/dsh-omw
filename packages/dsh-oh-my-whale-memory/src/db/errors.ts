@@ -48,6 +48,10 @@ export type MemoryDbErrorCode =
   | 'slow_task_not_found'
   /** 整窗重扫已达上限（> 2 轮），调用方应转运行级短路（Story 7.2 / Q-4）。 */
   | 'slow_task_window_exhausted'
+  /** 策略候选不存在（Story 7.3）。 */
+  | 'strategy_candidate_not_found'
+  /** 候选重写次数用尽（Story 7.3 / AC:1490：2 次后丢弃）。 */
+  | 'strategy_rewrite_exhausted'
   /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
   | 'schema_migration_failed'
 
