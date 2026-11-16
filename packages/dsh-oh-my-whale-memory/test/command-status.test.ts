@@ -335,13 +335,15 @@ describe('Story 4.3：健康五行（T2 / 矩阵行 2/3/11）', () => {
     expect(withoutHealth.split('\n').at(-1)).toBe('injection: 未知（本实例尚未触发开局注入）')
   })
 
-  it('有 health ⇒ 五行追加在 injection 之后，顺序固定', () => {
+  it('有 health ⇒ 五行追加在 injection 之后，顺序固定（pending_conflicts 现为真实行）', () => {
     const text = renderMemoryStatus({
       ...STATUS_BASE,
       health: {
         inboxBacklog: { status: 'ok', value: { l1Ms: 90_000, l2Ms: 30_000 } },
         lastRefineAt: { status: 'ok', value: '2026-11-01T00:30:00.000Z' },
       },
+      // Story 7.1：pending_conflicts 从占位变成真实数据；无待裁决时渲染 0。
+      pendingConflicts: 0,
     })
     const lines = text.split('\n')
     const tail = lines.slice(-5)
@@ -349,7 +351,7 @@ describe('Story 4.3：健康五行（T2 / 矩阵行 2/3/11）', () => {
       'inbox_backlog: 90s（L1 90s / L2 30s）',
       'last_refine_at: 2026-11-01T00:30:00.000Z',
       'rerank_latency: n/a (v1 无精排)',
-      'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
+      'pending_conflicts: 0',
       'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
     ])
     // 既有行（injection 之前）逐字不变。

@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '3'
+export const SCHEMA_VERSION = '4'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -148,6 +148,26 @@ export function createSchemaMigrationTableStatement(): string {
   return (
     'CREATE NODE TABLE IF NOT EXISTS ' + SCHEMA_MIGRATION_TABLE + '(' +
     'version INT64, applied_at STRING, checksum STRING, PRIMARY KEY(version))'
+  )
+}
+/**
+ * 待裁决冲突（Story 7.1 / FR-20、AD-18 的 `await-confirmation` 载体）。
+ *
+ * 为什么必须新建表（AD-34：加表要 bump SCHEMA_VERSION 并写迁移）：`keyed_decision` 按 AD-21 只存
+ * id / 策略 / 结果枚举，**不存正文**（NFR9），而候选正文必须活到用户裁决那一刻——放进程内存态
+ * 一重启就丢。`id` 直接取 keyed 裁决的 `judge_key`（内容键），于是「一条 pending 行 ↔ 一条
+ * await-confirmation 裁决」是一一对应的，resolve 时两边能对得上。
+ *
+ * 生命周期：写入路径（persona 冲突）INSERT；`/memory resolve` 在同一事务里写入新节点 + 写
+ * supersede/merge 的 keyed 行 + DELETE 本行。`payload` 是记忆正文（用户自己写的内容）。
+ */
+export const PENDING_DECISION_TABLE = 'pending_decision'
+
+export function createPendingDecisionTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + PENDING_DECISION_TABLE + '(' +
+    'id STRING, old_id STRING, new_id STRING, payload STRING, kind STRING, priority INT64, ' +
+    'actor STRING, created_at STRING, PRIMARY KEY(id))'
   )
 }
 

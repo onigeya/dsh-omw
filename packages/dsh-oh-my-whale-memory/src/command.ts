@@ -46,6 +46,8 @@ export const MEMORY_STATUS_SUBCOMMAND = 'status'
 export const MEMORY_RECALL_SUBCOMMAND = 'recall'
 /** `related` 子命令：沿证据链/语义关系遍历邻居（Story 3.2）。 */
 export const MEMORY_RELATED_SUBCOMMAND = 'related'
+/** `resolve` 子命令：裁决一条待裁决冲突（Story 7.1 / FR-20）。 */
+export const MEMORY_RESOLVE_SUBCOMMAND = 'resolve'
 /** `forget` 子命令：软删除一条记忆并级联作废其上层引用者（Story 4.1）。 */
 export const MEMORY_FORGET_SUBCOMMAND = 'forget'
 
@@ -113,6 +115,13 @@ export const MEMORY_RELATED_USAGE = [
 ].join('\n')
 
 /** `forget` 子命令缺少 id 时的 usage 提示（Story 4.1；Story 4.2 加 `--redact` 说明）。 */
+export const MEMORY_RESOLVE_USAGE = [
+  '用法：/memory resolve <待裁决 id> --accept | --keep',
+  '',
+  '裁决一条 persona 冲突：--accept 接受新值（旧值作废），--keep 保留并存。',
+  'id 取自 /memory status 的 pending_conflicts 清单。示例：/memory resolve <id> --accept',
+].join('\n')
+
 export const MEMORY_FORGET_USAGE = [
   '用法：/memory forget <id> [--redact]',
   '',
@@ -137,6 +146,8 @@ export const MEMORY_COMMAND_USAGE = [
   MEMORY_RELATED_USAGE,
   '',
   MEMORY_FORGET_USAGE,
+  '',
+  MEMORY_RESOLVE_USAGE,
 ].join('\n')
 
 /** 命令调用（宿主实际传入完整对象，本命令只消费 `rawInput`）。 */
@@ -338,6 +349,12 @@ export interface MemoryStatusSnapshot {
    */
   readonly health?: MemoryHealthView
   /**
+   * 待裁决冲突（Story 7.1 / FR-20）：`undefined` = 该行不渲染（缺省，保既有块逐字不变）；
+   * `null` = 表缺失算不出来（渲染「未知」）；数字 = 真实条数，`pendingConflictEntries` 是最新 N 条清单。
+   */
+  readonly pendingConflicts?: number | null
+  readonly pendingConflictEntries?: readonly MemoryPendingConflictEntry[]
+  /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
    *（既有逐行输出逐字不变）。数据来源是 `db/database.ts` 的 `memoryDatabaseBackendKind`。
@@ -437,6 +454,11 @@ export interface MemoryCommandDependencies {
    * （只有带旗标才传第二个参数，4.1 的调用点与断言因此逐字不变）。
    */
   forgetMemory(id: string, options?: { readonly redact?: boolean }): Promise<MemoryCommandForgetResult>
+  /**
+   * 裁决一条待裁决冲突（Story 7.1）：`accept` 接受新值（旧值 invalid_at）、`keep` 保留并存。
+   * 抛错由 handler 收敛为 error 结果（不存在 = `pending_decision_not_found`）。
+   */
+  resolvePendingDecision(id: string, resolution: 'accept' | 'keep'): Promise<MemoryCommandResolveResult>
 }
 
 /** 解析结果：七个子命令分支，或「缺参 / 未知子命令」并给出对应 usage。 */
@@ -448,6 +470,7 @@ export type MemoryCommandParseResult =
   | { kind: 'recall', query: string }
   | { kind: 'related', id: string, depth?: number }
   | { kind: 'forget', id: string, redact?: boolean }
+  | { kind: 'resolve', id: string, resolution: 'accept' | 'keep' }
   | { kind: 'invalid', usage: string }
 
 /** `--kind=` 旗标名（AC2：手动写路径产出非空分类）。 */
@@ -567,6 +590,8 @@ export function parseMemoryCommand(rawInput: string): MemoryCommandParseResult {
       return parseRelatedPayload(payload)
     case MEMORY_FORGET_SUBCOMMAND:
       return parseForgetPayload(payload)
+    case MEMORY_RESOLVE_SUBCOMMAND:
+      return parseResolvePayload(payload)
     default:
       return { kind: 'invalid', usage: MEMORY_COMMAND_USAGE }
   }
@@ -598,6 +623,21 @@ function parseRelatedPayload(payload: string): MemoryCommandParseResult {
   const depth = Number(depthToken)
   if (!Number.isSafeInteger(depth) || depth < 1) return { kind: 'invalid', usage: MEMORY_RELATED_USAGE }
   return { kind: 'related', id, depth }
+}
+
+/**
+ * 解析 `resolve` 的 payload：`<id> --accept|--keep`（Story 7.1）。
+ * - 缺 id / 缺旗标 / 两个旗标 / 未知旗标 → usage（不静默猜测用户意图）；
+ * - 旗标与 id 的先后无关，但只允许一个裁决旗标、一个 id。
+ */
+function parseResolvePayload(payload: string): MemoryCommandParseResult {
+  const tokens = payload.split(/\s+/).filter((token) => token.length > 0)
+  const flags = tokens.filter((token) => token.startsWith('--'))
+  const ids = tokens.filter((token) => !token.startsWith('--'))
+  if (ids.length !== 1 || flags.length !== 1) return { kind: 'invalid', usage: MEMORY_RESOLVE_USAGE }
+  const flag = flags[0]
+  if (flag !== '--accept' && flag !== '--keep') return { kind: 'invalid', usage: MEMORY_RESOLVE_USAGE }
+  return { kind: 'resolve', id: ids[0]!, resolution: flag === '--accept' ? 'accept' : 'keep' }
 }
 
 /** 详情值占位：NULL / undefined / 空字符串统一渲染 `(空)`，不出现 `undefined`。 */
@@ -680,6 +720,19 @@ function renderMemoryRecall(result: MemoryCommandRecallResult): string {
  *   `已改写 L0 墓碑 <k> 条，证据降级 <m> 条记忆`——不带旗标时该行绝不出现（矩阵行 15）。
  * 摘要走 `summarizeMemoryText`（折叠换行 + 60 code point 截断），保证「每行一个条目」。
  */
+/** 裁决结果（命令层镜像 `db/pending.ts` 的返回值；不 import db 模块）。 */
+export interface MemoryCommandResolveResult {
+  readonly id: string
+  readonly newMemoryId: string
+  readonly action: 'supersede' | 'merge'
+}
+
+/** `resolve` 结果渲染（spec 钉死：动作 + 两个 id，便于用户核对）。 */
+function renderMemoryResolve(result: MemoryCommandResolveResult): string {
+  const verdict = result.action === 'supersede' ? '已接受新值（旧值作废）' : '已保留并存'
+  return [`${verdict}：${result.id}`, `- 新记忆：${result.newMemoryId}`].join('\n')
+}
+
 function renderMemoryForget(result: MemoryCommandForgetResult): string {
   const entries = result.affected.map(
     (entry) => `- ${entry.id} [${entry.layer}] 深度 ${entry.hops} ${summarizeMemoryText(entry.text)}`,
@@ -821,7 +874,7 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   lines.push(...renderInjectionStatusLines(snapshot))
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
-  lines.push(...renderHealthStatusLines(snapshot.health))
+  lines.push(...renderHealthStatusLines(snapshot))
   // Story 5.1 / AC:1171：存储后端可见（纯 Node = native，Electron 宿主 = wasm，AD-32）。
   // 缺省（未传）时不追加，既有钉死块与 4.3 的五行顺序逐字不变（矩阵行 8）。
   if (snapshot.backend !== undefined) {
@@ -863,6 +916,32 @@ function renderInboxBacklogValue(metric: MemoryHealthMetric<MemoryHealthBacklog>
   return `${Math.floor(maxMs / 1000)}s（L1 ${renderBacklogQueue(l1Ms)} / L2 ${renderBacklogQueue(l2Ms)}）`
 }
 
+/** 待裁决清单里的一行（命令层镜像 `db/pending.ts` 的 `PendingDecision` 子集）。 */
+export interface MemoryPendingConflictEntry {
+  readonly id: string
+  readonly oldId: string
+  readonly payload: string
+}
+
+/**
+ * `pending_conflicts` 行（Story 7.1 / spec D-4）：
+ * - 未提供（undefined）⇒ 不渲染（既有钉死块逐字不变）；
+ * - 表缺失（null）⇒ 未知；
+ * - 0 ⇒ `pending_conflicts: 0`；`n>0` ⇒ 计数 + 最多 5 行清单（旧 id → 新正文摘要）。
+ */
+function renderPendingConflictLines(snapshot: MemoryStatusSnapshot): string[] {
+  const count = snapshot.pendingConflicts
+  if (count === undefined) return []
+  if (count === null) return ['pending_conflicts: 未知（库缺少待裁决表）']
+  const lines = [`pending_conflicts: ${count}`]
+  const entries = snapshot.pendingConflictEntries ?? []
+  for (const entry of entries.slice(0, 5)) {
+    lines.push(`  - ${entry.id} old=${entry.oldId} → ${summarizeMemoryText(entry.payload)}`)
+  }
+  if (count > entries.length) lines.push(`  … 还有 ${count - entries.length} 条`)
+  return lines
+}
+
 /**
  * 健康指标五行（Story 4.3，spec 钉死的顺序与文案）：
  * `inbox_backlog` / `last_refine_at` / `rerank_latency` / `pending_conflicts` / `strategy_gate`。
@@ -870,16 +949,24 @@ function renderInboxBacklogValue(metric: MemoryHealthMetric<MemoryHealthBacklog>
  * 两张 Epic 7 的占位行只写死文案、不做任何采集（真源在 Story 7.1 / 7.3，D-6）；
  * `rerank_latency` 恒 `n/a`（v1 无精排，AD-16 归 v1.1，绝不编造数字）。
  */
-function renderHealthStatusLines(health: MemoryHealthView | undefined): string[] {
-  if (health === undefined) return []
-  const lastRefine = health.lastRefineAt
-  return [
-    `inbox_backlog: ${renderInboxBacklogValue(health.inboxBacklog)}`,
-    `last_refine_at: ${lastRefine.status === 'ok' ? lastRefine.value : healthMetricReason(lastRefine, 'n/a（从未完成精炼）')}`,
-    'rerank_latency: n/a (v1 无精排)',
-    'pending_conflicts: n/a（Epic 7 真源在 Story 7.1）',
-    'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
-  ]
+function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  const health = snapshot.health
+  const lines: string[] = []
+  if (health !== undefined) {
+    const lastRefine = health.lastRefineAt
+    lines.push(
+      `inbox_backlog: ${renderInboxBacklogValue(health.inboxBacklog)}`,
+      `last_refine_at: ${lastRefine.status === 'ok' ? lastRefine.value : healthMetricReason(lastRefine, 'n/a（从未完成精炼）')}`,
+      'rerank_latency: n/a (v1 无精排)',
+    )
+  }
+  // Story 7.1：待裁决冲突取代 4.3 的占位行（D-4）。health 缺省时也照常渲染本行，
+  // 因为它是真实数据而不是健康指标。
+  lines.push(...renderPendingConflictLines(snapshot))
+  if (health !== undefined) {
+    lines.push('strategy_gate: n/a（Epic 7 真源在 Story 7.3）')
+  }
+  return lines
 }
 
 /** 注入状态行（Story 3.3 / B4；单位标注=字符，AC:935）。 */
@@ -950,6 +1037,11 @@ export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): 
               : { id: parsed.id, depth: parsed.depth }
             const result = await deps.relatedMemories(input)
             return { kind: 'success', text: renderMemoryRelated(result) }
+          }
+          case 'resolve': {
+            // 裁决是写路径：库未就绪/只读/不存在由 deps 抛错，下面的 catch 收敛为 error 结果。
+            const result = await deps.resolvePendingDecision(parsed.id, parsed.resolution)
+            return { kind: 'success', text: renderMemoryResolve(result) }
           }
           case 'forget': {
             // 手动遗忘不计入 turn 配额；库未就绪/只读/不存在由 deps 抛错，下面的 catch

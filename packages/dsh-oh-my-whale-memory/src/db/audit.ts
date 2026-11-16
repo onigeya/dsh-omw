@@ -69,6 +69,9 @@ export const REFINE_INBOX_ACTION = 'refine_inbox'
 /** 语义去重（路径②，Story 2.4 / U10）：向既有节点追加 source_refs，不新建节点。 */
 export const MERGE_SEMANTIC_ACTION = 'merge_semantic'
 
+/** 人设冲突转待裁决（Story 7.1 / FR-20、AD-18 的 await-confirmation 档）：本次不写节点，等用户裁决。 */
+export const AWAIT_CONFIRMATION_ACTION = 'await_confirmation'
+
 /** 版本作废（路径③，Story 2.4 / U10）：旧版本置 invalid_at、新节点记 parent_id。 */
 export const INVALIDATE_VERSION_ACTION = 'invalidate_version'
 
