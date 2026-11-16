@@ -29,8 +29,6 @@ export interface MemoryToolsOptions {
   readonly fold?: {
     readonly thresholdTokens: number
     readonly readonly: boolean
-    readonly sessionId: () => string
-    readonly seqKey: (input: { readonly id: string, readonly depth: number }) => string
     readonly write: (input: {
       readonly sessionId: string
       readonly seq: number

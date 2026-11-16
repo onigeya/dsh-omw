@@ -68,9 +68,6 @@ export interface MemoryRelatedToolOptions {
   readonly fold?: {
     readonly thresholdTokens: number
     readonly readonly: boolean
-    readonly sessionId: () => string
-    /** 幂等键：同一会话 + 同一起点 + 同一 depth 视为「同一条工具结果」。 */
-    readonly seqKey: (input: { readonly id: string, readonly depth: number }) => string
     /** fail-open 的告警出口（折叠写图失败时只 warn，不改变返回值）。 */
     readonly logger?: { warn(message: string): void }
     readonly write?: (input: {
@@ -319,12 +316,14 @@ export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
         const succeeded = toSucceeded(result, partial)
         const fold = options.fold
         if (fold === undefined || fold.write === undefined) return succeeded
+        // 会话键取自**当次调用**（wiring 期的静态 id 在多会话下是错的）。
+        const owner = quotaOwnerOf(exec)
         // 把成功值序列化成「表面文本」再判定：折叠的是整条工具结果，不是逐条文本。
         const surface = JSON.stringify(succeeded)
         const folded = await foldToolResult({
           text: surface,
-          sessionId: fold.sessionId(),
-          seq: seqNumber(fold.seqKey({ id: succeeded.id, depth: succeeded.depth })),
+          sessionId: owner,
+          seq: seqNumber('related:' + owner + ':' + succeeded.id + ':' + String(succeeded.depth)),
           thresholdTokens: fold.thresholdTokens,
           readonly: fold.readonly,
           write: ({ sessionId, seq, text }) => fold.write!({ sessionId, seq, text, tokens: Math.ceil(text.length / 2) }),
