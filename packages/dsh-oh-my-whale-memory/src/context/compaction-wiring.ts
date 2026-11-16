@@ -98,7 +98,11 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
       if (connection === null) return
       try {
         await ingestCompactionSummary(connection, {
-          payload: readPayload(event) as never,
+        // 宿主（dsh-compaction-basic）的 `compaction/summary` payload **不含 sessionId**，
+        // 会话归属在 append 的目标 session 上（stock: index.js:634-649 只给 compactionId/summary/
+        // shadowedSeqs/shadowedRange/…）。因此这里必须显式注入，否则 buildCompactionSummaryEntry
+        // 会以 `compaction_summary_invalid` 失败、整条入图静默丢失。
+        payload: { ...readPayload(event), sessionId: sessionId === '' ? undefined : sessionId } as never,
           configSnapshot: options.configSnapshot(),
           startedAt: now().toISOString(),
           nowIso: now().toISOString(),
