@@ -67,7 +67,8 @@ export interface MemoryRelatedToolOptions {
    */
   readonly fold?: {
     readonly thresholdTokens: number
-    readonly readonly: boolean
+    /** 惰性读只读态：wiring 早于取得写者锁，静态快照会误判（INV-7）。 */
+    readonly readonly: () => boolean
     /** fail-open 的告警出口（折叠写图失败时只 warn，不改变返回值）。 */
     readonly logger?: { warn(message: string): void }
     readonly write?: (input: {
@@ -325,7 +326,7 @@ export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
           sessionId: owner,
           seq: seqNumber('related:' + owner + ':' + succeeded.id + ':' + String(succeeded.depth)),
           thresholdTokens: fold.thresholdTokens,
-          readonly: fold.readonly,
+          readonly: fold.readonly(),
           write: ({ sessionId, seq, text }) => fold.write!({ sessionId, seq, text, tokens: Math.ceil(text.length / 2) }),
           logger: fold.logger,
         })

@@ -247,7 +247,8 @@ export async function apply(
     // Story 8.2：`memory_related` 结果超阈值 ⇒ 折成句柄（全文入图，表面只留句柄）。
     fold: {
       thresholdTokens: resolved.foldThresholdTokens,
-      readonly: instance.readonly,
+      // 惰性：wiring 发生在写者锁之前，此刻 instance.readonly 还没定（INV-7 必须靠运行期判定）。
+      readonly: () => instance.readonly,
       write: async (input) => {
         const database = getDb()
         if (database === undefined) throw new Error('db unavailable')

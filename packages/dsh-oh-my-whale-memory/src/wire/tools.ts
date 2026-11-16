@@ -28,7 +28,8 @@ export interface MemoryToolsOptions {
   /** Story 8.2：结果折叠配置（缺省 = 不折叠）。 */
   readonly fold?: {
     readonly thresholdTokens: number
-    readonly readonly: boolean
+    /** 惰性读只读态（wiring 早于取得写者锁，见 memory-related 的注释）。 */
+    readonly readonly: () => boolean
     readonly write: (input: {
       readonly sessionId: string
       readonly seq: number

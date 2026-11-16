@@ -76,7 +76,7 @@ describe('折叠 → memory_expand 还原（端到端）', () => {
       fold: {
         // 阈值 10 tokens ⇒ 任何真实结果都会超
         thresholdTokens: 10,
-        readonly: false,
+        readonly: () => false,
         logger: { warn: () => {} },
         write: async (input) => {
           // 复用生产写路径（writeHandle）：幂等键 = (session, seq)
@@ -159,7 +159,7 @@ describe('折叠 → memory_expand 还原（端到端）', () => {
       quota: createRecallTurnQuota(3),
       fold: {
         thresholdTokens: 10,
-        readonly: true,
+        readonly: () => true,
         write: async () => {
           wrote += 1
           return { id: 'should-not-happen' }
