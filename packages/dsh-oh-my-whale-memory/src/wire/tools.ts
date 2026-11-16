@@ -25,6 +25,20 @@ export interface MemoryToolsOptions {
   readonly quota: RecallQuota
   /** Story 8.2：当前会话 id（用于句柄的 `session_mismatch` 判定）；缺省不判越权。 */
   readonly sessionId?: () => string
+  /** Story 8.2：结果折叠配置（缺省 = 不折叠）。 */
+  readonly fold?: {
+    readonly thresholdTokens: number
+    readonly readonly: boolean
+    readonly sessionId: () => string
+    readonly seqKey: (input: { readonly id: string, readonly depth: number }) => string
+    readonly write: (input: {
+      readonly sessionId: string
+      readonly seq: number
+      readonly text: string
+      readonly tokens: number
+    }) => Promise<{ readonly id: string }>
+    readonly logger?: { warn(message: string): void }
+  }
 }
 
 export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void {
@@ -39,6 +53,8 @@ export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void
     // 只读实例的遍历是纯读路径，照样可用；库未就绪时同样返回 db_unavailable。
     getRelatedStore: () => (getDb() === undefined ? undefined : options.relatedStore),
     quota: options.quota,
+    // Story 8.2：结果超阈值 ⇒ 折成句柄（readOnly 由 foldToolResult 内部判定）。
+    fold: options.fold,
   }))
   ctx.tools.register(createMemoryForgetTool({
     // 遗忘工具不写库：它只把 id 解析成预览并请求用户确认（执行通道不存在，Story 4.1）。
