@@ -56,6 +56,10 @@ export type MemoryDbErrorCode =
   | 'strategy_candidate_not_pending'
   /** `compaction/summary` payload 非法（Story 8.1：缺 sessionId/compactionId 或摘要为空，拒绝入图）。 */
   | 'compaction_summary_invalid'
+  /** 句柄正文为空（Story 8.2：空句柄无法还原任何内容，拒绝写入）。 */
+  | 'handle_text_empty'
+  /** 句柄写入后读不回（Story 8.2：写路径自检，属实现错误而非用户错误）。 */
+  | 'handle_write_failed'
   /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
   | 'schema_migration_failed'
 
