@@ -13,6 +13,7 @@ import { collectHealthMetrics } from '../db/health.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
 import { countPendingDecisions, listPendingDecisions, resolvePendingDecision as resolvePendingDecisionInDb } from '../db/pending.js'
 import { slowQueueStats } from '../strategy/slow-queue.js'
+import { expireStrategyCandidates, strategyStats } from '../strategy/candidates.js'
 import type { MemoryReflectionView } from '../command.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
@@ -59,6 +60,8 @@ export interface MemoryAccess {
   readonly forgetMemory: MemoryCommandDependencies['forgetMemory']
   /** Story 7.1：裁决待裁决冲突（写路径，只读实例先拒）。 */
   readonly resolvePendingDecision: MemoryCommandDependencies['resolvePendingDecision']
+  /** Story 7.3：策略候选区与采纳门计数（只读可查；过期扫描只在非只读实例执行）。 */
+  readonly getStrategyStats: MemoryCommandDependencies['getStrategyStats']
 }
 
 /** 库未就绪的统一文案：写入与读取各一句，逐字保留命令层既有输出。 */
@@ -179,11 +182,47 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 7.2：慢路径队列统计（表缺失时返回全 0，不阻塞 status）。
       slowQueue: await slowQueueStats(connection).catch(() => null),
       reflection: options.reflectionView?.() ?? null,
+      // Story 7.3：策略采纳门（AC:1494/1498）；缺表时全 0，不阻塞 status。
+      strategyGate: await getStrategyStats().catch(() => null),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),
     }
   }
 
-  return { readConnection, writeInbox, listMemories, getMemoryById, getStatus, forgetMemory, resolvePendingDecision }
+  /**
+   * Story 7.3：候选区计数。先做一次过期扫描（只读实例跳过，因为它是写动作），再统计；
+   * 表缺失（旧库未迁移）时返回全 0 而不是抛错 —— status / 命令面不该因缺表整体失败。
+   */
+  const getStrategyStats: MemoryAccess['getStrategyStats'] = async () => {
+    const database = options.getDb()
+    if (!database) throw new Error(DB_NOT_READY_WRITE)
+    if (!database.readonly) {
+      await expireStrategyCandidates(database.connection, new Date().toISOString()).catch(() => 0)
+    }
+    const stats = await strategyStats(database.connection).catch(() => null)
+    const gate = options.resolved.strategyGate
+    return {
+      candidates: stats?.candidates ?? 0,
+      pending: stats?.pending ?? 0,
+      adopted: stats?.adopted ?? 0,
+      rejected: stats?.rejected ?? 0,
+      expired: stats?.expired ?? 0,
+      noEvidence: stats?.noEvidence ?? 0,
+      minConfidence: gate.minConfidence,
+      expiryDays: gate.expiryDays,
+      maxPendingPerSession: gate.maxPendingPerSession,
+    }
+  }
+
+  return {
+    readConnection,
+    writeInbox,
+    listMemories,
+    getMemoryById,
+    getStatus,
+    forgetMemory,
+    resolvePendingDecision,
+    getStrategyStats,
+  }
 }

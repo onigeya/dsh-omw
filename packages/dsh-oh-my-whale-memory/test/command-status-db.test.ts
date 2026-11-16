@@ -147,7 +147,7 @@ function statusText(
     'last_refine_at: n/a（从未完成精炼）',
     'rerank_latency: n/a (v1 无精排)',
     'pending_conflicts: 0',
-    'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+    'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
     'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
     'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
     'backend: native',
@@ -410,7 +410,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'last_refine_at: n/a（从未完成精炼）',
         'rerank_latency: n/a (v1 无精排)',
         'pending_conflicts: 未知（库缺少 pending_decision 表）',
-        'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+        'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
         'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
         'backend: native',
       ].join('\n'))
