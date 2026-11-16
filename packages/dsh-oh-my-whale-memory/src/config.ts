@@ -30,6 +30,10 @@ const MEMORY_CONFIG_DEFAULTS = {
   reflectionThreshold: 6,
   reflectionIdleWaitMs: 90_000,
   reflectionIntervalMs: 900_000,
+  // Story 7.3 / AD-20：采纳门三项默认值锁在架构（0.6 / 7 天 / 5 条）。
+  strategyMinConfidence: 0.6,
+  strategyExpiryDays: 7,
+  strategyMaxPendingPerSession: 5,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -79,6 +83,18 @@ const ReflectionSchema = Schema.object({
   intervalMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
 }).default({}).volatile()
 
+/**
+ * 策略采纳门子对象（Story 7.3 / AD-20）。
+ *
+ * 三项语义：低于 minConfidence 不采纳；候选未采纳 expiryDays 天后过期；单会话待采纳候选上限
+ * maxPendingPerSession（超限时新候选不入候选区，而不是挤掉旧的）。默认值与 MEMORY_CONFIG_DEFAULTS 同源。
+ */
+const StrategyGateSchema = Schema.object({
+  minConfidence: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyMinConfidence),
+  expiryDays: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
+  maxPendingPerSession: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyMaxPendingPerSession),
+}).default({}).volatile()
+
 /** FR-18 全字段 Config schema。每项 `.volatile()`；凭据标 `.role('secret')`。 */
 export const Config = Schema.object({
   embedding: EmbeddingSchema,
@@ -99,6 +115,7 @@ export const Config = Schema.object({
    * 子对象整体 `.volatile()`、子字段 plain（AD-11 的 volatile 嵌套约束）。
    */
   reflection: ReflectionSchema,
+  strategyGate: StrategyGateSchema,
 })
 
 /**
@@ -122,6 +139,8 @@ export interface RuntimeConfig {
   systemOne: { enabled: boolean; endpoint?: string; model?: string; token?: string }
   /** 反思触发阈值（Story 7.2 / AD-37），已过合法性校验。 */
   reflection: { threshold: number; idleWaitMs: number; intervalMs: number }
+  /** 策略采纳门（Story 7.3 / AD-20），已过合法性校验。 */
+  strategyGate: { minConfidence: number; expiryDays: number; maxPendingPerSession: number }
   warnings: string[]
 }
 
@@ -193,6 +212,7 @@ export function resolveRuntimeConfig(config: {
   llmModel?: Getter<string | undefined>
   systemOne?: Getter<{ enabled?: boolean; endpoint?: string; model?: string; token?: string }>
     reflection?: Getter<{ threshold?: number; idleWaitMs?: number; intervalMs?: number }>
+    strategyGate?: Getter<{ minConfidence?: number; expiryDays?: number; maxPendingPerSession?: number }>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -244,6 +264,22 @@ export function resolveRuntimeConfig(config: {
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
 
+  // Story 7.3 / AD-20：minConfidence 必须在 [0,1]（越界会让「永不采纳」或「全采纳」静默发生）。
+  const strategyRaw = read(config.strategyGate ?? {}) as {
+    minConfidence?: number
+    expiryDays?: number
+    maxPendingPerSession?: number
+  }
+  const strategyMinConfidence = Number(strategyRaw.minConfidence ?? MEMORY_CONFIG_DEFAULTS.strategyMinConfidence)
+  if (!Number.isFinite(strategyMinConfidence) || strategyMinConfidence < 0 || strategyMinConfidence > 1) {
+    throw new Error(`strategyGate.minConfidence（期望 [0,1]，实际 ${String(strategyRaw.minConfidence)}）`)
+  }
+  requirePositiveInt('strategyGate.expiryDays', Math.trunc(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays))
+  requirePositiveInt(
+    'strategyGate.maxPendingPerSession',
+    Math.trunc(strategyRaw.maxPendingPerSession ?? MEMORY_CONFIG_DEFAULTS.strategyMaxPendingPerSession),
+  )
+
 
   const systemOneRaw = read(config.systemOne ?? {}) as {
     enabled?: boolean
@@ -289,6 +325,13 @@ export function resolveRuntimeConfig(config: {
       idleWaitMs: Number(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs),
       intervalMs: Number(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
     },
+    strategyGate: {
+      minConfidence: strategyMinConfidence,
+      expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
+      maxPendingPerSession: Number(
+        strategyRaw.maxPendingPerSession ?? MEMORY_CONFIG_DEFAULTS.strategyMaxPendingPerSession,
+      ),
+    },
     warnings,
   }
 }
@@ -311,4 +354,5 @@ export interface ConfigShape {
   llmModel: Volatile<string | undefined>
   systemOne: Volatile<{ enabled: boolean; endpoint?: string; model?: string; token?: string }>
   reflection: Volatile<{ threshold: number; idleWaitMs: number; intervalMs: number }>
+  strategyGate: Volatile<{ minConfidence: number; expiryDays: number; maxPendingPerSession: number }>
 }
