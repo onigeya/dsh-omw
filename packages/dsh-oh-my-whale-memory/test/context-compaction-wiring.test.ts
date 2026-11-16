@@ -93,4 +93,24 @@ describe('compaction 事件接线（AC:1528-1544）', () => {
     expect(COMPACTION_EVENT_SUMMARY).toBe('compaction/summary')
     expect(COMPACTION_EVENT_END).toBe('compaction/end')
   })
+
+  it('stock 形态的 summary（payload 不含 sessionId）不会抛：会话归属由事件目标注入', async () => {
+    // 证据：dsh-compaction-basic/lib/index.js:634-649 的 summary payload 只有
+    // {compactionId, summary, shadowedRange, shadowedSeqs, shadowedTokenCount, provider, model, …}，
+    // **没有 sessionId / turn**。若 wiring 不注入 sessionId，buildCompactionSummaryEntry 会以
+    // `compaction_summary_invalid` 失败、整条入图静默丢失（这正是本轮修掉的 bug）。
+    const warn = vi.fn()
+    const { wiring } = makeWiring({ getConnection: () => null, logger: { warn } })
+    await expect(wiring.handleEvent({ id: 's-42' }, {
+      type: COMPACTION_EVENT_SUMMARY,
+      compactionId: 'c-42',
+      summary: '摘要正文',
+      shadowedSeqs: [1, 2],
+      shadowedRange: { start: 1, end: 2 },
+      shadowedTokenCount: 10,
+      provider: 'deepseek-official',
+      model: 'deepseek-chat',
+    })).resolves.toBeUndefined()
+    wiring.stop()
+  })
 })
