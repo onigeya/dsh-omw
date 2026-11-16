@@ -48,6 +48,7 @@ describe('候选区：写入与读取（AC:1455-1458）', () => {
       strategyId: 'strat-1',
       payload: '遇到跨包改动时先跑 pnpm verify 再合并',
       outcome: 'success',
+      sourceRefs: ['l0:1'],
       createdAt: T0,
       expiresAt: LATER,
     })
@@ -67,6 +68,7 @@ describe('采纳门结果（AC:1471、1490）', () => {
       strategyId: 'strat-adopt',
       payload: '先看 diff 再看测试',
       outcome: 'success',
+      sourceRefs: ['l0:1'],
       createdAt: T0,
       expiresAt: LATER,
     })
@@ -84,6 +86,7 @@ describe('采纳门结果（AC:1471、1490）', () => {
       strategyId: 'strat-reject',
       payload: '跳过测试直接合并',
       outcome: 'failure',
+      sourceRefs: ['l0:2'],
       createdAt: T0,
       expiresAt: LATER,
     })
@@ -122,6 +125,7 @@ describe('两次重写上限（AC:1490）', () => {
       strategyId: 'strat-rw',
       payload: '初版',
       outcome: 'uncertain',
+      sourceRefs: ['l0:1'],
       createdAt: T0,
       expiresAt: LATER,
     })
@@ -162,6 +166,7 @@ describe('过期扫描（strategyGate.expiryDays）', () => {
       strategyId: 'strat-exp',
       payload: '会过期',
       outcome: 'success',
+      sourceRefs: ['l0:1'],
       createdAt: T0,
       expiresAt: '2026-06-02T00:00:00.000Z',
     })
@@ -190,6 +195,7 @@ describe('候选区统计（AC:1494、1498）', () => {
       strategyId: 'strat-noev',
       payload: '无 case 集',
       outcome: 'uncertain',
+      sourceRefs: ['l0:1'],
       createdAt: T0,
       expiresAt: LATER,
     })

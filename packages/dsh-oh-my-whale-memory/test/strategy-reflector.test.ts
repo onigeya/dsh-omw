@@ -224,4 +224,11 @@ describe('执行器：触发与限额（AC:1455-1462、1490）', () => {
     expect(result.dropped.join(' ')).toContain('no-source-refs')
     void strategyStats
   })
+
+
+  it('候选落库时带上 source_refs（AC:1458：可回溯到 L0）', async () => {
+    const candidates = await listStrategyCandidates(store.connection, { includeFailure: true })
+    const inserted = candidates.find((item) => item.payload === '改跨包代码前先跑 pnpm verify')
+    expect(inserted?.sourceRefs).toEqual(['l0:1'])
+  })
 })

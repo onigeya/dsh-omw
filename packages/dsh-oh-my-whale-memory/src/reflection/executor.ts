@@ -147,6 +147,7 @@ export function createReflectionExecutor(options: ReflectionExecutorOptions): Re
         strategyId,
         payload: candidate.text,
         outcome: candidate.outcome,
+        sourceRefs: candidate.sourceRefs,
         createdAt: at.toISOString(),
         expiresAt: expiry,
       })

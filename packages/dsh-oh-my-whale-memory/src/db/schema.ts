@@ -414,7 +414,9 @@ export function createStrategyCandidateTableStatement(): string {
   return (
     'CREATE NODE TABLE IF NOT EXISTS ' + STRATEGY_CANDIDATE_TABLE + '(' +
     'id STRING, strategy_id STRING, payload STRING, state STRING, rewrites INT64, score DOUBLE, ' +
-    'outcome STRING, reasons STRING, created_at STRING, expires_at STRING, updated_at STRING, ' +
+    // AC:1458：候选必须能回溯到产生它的轨迹 / 反思（可回溯到 L0）——没有这列就是口头满足。
+    'outcome STRING, reasons STRING, source_refs STRING[], created_at STRING, expires_at STRING, ' +
+    'updated_at STRING, ' +
     'PRIMARY KEY(id))'
   )
 }

@@ -27,6 +27,8 @@ export interface StrategyCandidate {
   readonly id: string
   readonly strategyId: string
   readonly payload: string
+  /** 回溯引用（l0:<id> 等，AC:1458）。 */
+  readonly sourceRefs: readonly string[]
   readonly state: StrategyCandidateState
   readonly rewrites: number
   readonly score: number
@@ -49,8 +51,8 @@ export interface StrategyStats {
 const INSERT_CANDIDATE = [
   'CREATE (:' + STRATEGY_CANDIDATE_TABLE + ' {',
   '  id: $id, strategy_id: $strategy_id, payload: $payload, state: $state, rewrites: $rewrites,',
-  '  score: $score, outcome: $outcome, reasons: $reasons, created_at: $created_at,',
-  '  expires_at: $expires_at, updated_at: $updated_at',
+  '  score: $score, outcome: $outcome, reasons: $reasons, source_refs: $source_refs,',
+  '  created_at: $created_at, expires_at: $expires_at, updated_at: $updated_at',
   '})',
 ].join('\n')
 
@@ -58,7 +60,7 @@ const READ_CANDIDATE = [
   'MATCH (c:' + STRATEGY_CANDIDATE_TABLE + ' {id: $id})',
   'RETURN c.id AS id, c.strategy_id AS strategy_id, c.payload AS payload, c.state AS state,',
   '  c.rewrites AS rewrites, c.score AS score, c.outcome AS outcome, c.reasons AS reasons,',
-  '  c.created_at AS created_at, c.expires_at AS expires_at',
+  '  c.source_refs AS source_refs, c.created_at AS created_at, c.expires_at AS expires_at',
 ].join('\n')
 
 function toCandidate(row: Record<string, unknown> | undefined): StrategyCandidate | null {
@@ -67,6 +69,7 @@ function toCandidate(row: Record<string, unknown> | undefined): StrategyCandidat
     id: String(row.id),
     strategyId: String(row.strategy_id ?? ''),
     payload: String(row.payload ?? ''),
+    sourceRefs: Array.isArray(row.source_refs) ? row.source_refs.map(String) : [],
     state: String(row.state ?? 'pending') as StrategyCandidateState,
     rewrites: Number(row.rewrites ?? 0),
     score: Number(row.score ?? 0),
@@ -84,6 +87,8 @@ export async function insertStrategyCandidate(
     readonly id: string
     readonly strategyId: string
     readonly payload: string
+  /** 回溯引用（l0:<id> 等，AC:1458）。 */
+  readonly sourceRefs: readonly string[]
     readonly outcome: StrategyOutcome
     readonly createdAt: string
     readonly expiresAt: string
@@ -99,6 +104,7 @@ export async function insertStrategyCandidate(
     score: 0,
     outcome: input.outcome,
     reasons: '',
+    source_refs: [...input.sourceRefs],
     created_at: input.createdAt,
     expires_at: input.expiresAt,
     updated_at: input.createdAt,
@@ -135,7 +141,7 @@ export async function listStrategyCandidates(
       '  WHERE ' + conditions.join(' AND '),
       '  RETURN c.id AS id, c.strategy_id AS strategy_id, c.payload AS payload, c.state AS state,',
       '    c.rewrites AS rewrites, c.score AS score, c.outcome AS outcome, c.reasons AS reasons,',
-      '    c.created_at AS created_at, c.expires_at AS expires_at',
+      '    c.source_refs AS source_refs, c.created_at AS created_at, c.expires_at AS expires_at',
       '  ORDER BY c.created_at DESC, c.id ASC LIMIT $limit',
     ].join('\n'),
     params,
