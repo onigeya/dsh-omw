@@ -81,8 +81,7 @@ export interface MemoryExpandOptions {
   readonly getDb: () => MemoryDatabase | undefined
   /** 与 recall / related 共享的每轮配额。 */
   readonly quota: RecallQuota
-  /** 当前会话 id（用于 `session_mismatch` 判定）；缺省 = 不判越权。 */
-  readonly sessionId?: () => string
+
 }
 
 export function createMemoryExpandTool(options: MemoryExpandOptions) {
@@ -126,9 +125,9 @@ export function createMemoryExpandTool(options: MemoryExpandOptions) {
       if (!options.quota.consume(owner)) return expandFailure('quota_exceeded')
 
       // ④ 查句柄并归因（readHandle 内部已 catch，不存在 ⇒ null）。
+      // 会话键取自**当次调用**（与配额同源；装配期静态 id 在多会话下是错的）。
       const record = await readHandle(database.connection, handle)
-      const sessionId = options.sessionId?.() ?? ''
-      const verdict = classifyHandle(record, sessionId)
+      const verdict = classifyHandle(record, owner)
       if (verdict.ok) return expandSuccess(verdict.record)
       return expandFailure(verdict.failure)
     },

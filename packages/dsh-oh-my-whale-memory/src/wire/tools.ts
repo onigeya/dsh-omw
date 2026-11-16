@@ -23,8 +23,6 @@ export interface MemoryToolsOptions {
   readonly relatedStore: MemoryRelatedStore
   /** 召回族（recall + related + expand）共享的每轮配额实例。 */
   readonly quota: RecallQuota
-  /** Story 8.2：当前会话 id（用于句柄的 `session_mismatch` 判定）；缺省不判越权。 */
-  readonly sessionId?: () => string
   /** Story 8.2：结果折叠配置（缺省 = 不折叠）。 */
   readonly fold?: {
     readonly thresholdTokens: number
@@ -75,6 +73,5 @@ export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void
   ctx.tools.register(createMemoryExpandTool({
     getDb: () => getDb(),
     quota: options.quota,
-    sessionId: options.sessionId,
   }))
 }
