@@ -54,6 +54,8 @@ export type MemoryDbErrorCode =
   | 'strategy_rewrite_exhausted'
   /** 候选不在 pending 状态（Story 7.3：只有 pending 可判定/重写，评审 R73）。 */
   | 'strategy_candidate_not_pending'
+  /** `compaction/summary` payload 非法（Story 8.1：缺 sessionId/compactionId 或摘要为空，拒绝入图）。 */
+  | 'compaction_summary_invalid'
   /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
   | 'schema_migration_failed'
 

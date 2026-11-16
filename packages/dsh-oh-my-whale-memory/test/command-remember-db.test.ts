@@ -131,6 +131,8 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'strategy_gate: candidates=0 pending=0 adopted=0 rejected=0 expired=0 noEvidence=0 minConfidence=0.6 expiryDays=7 maxPendingPerSession=5',
       'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
       'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
+      'context_ledger: n/a（本实例尚未采集）',
+      'compaction: runs=0',
       // Story 5.1 / AC:1171：存储后端行追加在末尾。
       'backend: native',
     ].join('\n'))

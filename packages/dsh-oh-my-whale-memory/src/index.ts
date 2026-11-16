@@ -29,6 +29,7 @@ import { createIdleGate } from './inbox/idle-gate.js'
 import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
+import { createCompactionWiring } from './context/compaction-wiring.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
 import { auditWriter } from './db/audit.js'
@@ -232,6 +233,7 @@ export async function apply(
   }))
   // teardown 钩子：lifecycle 在 executor 之前注册，所以先用可变 ref 占位，executor 建好后赋值。
   let cancelReflectionTimer: (() => void) | null = null
+  let cancelCompactionTimers: (() => void) | null = null
   // Story 3.1：每轮召回配额的双点重置（只读实例也提供召回，故在只读早退之前注册）；
   // `ctx.on` 自动挂 disposer，不新增 ctx.effect（entry-exports 钉死 closer 数）。
   // （赋值在 executor 建好之后：此处只占位，避免 TDZ。）
@@ -302,7 +304,10 @@ export async function apply(
     dbPath,
     lock,
     slots,
-    onTeardown: () => cancelReflectionTimer?.(),
+    onTeardown: () => {
+      cancelReflectionTimer?.()
+      cancelCompactionTimers?.()
+    },
   }))
 
   if (readonlyMode) {
@@ -437,6 +442,46 @@ export async function apply(
     }))
   }
   if (capture) {
-    await wireStep('session-events', () => wireSessionEvents(ctx, { gate, promotion, capture }))
+    /**
+   * Story 8.1：压缩事件接线（INV-7：只读实例不注册——它既不能写 INBOX，也没有压缩动作）。
+   */
+  // INV-7：只读实例在上面已经早退，走不到这里；因此此处无需再判一次（评审 R81：删掉恒真的判据）。
+  const compactionWiring = readonlyMode
+    ? null
+    : createCompactionWiring({
+        getConnection: () => getDb()?.connection ?? null,
+        configSnapshot: () => ({
+          injectionEnabled: resolved.injectOnNewSession,
+          retrievalTopK: resolved.retrievalTopK,
+          captureSteps: resolved.captureSteps,
+        }),
+        orphanTimeoutMs: resolved.compactionOrphanTimeoutMs,
+        onOrphan: (info) => {
+          // AC:1544 / INV-6：解阻塞必须留账（评审 R81 第 3 条：原先只 warn，注释却说"记一条审计行"）。
+          ctx.logger.warn('compaction/start 无配对，已解除阻塞：session=' + info.sessionId + ' turn=' + String(info.turn))
+          const connection = getDb()?.connection
+          if (connection === undefined) return
+          void auditWriter(connection, {
+            recordedAt: new Date().toISOString(),
+            actor: 'system',
+            kind: 'compaction',
+            policy: 'compaction-orphan',
+          })({
+            action: 'compaction_orphan_unblocked',
+            outcome: 'uncertain',
+            reason: 'session=' + info.sessionId + ' turn=' + String(info.turn) + ' waitedMs=' + String(info.waitedMs),
+          }).catch((error: unknown) => {
+            ctx.logger.warn('孤儿解阻塞账本写入失败：' + String(error))
+          })
+        },
+        logger: ctx.logger,
+      })
+  cancelCompactionTimers = () => compactionWiring?.stop()
+  await wireStep('session-events', () => wireSessionEvents(ctx, {
+    gate,
+    promotion,
+    capture,
+    compaction: compactionWiring ?? undefined,
+  }))
   }
 }

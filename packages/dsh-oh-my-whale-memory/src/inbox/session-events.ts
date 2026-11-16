@@ -23,6 +23,8 @@ export interface SessionEventHandlerDeps {
   readonly promotion: PromotionTracker
   /** 采集器；缺省 = 不采集（2.2 既有单测与裸 ctx 的降级形态）。 */
   readonly capture?: CaptureHooks
+  /** Story 8.1：压缩事件（summary 入图 / 孤儿解除）。 */
+  readonly compaction?: { handleEvent(session: unknown, event: unknown): Promise<void> }
 }
 
 /** 返回 ctx.on('session/event', …) 的监听器：闸门/提升 + 三钩子采集分派。 */
@@ -45,6 +47,11 @@ export function createSessionEventHandler(
       deps.capture?.recordStepEnd(session, event)
     } else if (type === 'compaction/start') {
       deps.capture?.recordCompactionStart(session, event)
+      // Story 8.1：登记待配对（孤儿检测起点）；失败只吞掉，不阻塞采集。
+      void deps.compaction?.handleEvent(session, event).catch(() => {})
+    } else if (type === 'compaction/summary' || type === 'compaction/end') {
+      // Story 8.1：压缩产物入图 + 解除待配对（post-commit fire-and-forget，AC:1536-1538）。
+      void deps.compaction?.handleEvent(session, event).catch(() => {})
     } else if (type === 'session/disposed') {
       // 宿主不保证 dispose 前一定有 turn/end：悬空的活跃计数会让闸门永久忙、消费者停摆。
       // 三处每会话状态都按「会话已不存在」归还，不依赖配对事件。

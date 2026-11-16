@@ -16,6 +16,8 @@ export interface SessionEventsWiringOptions {
   readonly gate: IdleGate
   readonly promotion: PromotionTracker
   readonly capture: CaptureRecorder
+  /** Story 8.1：压缩事件（summary 入图 / 孤儿解除）；只读实例由 index 不传。 */
+  readonly compaction?: { handleEvent(session: unknown, event: unknown): Promise<void> }
 }
 
 export function wireSessionEvents(ctx: Context, options: SessionEventsWiringOptions): void {
@@ -26,6 +28,7 @@ export function wireSessionEvents(ctx: Context, options: SessionEventsWiringOpti
       gate: options.gate,
       promotion: options.promotion,
       capture: options.capture,
+      compaction: options.compaction,
     }),
   )
 }

@@ -34,6 +34,8 @@ const MEMORY_CONFIG_DEFAULTS = {
   strategyMinConfidence: 0.6,
   strategyExpiryDays: 7,
   strategyMaxPendingPerSession: 5,
+  // Story 8.1 / AC:1544：compaction/start 未配对时的解阻塞超时（与 AD-6 lease 同量级）。
+  compactionOrphanTimeoutMs: 60_000,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -116,6 +118,8 @@ export const Config = Schema.object({
    */
   reflection: ReflectionSchema,
   strategyGate: StrategyGateSchema,
+  /** Story 8.1 / AC:1544：compaction/start 未配对的解阻塞超时（ms，与 AD-6 lease 同量级）。 */
+  compactionOrphanTimeoutMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.compactionOrphanTimeoutMs).volatile(),
 })
 
 /**
@@ -141,6 +145,8 @@ export interface RuntimeConfig {
   reflection: { threshold: number; idleWaitMs: number; intervalMs: number }
   /** 策略采纳门（Story 7.3 / AD-20），已过合法性校验。 */
   strategyGate: { minConfidence: number; expiryDays: number; maxPendingPerSession: number }
+  /** Story 8.1：compaction/start 未配对的解阻塞超时（ms，已校验为正整数）。 */
+  compactionOrphanTimeoutMs: number
   warnings: string[]
 }
 
@@ -213,6 +219,7 @@ export function resolveRuntimeConfig(config: {
   systemOne?: Getter<{ enabled?: boolean; endpoint?: string; model?: string; token?: string }>
     reflection?: Getter<{ threshold?: number; idleWaitMs?: number; intervalMs?: number }>
     strategyGate?: Getter<{ minConfidence?: number; expiryDays?: number; maxPendingPerSession?: number }>
+    compactionOrphanTimeoutMs?: Getter<number>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -260,6 +267,10 @@ export function resolveRuntimeConfig(config: {
     idleWaitMs?: number
     intervalMs?: number
   }
+  const compactionOrphanTimeoutMs = requirePositiveInt(
+    'compactionOrphanTimeoutMs',
+    Math.trunc(read(config.compactionOrphanTimeoutMs ?? MEMORY_CONFIG_DEFAULTS.compactionOrphanTimeoutMs)),
+  )
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -325,6 +336,7 @@ export function resolveRuntimeConfig(config: {
       idleWaitMs: Number(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs),
       intervalMs: Number(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
     },
+    compactionOrphanTimeoutMs,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
