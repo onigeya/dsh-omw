@@ -12,6 +12,8 @@ import type { RuntimeConfig } from '../config.js'
 import type { MemoryDatabase } from '../db/database.js'
 
 export interface CaptureWiringOptions {
+  /** Story 7.2：turn/end 落库成功后的回调（兴趣分与触发决策写账本）。 */
+  readonly onTurnCaptured?: (input: { readonly text: string; readonly recordedAt: Date }) => void
   readonly ctx: Context
   readonly dbPath: string
   readonly getDb: () => MemoryDatabase | undefined
@@ -36,6 +38,8 @@ export async function wireCapture(options: CaptureWiringOptions): Promise<Captur
         ? Promise.resolve(sessions.flush(session))
         : Promise.resolve()
     },
+    // Story 7.2：把已落库的 turn 正文交给反思计分（AC:1406）。
+    onTurnCaptured: options.onTurnCaptured,
   })
   // AC5：启动扫描孤儿快照（有 .snap 文件 = 上一次进程在事务提交前崩溃）并重放入 INBOX。
   const replayedSnapshots = await recorder.replayOrphanSnapshots()

@@ -354,6 +354,10 @@ export interface MemoryStatusSnapshot {
    */
   readonly pendingConflicts?: number | null
   readonly pendingConflictEntries?: readonly MemoryPendingConflictEntry[]
+  /** Story 7.2：反思触发状态（缺省 = 本实例尚未评估，渲染 n/a）。 */
+  readonly reflection?: MemoryReflectionView | null
+  /** Story 7.2：慢路径队列统计（缺省 = 不渲染该行）。 */
+  readonly slowQueue?: MemorySlowQueueView | null
   /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
@@ -916,6 +920,54 @@ function renderInboxBacklogValue(metric: MemoryHealthMetric<MemoryHealthBacklog>
   return `${Math.floor(maxMs / 1000)}s（L1 ${renderBacklogQueue(l1Ms)} / L2 ${renderBacklogQueue(l2Ms)}）`
 }
 
+/** 反思触发状态（命令层镜像 `reflection/state.ts` 的视图）。 */
+export interface MemoryReflectionView {
+  readonly windowScore: number
+  readonly lastTurnScore: number | null
+  readonly lastReflectionAt: string | null
+  readonly trigger: 'all' | 'threshold' | 'idle' | 'interval' | 'breaker' | null
+  readonly breaker: 'closed' | 'open'
+  readonly consecutiveFailures: number
+}
+
+/** 慢路径队列统计（命令层镜像 `strategy/slow-queue.ts` 的 `SlowQueueStats`）。 */
+export interface MemorySlowQueueView {
+  readonly depth: number
+  readonly retrySet: number
+  readonly exhausted: number
+  readonly windowRound: number
+  readonly shortCircuited: boolean
+}
+
+/**
+ * `reflection:` 行（Story 7.2 / AC:1406）：最近一次触发的**决策**与熔断态；未触发时给原因。
+ * 从未评估过（缺省 / null）⇒ `n/a（本实例尚未评估）`，不编造数字。
+ */
+function renderReflectionLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.reflection
+  // 缺省（undefined）= 调用方没有这项数据 ⇒ 不渲染该行（保持既有逐行输出不变）；null = 明确未知。
+  if (view === undefined) return []
+  if (view === null) return ['reflection: n/a（本实例尚未评估）']
+  const parts = [
+    `window=${String(view.windowScore)}`,
+    `lastTurn=${view.lastTurnScore === null ? 'n/a' : String(view.lastTurnScore)}`,
+    `lastAt=${view.lastReflectionAt ?? 'n/a'}`,
+    view.trigger === null ? '' : `trigger=${view.trigger}`,
+    `breaker=${view.breaker}${view.breaker === 'open' ? `（连续失败 ${String(view.consecutiveFailures)} 次）` : ''}`,
+  ].filter((part) => part !== '')
+  return [`reflection: ${parts.join(' ')}`]
+}
+
+/** `slow_queue:` 行（Story 7.2 / AC:1433-1435）。 */
+function renderSlowQueueLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.slowQueue
+  if (view === undefined || view === null) return []
+  return [
+    `slow_queue: depth=${String(view.depth)} retry=${String(view.retrySet)} exhausted=${String(view.exhausted)} ` +
+      `windowRound=${String(view.windowRound)} shortCircuit=${view.shortCircuited ? 'yes' : 'no'}`,
+  ]
+}
+
 /** 待裁决清单里的一行（命令层镜像 `db/pending.ts` 的 `PendingDecision` 子集）。 */
 export interface MemoryPendingConflictEntry {
   readonly id: string
@@ -966,6 +1018,10 @@ function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   if (health !== undefined) {
     lines.push('strategy_gate: n/a（Epic 7 真源在 Story 7.3）')
   }
+  // Story 7.2：反思触发与慢路径队列追加在**所有既有行之后**（AC:1406 / 1433-1435），
+  // 这样 4.3 钉死的五行顺序与文案逐字不变。
+  lines.push(...renderReflectionLines(snapshot))
+  lines.push(...renderSlowQueueLines(snapshot))
   return lines
 }
 

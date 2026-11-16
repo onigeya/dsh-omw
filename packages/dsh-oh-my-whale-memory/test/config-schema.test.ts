@@ -37,7 +37,7 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     // 顶层字段数量锁定 FR-18 全字段，防止后续误删
     expect(Object.keys(dict).sort()).toEqual([
       'captureSteps', 'embedding', 'inboxRefineConcurrency', 'injectOnNewSession',
-      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'rerank', 'retrievalTopK', 'rrfK', 'systemOne',
+      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'reflection', 'rerank', 'retrievalTopK', 'rrfK', 'systemOne',
     ])
   })
 

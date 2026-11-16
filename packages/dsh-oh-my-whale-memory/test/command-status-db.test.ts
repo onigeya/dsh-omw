@@ -148,6 +148,8 @@ function statusText(
     'rerank_latency: n/a (v1 无精排)',
     'pending_conflicts: 0',
     'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+    'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
+    'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
     'backend: native',
   )
   return lines.join('\n')
@@ -409,6 +411,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'rerank_latency: n/a (v1 无精排)',
         'pending_conflicts: 未知（库缺少 pending_decision 表）',
         'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
+        'reflection: window=0 lastTurn=n/a lastAt=n/a breaker=closed',
         'backend: native',
       ].join('\n'))
       expect(result.text).toContain(READONLY_REASON)

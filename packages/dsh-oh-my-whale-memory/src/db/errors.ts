@@ -44,6 +44,10 @@ export type MemoryDbErrorCode =
   | 'memory_not_found'
   /** 待裁决记录不存在（Story 7.1 / /memory resolve：id 失效或已被裁决）。 */
   | 'pending_decision_not_found'
+  /** 慢路径任务不存在（Story 7.2：ail/complete 的 id 已失效）。 */
+  | 'slow_task_not_found'
+  /** 整窗重扫已达上限（> 2 轮），调用方应转运行级短路（Story 7.2 / Q-4）。 */
+  | 'slow_task_window_exhausted'
   /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
   | 'schema_migration_failed'
 

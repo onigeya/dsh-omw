@@ -19,6 +19,7 @@ import { SCHEMA_VERSION } from './schema.js'
 import { MIGRATION_0002 } from './migrations/0002-evidence-degraded-and-redact.js'
 import { MIGRATION_0003 } from './migrations/0003-judge-key-action.js'
 import { MIGRATION_0004 } from './migrations/0004-pending-decision.js'
+import { MIGRATION_0005 } from './migrations/0005-slow-task.js'
 
 export interface MigrationStatement {
   /** 目标节点表名（只能是本仓导出的常量，绝不接受外部输入）。 */
@@ -47,7 +48,7 @@ export interface Migration {
 }
 
 /** 全部迁移，按 version 升序（运行器按此顺序逐条应用）。 */
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004]
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005]
 
 /** 目标版本（number 形态，便于与迁移号比较）。 */
 export const TARGET_SCHEMA_VERSION = Number(SCHEMA_VERSION)

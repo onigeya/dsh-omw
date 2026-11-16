@@ -3,7 +3,7 @@ import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join, relative, resolve, dirname } from 'node:path'
 const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const src = join(root, 'packages/dsh-oh-my-whale-memory/src')
-const DOMAIN = ['capture', 'inbox', 'distill', 'wiki', 'recall', 'embedding', 'strategy', 'context', 'ontology']
+const DOMAIN = ['capture', 'inbox', 'distill', 'wiki', 'recall', 'embedding', 'reflection', 'strategy', 'context', 'ontology']
 const KERNEL = ['db', 'config.ts']
 const SURFACES = ['tools', 'command.ts', 'summarize.ts']
 // AD-33 依赖方向与循环门禁。Story 5.4 / AC:1303-1305：原 4 条过渡例外（db→inbox、distill→tools ×3）

@@ -26,6 +26,10 @@ const MEMORY_CONFIG_DEFAULTS = {
   layerWeights: { l2: 0.7, l1: 0.4 },
   priorityWeight: 0.5,
   systemOneEnabled: true,
+  // Story 7.2 / AD-37：三项默认值锁在架构（阈值不是本 story 拍定的）。
+  reflectionThreshold: 6,
+  reflectionIdleWaitMs: 90_000,
+  reflectionIntervalMs: 900_000,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -63,6 +67,18 @@ const SystemOneSchema = Schema.object({
   token: Schema.string().role('secret'),
 }).default({}).volatile()
 
+/**
+ * 反思触发阈值子对象（Story 7.2 / AD-37）。
+ *
+ * 三项的语义：窗口兴趣分 ≥ threshold ∧ 会话空闲 ≥ idleWaitMs ∧ 距上次反思 ≥ intervalMs。
+ * 只调数值不改判据形态（AD-28 / INV-14）；默认值与 `MEMORY_CONFIG_DEFAULTS` 同源。
+ */
+const ReflectionSchema = Schema.object({
+  threshold: Schema.number().default(MEMORY_CONFIG_DEFAULTS.reflectionThreshold),
+  idleWaitMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs),
+  intervalMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
+}).default({}).volatile()
+
 /** FR-18 全字段 Config schema。每项 `.volatile()`；凭据标 `.role('secret')`。 */
 export const Config = Schema.object({
   embedding: EmbeddingSchema,
@@ -78,6 +94,11 @@ export const Config = Schema.object({
   llmProvider: Schema.string().volatile(),
   llmModel: Schema.string().volatile(),
   systemOne: SystemOneSchema,
+  /**
+   * 反思触发阈值（Story 7.2 / AD-37 / INV-12）：三项都必须是 Config 字段且可运行期覆盖；
+   * 子对象整体 `.volatile()`、子字段 plain（AD-11 的 volatile 嵌套约束）。
+   */
+  reflection: ReflectionSchema,
 })
 
 /**
@@ -99,6 +120,8 @@ export interface RuntimeConfig {
   llmProvider?: string
   llmModel?: string
   systemOne: { enabled: boolean; endpoint?: string; model?: string; token?: string }
+  /** 反思触发阈值（Story 7.2 / AD-37），已过合法性校验。 */
+  reflection: { threshold: number; idleWaitMs: number; intervalMs: number }
   warnings: string[]
 }
 
@@ -169,6 +192,7 @@ export function resolveRuntimeConfig(config: {
   llmProvider?: Getter<string | undefined>
   llmModel?: Getter<string | undefined>
   systemOne?: Getter<{ enabled?: boolean; endpoint?: string; model?: string; token?: string }>
+    reflection?: Getter<{ threshold?: number; idleWaitMs?: number; intervalMs?: number }>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -209,6 +233,18 @@ export function resolveRuntimeConfig(config: {
   const l1 = requireUnitWeight('layerWeights.l1', weightsRaw.l1 ?? MEMORY_CONFIG_DEFAULTS.layerWeights.l1)
   const priorityWeight = requireNonNegativeWeight('priorityWeight', read(config.priorityWeight ?? MEMORY_CONFIG_DEFAULTS.priorityWeight))
 
+  // Story 7.2 / AD-37：三项阈值都是 `number`，但 0 / 负数 / NaN 会让判定退化成「每 turn 都反思」
+  // 或「永不反思」，两者都是静默事故 ⇒ 正数硬校验（与 captureSteps 同一口径）。
+  const reflectionRaw = read(config.reflection ?? {}) as {
+    threshold?: number
+    idleWaitMs?: number
+    intervalMs?: number
+  }
+  requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
+  requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
+  requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
+
+
   const systemOneRaw = read(config.systemOne ?? {}) as {
     enabled?: boolean
     endpoint?: string
@@ -247,6 +283,12 @@ export function resolveRuntimeConfig(config: {
       model: systemOneModel,
       token: systemOneToken,
     },
+    // Story 7.2 / AD-37：三项阈值必须在 schema 与这里同源（`MEMORY_CONFIG_DEFAULTS`）。
+    reflection: {
+      threshold: Number(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold),
+      idleWaitMs: Number(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs),
+      intervalMs: Number(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs),
+    },
     warnings,
   }
 }
@@ -268,4 +310,5 @@ export interface ConfigShape {
   llmProvider: Volatile<string | undefined>
   llmModel: Volatile<string | undefined>
   systemOne: Volatile<{ enabled: boolean; endpoint?: string; model?: string; token?: string }>
+  reflection: Volatile<{ threshold: number; idleWaitMs: number; intervalMs: number }>
 }

@@ -104,7 +104,7 @@ function v3Statements(): string[] {
     'CREATE NODE TABLE IF NOT EXISTS memory(id STRING, layer STRING, kind STRING, priority INT64, text STRING, embedding FLOAT[4], valid_at STRING, recorded_at STRING, invalid_at STRING, expired_at STRING, source_refs STRING[], embedding_model_id STRING, embedding_dim INT64, parent_id STRING, support INT64, evidence_degraded BOOL, PRIMARY KEY(id))',
     createL0RawTableStatement(),
     createGenerationLogTableStatement(),
-...metaStatements('5'),
+...metaStatements('6'),
   ]
 }
 
@@ -183,18 +183,18 @@ async function degradedFlag(connection: lbug.Connection, id: string): Promise<un
 afterAll(cleanupTempDirs)
 
 describe('矩阵行 1：全新空库 bootstrap', () => {
-  it('SCHEMA_VERSION=4；schema_migration 含 0002+0003+0004 三行；三表新列齐；无备份文件', async () => {
+  it('SCHEMA_VERSION=5；schema_migration 含 0002..0005 四行；三表新列齐；无备份文件', async () => {
     const dir = await makeTempDir('omw-migr-fresh-')
     const dbPath = resolveMemoryDbPath(dir)
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
 
-    expect(SCHEMA_VERSION).toBe('4')
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('4')
+    expect(SCHEMA_VERSION).toBe('5')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('5')
     const applied = await queryRows(
       store.connection,
       `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS version, s.checksum AS checksum`,
     )
-    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4])
+    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4, 5])
     expect(String(applied[0]?.checksum)).toMatch(/^[0-9a-f]{64}$/)
 
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
@@ -213,21 +213,21 @@ describe('矩阵行 1：全新空库 bootstrap', () => {
 })
 
 describe('矩阵行 2：v1 旧库自动升级', () => {
-  it('三表新列出现、版本 4、schema_migration 三行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
+  it('三表新列出现、版本 5、schema_migration 四行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
     const dir = await makeTempDir('omw-migr-v1-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v1Statements())
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
     const meta = await readMeta(store.connection)
-    expect(meta.get(META_KEYS.schemaVersion)).toBe('4')
+    expect(meta.get(META_KEYS.schemaVersion)).toBe('5')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const l0Columns = await columnsOf(store.connection, 'l0_raw')
     expect(l0Columns.get(REDACTED_BY_COLUMN)).toBe('STRING')
     expect(l0Columns.get('redacted_at')).toBe('STRING')
     expect((await columnsOf(store.connection, 'generation_log')).get('detail')).toBe('STRING')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5])
     // 旧数据必须还在（迁移只加列）。
     const legacy = await queryRows(store.connection, "MATCH (m:memory {id: 'legacy-m1'}) RETURN m.text AS text")
     expect(legacy[0]?.text).toBe('旧数据')
@@ -266,13 +266,13 @@ describe('矩阵行 3：重复启动', () => {
     const appliedAfter = await queryRows(second.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`)
     expect(Number(appliedAfter[0]?.c)).toBe(Number(appliedBefore[0]?.c))
     expect(await backupFiles(dbPath)).toEqual(backupsBefore)
-    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('4')
+    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('5')
     await second.close()
   }, 60_000)
 })
 
 describe('矩阵行 4：版本高于插件', () => {
-  it('version=5 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
+  it('version=6 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
     const dir = await makeTempDir('omw-migr-v3-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v3Statements())
@@ -286,7 +286,7 @@ describe('矩阵行 4：版本高于插件', () => {
     // 先释放父进程持有的句柄（被拒绝的打开同样会缓存 Database，跨进程会挡住建库文件的锁）。
     await closeMemoryDatabase(dbPath)
     const dump = runChild('dump', dbPath)
-    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('5')
+    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('6')
     expect(dump.hasMigrationTable).toBe(false)
   }, 60_000)
 })
@@ -359,17 +359,17 @@ describe('矩阵行 6：备份创建失败', () => {
 })
 
 describe('FIX-3：bootstrap 判据（版本键缺失 ≠ 新库）', () => {
-  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 4', async () => {
+  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 5', async () => {
     const dir = await makeTempDir('omw-migr-noversion-')
     const dbPath = resolveMemoryDbPath(dir)
     // 冻结的 v1 表形态，但**不写** schema_version（旧库的极端形态）。
     runChild('create', dbPath, v1Statements(null))
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('4')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('5')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5])
     // 关键差异：走的是升级路径 ⇒ 备份文件名里的 fromVersion 是 0，而不是「不备份」。
     const backups = await backupFiles(dbPath)
     expect(backups).toHaveLength(1)
@@ -443,7 +443,7 @@ describe('迁移 0003：judge_key 加 action（Story 5.4 / AC:1299-1301）', () 
     expect(String(rows[0]?.policy)).toBe(policy)
     expect(String(rows[0]?.ts)).toBe('2026-01-01T00:00:00.000Z')
     const meta = await queryRows(store.connection, "MATCH (m:omw_meta {key: 'schema_version'}) RETURN m.value AS v")
-    expect(String(meta[0]?.v)).toBe('4')
+    expect(String(meta[0]?.v)).toBe('5')
     await store.close()
   }, 60_000)
 })
