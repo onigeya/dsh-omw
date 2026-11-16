@@ -98,8 +98,8 @@ describe('memory_related 工具形态', () => {
     expect(tool.parameters.required ?? []).not.toContain('depth')
 
     const branches = tool.output.schema.oneOf ?? []
-    expect(branches).toHaveLength(2)
-    expect(branches[1]?.properties?.action?.const).toBe('failed')
+    // Story 8.2 追加了第三个分支（folded），成功/失败两分支仍在最前。
+    expect(branches).toHaveLength(3)
   })
 
   it('render：成功（含失效标记）/ 空结果 hint / 失败三分支，均不 throw', () => {

@@ -24,6 +24,7 @@ import { MemoryDbError } from '../db/errors.js'
 import { summarizeMemoryText } from '../shared/summarize.js'
 import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import { toRelatedSuccessView, type RelatedViewEntry } from './related-shared.js'
+import { foldToolResult } from '../context/fold.js'
 import type { RecallQuota } from './recall-quota.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
@@ -60,6 +61,25 @@ export interface MemoryRelatedToolOptions {
   readonly getRelatedStore: () => MemoryRelatedStore | undefined
   /** 每轮配额（与 memory_recall 同一实例；`turn/start`/`turn/end` 双点重置）。 */
   readonly quota: RecallQuota
+  /**
+   * Story 8.2：结果超阈值时折叠成句柄（全文入图，表面只留句柄；用 memory_expand 可 100% 还原）。
+   * 缺省 = 不折叠（命令面与既有单测路径保持原行为）。
+   */
+  readonly fold?: {
+    readonly thresholdTokens: number
+    readonly readonly: boolean
+    readonly sessionId: () => string
+    /** 幂等键：同一会话 + 同一起点 + 同一 depth 视为「同一条工具结果」。 */
+    readonly seqKey: (input: { readonly id: string, readonly depth: number }) => string
+    /** fail-open 的告警出口（折叠写图失败时只 warn，不改变返回值）。 */
+    readonly logger?: { warn(message: string): void }
+    readonly write?: (input: {
+      readonly sessionId: string
+      readonly seq: number
+      readonly text: string
+      readonly tokens: number
+    }) => Promise<{ readonly id: string }>
+  }
 }
 
 /** 成功值里的一条邻居（字段名与 AC:880 对齐：edge_type 用 snake_case）。 */
@@ -145,6 +165,16 @@ const OUTPUT_SCHEMA = {
       additionalProperties: false,
     },
     {
+      // Story 8.2：结果过长时只回句柄（全文已入图，用 memory_expand 可 100% 还原）。
+      type: 'object',
+      properties: {
+        folded: { type: 'boolean', required: true, description: '固定 true：本次结果已折叠为句柄' },
+        handle: { type: 'string', required: true, description: '句柄 id（可直接传给 memory_expand）' },
+        hint: { type: 'string', required: true, description: '如何还原：调 memory_expand(handle)' },
+      },
+      additionalProperties: false,
+    },
+    {
       type: 'object',
       properties: {
         action: { type: 'string', const: 'failed', required: true, description: '遍历失败' },
@@ -191,6 +221,16 @@ function toSucceeded(result: RelatedTraversalResult, partial: boolean): MemoryRe
     ...(view.hint === undefined ? {} : { hint: view.hint }),
     ...(view.partial === true ? { partial: true } : {}),
   }
+}
+
+/** 把字符串键折叠成稳定的非负整数（FNV-1a 变体；只用于 (session, seq) 幂等键，不做安全用途）。 */
+function seqNumber(key: string): number {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < key.length; index += 1) {
+    hash ^= key.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193) >>> 0
+  }
+  return hash >>> 1
 }
 
 /** 失败值里透传 MemoryDbError 的 code/retryable，其它兜底 db_read_failed。 */
@@ -276,7 +316,26 @@ export function createMemoryRelatedTool(options: MemoryRelatedToolOptions) {
             return failedEnvelope('db_read_failed', '关联遍历超时，depth=1 重试后仍无结果。')
           }
         }
-        return toSucceeded(result, partial)
+        const succeeded = toSucceeded(result, partial)
+        const fold = options.fold
+        if (fold === undefined || fold.write === undefined) return succeeded
+        // 把成功值序列化成「表面文本」再判定：折叠的是整条工具结果，不是逐条文本。
+        const surface = JSON.stringify(succeeded)
+        const folded = await foldToolResult({
+          text: surface,
+          sessionId: fold.sessionId(),
+          seq: seqNumber(fold.seqKey({ id: succeeded.id, depth: succeeded.depth })),
+          thresholdTokens: fold.thresholdTokens,
+          readonly: fold.readonly,
+          write: ({ sessionId, seq, text }) => fold.write!({ sessionId, seq, text, tokens: Math.ceil(text.length / 2) }),
+          logger: fold.logger,
+        })
+        if (!folded.folded) return succeeded
+        return {
+          folded: true,
+          handle: folded.handle ?? '',
+          hint: '结果过长，已折叠为句柄；调 memory_expand(handle) 可 100% 还原原文。',
+        }
       } catch (error) {
         return toFailure(error)
       }
