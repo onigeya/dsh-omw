@@ -36,7 +36,8 @@ export interface CompactionIngestResult {
 const INSERT_RUN = [
   'CREATE (:' + COMPACTION_RUN_TABLE + ' {',
   '  id: $id, compaction_id: $compaction_id, session_id: $session_id,',
-  '  config_snapshot_json: $config_snapshot_json, started_at: $started_at',
+  '  config_snapshot_json: $config_snapshot_json, started_at: $started_at,',
+  '  shadowed_seqs_json: $shadowed_seqs_json, shadowed_range_json: $shadowed_range_json',
   '})',
 ].join('\n')
 
@@ -60,6 +61,9 @@ export async function recordCompactionRun(
     readonly compactionId: string
     readonly configSnapshot: unknown
     readonly startedAt: string
+    /** 被折叠的 seq 列表（AC:1535 的可回溯证据）。 */
+    readonly shadowedSeqs?: readonly number[]
+    readonly shadowedRange?: { readonly start: number, readonly end: number } | null
   },
 ): Promise<boolean> {
   const id = compactionRunId(input.sessionId, input.compactionId)
@@ -72,6 +76,8 @@ export async function recordCompactionRun(
     session_id: input.sessionId,
     config_snapshot_json: JSON.stringify(input.configSnapshot ?? null),
     started_at: input.startedAt,
+    shadowed_seqs_json: JSON.stringify(input.shadowedSeqs ?? []),
+    shadowed_range_json: JSON.stringify(input.shadowedRange ?? null),
   })
   return true
 }
@@ -105,6 +111,8 @@ export async function ingestCompactionSummary(
     compactionId: entry.compactionId,
     configSnapshot: input.configSnapshot,
     startedAt: input.startedAt,
+    shadowedSeqs: entry.shadowedSeqs,
+    shadowedRange: entry.shadowedRange,
   })
   await auditWriter(connection, {
     recordedAt: input.nowIso,

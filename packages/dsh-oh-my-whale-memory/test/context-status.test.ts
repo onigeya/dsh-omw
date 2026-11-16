@@ -12,7 +12,6 @@ import { resolveMemoryDbPath } from '../src/db/paths'
 import {
   captureAttribution,
   readCompactionStatus,
-  shouldWireCompaction,
 } from '../src/context/status'
 import { recordCompactionRun } from '../src/context/compaction-ingest'
 import { cleanupTempDirs, makeTempDir } from './tmp'
@@ -127,8 +126,11 @@ describe('captureAttribution / readCompactionStatus / INV-7', () => {
     expect(status.lastCompaction?.compactionId).toBe('c-2')
   })
 
-  it('INV-7：只读实例不注册压缩接线（可执行判据）', () => {
-    expect(shouldWireCompaction(false)).toBe(true)
-    expect(shouldWireCompaction(true)).toBe(false)
+  it('INV-7：只读实例不注册压缩接线（由 apply 早退保证，见 index.ts 的 readonly 分支）', () => {
+    // 评审 R81：原先的 shouldWireCompaction 判据恒为 false（只读在更早的早退里已返回），
+    // 是死代码，已删除。这里改为钉住仍可测的那一半：只读实例也能读归因快照（空输入 ⇒ 全 0）。
+    const snapshot = captureAttribution({ totalTokens: 0, nodes: [] }, new Map(), '2026-06-01T00:00:00.000Z')
+    expect(snapshot.ledger.totalTokens).toBe(0)
+    expect(snapshot.indexedSeqs).toBe(0)
   })
 })

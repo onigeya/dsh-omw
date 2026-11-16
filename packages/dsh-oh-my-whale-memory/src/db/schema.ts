@@ -435,6 +435,8 @@ export function createCompactionRunTableStatement(): string {
   return (
     'CREATE NODE TABLE IF NOT EXISTS ' + COMPACTION_RUN_TABLE + '(' +
     'id STRING, compaction_id STRING, session_id STRING, config_snapshot_json STRING, started_at STRING, ' +
+    // AC:1535：被折叠的 seq 列表与区间必须可回溯（JSON 字符串，不引入结构化列）。
+    'shadowed_seqs_json STRING, shadowed_range_json STRING, ' +
     'PRIMARY KEY(id))'
   )
 }

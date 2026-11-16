@@ -54,18 +54,28 @@ describe('归因账本（FR-22 / INV-5 / INV-9）', () => {
     expect(ledger.attributedTokens).toBe(29)
   })
 
-  it('不变量：任意输入下五类之和 === totalTokens（含差额计入 unknown）', () => {
+  it('不变量：任意输入下五类之和 === totalTokens（双向成立）', () => {
     const cases = [
       { totalTokens: 100, nodes: [{ seq: 1, tokens: 10 }] },
+      // 节点和 > total：以 total 为权威，溢出单独记（评审 R81 第 1 条）
       { totalTokens: 5, nodes: [{ seq: 1, tokens: 500 }] },
       { totalTokens: 0, nodes: [] },
+      { totalTokens: 7, nodes: [{ seq: 1, tokens: 3 }, { seq: 2, tokens: 9 }] },
     ]
     for (const input of cases) {
-      const ledger = attributeSurface(input, index([[1, 'user']]))
+      const ledger = attributeSurface(input, index([[1, 'user'], [2, 'tool']]))
       const sum = ATTRIBUTION_SOURCES.reduce((total, source) => total + ledger.bySource[source], 0)
+      // 双向严格相等：不再用 >= 放水
+      expect(sum).toBe(ledger.totalTokens)
       expect(sum).toBe(ledger.attributedTokens)
-      if (input.totalTokens >= 5) expect(ledger.attributedTokens).toBeGreaterThanOrEqual(input.totalTokens)
+      expect(ledger.attributedTokens).toBe(input.totalTokens)
     }
+    // 溢出量可观测（不静默丢证据）
+    expect(attributeSurface({ totalTokens: 5, nodes: [{ seq: 1, tokens: 500 }] }, index([[1, 'user']])).overflowTokens).toBe(495)
+    // 数组顺序下「先到先计」：total=7 时 seq1 记 3、seq2 只记 4
+    const partial = attributeSurface({ totalTokens: 7, nodes: [{ seq: 1, tokens: 3 }, { seq: 2, tokens: 9 }] }, index([[1, 'user'], [2, 'tool']]))
+    expect(partial.bySource.user).toBe(3)
+    expect(partial.bySource.tool).toBe(4)
     // 差额（节点和 < total）计入 unknown 而不是四类
     const gap = attributeSurface({ totalTokens: 100, nodes: [{ seq: 1, tokens: 10 }] }, index([[1, 'user']]))
     expect(gap.bySource.user).toBe(10)

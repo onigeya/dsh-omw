@@ -30,7 +30,6 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
-import { shouldWireCompaction } from './context/status.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
 import { auditWriter } from './db/audit.js'
@@ -446,7 +445,8 @@ export async function apply(
     /**
    * Story 8.1：压缩事件接线（INV-7：只读实例不注册——它既不能写 INBOX，也没有压缩动作）。
    */
-  const compactionWiring = shouldWireCompaction(readonlyMode)
+  // INV-7：只读实例在上面已经早退，走不到这里；因此此处无需再判一次（评审 R81：删掉恒真的判据）。
+  const compactionWiring = readonlyMode
     ? null
     : createCompactionWiring({
         getConnection: () => getDb()?.connection ?? null,
@@ -457,8 +457,22 @@ export async function apply(
         }),
         orphanTimeoutMs: resolved.compactionOrphanTimeoutMs,
         onOrphan: (info) => {
-          // AC:1544：记一条审计行并解除阻塞（条目不会被真的"回收"，因为没有持有者）。
+          // AC:1544 / INV-6：解阻塞必须留账（评审 R81 第 3 条：原先只 warn，注释却说"记一条审计行"）。
           ctx.logger.warn('compaction/start 无配对，已解除阻塞：session=' + info.sessionId + ' turn=' + String(info.turn))
+          const connection = getDb()?.connection
+          if (connection === undefined) return
+          void auditWriter(connection, {
+            recordedAt: new Date().toISOString(),
+            actor: 'system',
+            kind: 'compaction',
+            policy: 'compaction-orphan',
+          })({
+            action: 'compaction_orphan_unblocked',
+            outcome: 'uncertain',
+            reason: 'session=' + info.sessionId + ' turn=' + String(info.turn) + ' waitedMs=' + String(info.waitedMs),
+          }).catch((error: unknown) => {
+            ctx.logger.warn('孤儿解阻塞账本写入失败：' + String(error))
+          })
         },
         logger: ctx.logger,
       })

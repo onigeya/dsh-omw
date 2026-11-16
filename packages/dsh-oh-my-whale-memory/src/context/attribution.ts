@@ -52,6 +52,8 @@ export interface AttributionLedger {
   readonly attributedTokens: number
   /** 归因到 `unknown` 的节点数（用于 status 的「索引缺口」提示）。 */
   readonly unknownNodes: number
+  /** 节点和超过 `totalTokens` 的溢出量（>0 说明宿主两个口径不一致，应告警）。 */
+  readonly overflowTokens: number
 }
 
 /** 单个节点的计量：优先 `tokens`，否则 `heuristicTokens`，都缺失按 0（不猜）。 */
@@ -66,16 +68,25 @@ export function nodeTokens(node: TokenSurfaceNode): number {
 /**
  * 归因主函数。
  *
- * 差额处理（`totalTokens` 与节点之和不等时）：节点之和若小于 `totalTokens`，差额计入 `unknown`
- * （**不摊派**给四类）；若大于（宿主计量口径不一致），以节点之和为准并在 `unknown` 之外**不**做负调整
- * ——`attributedTokens` 反映真实累加值，调用方据此告警。这样「和 === 总量」不会被伪造。
+ * 差额处理（`totalTokens` 与节点之和不等时）——**恒等式双向成立**（评审 R81 第 1 条）：
+ * - 节点和 **<** total：差额计入 `unknown`（索引缺口，**不摊派**给四类）；
+ * - 节点和 **>** total：按 `nodes` **数组顺序**计到总量为止，超出部分计入 `overflowTokens`
+ *   （不静默丢弃、也不负调整四类）。宿主计量与节点和矛盾时以 `totalTokens` 为权威。
+ * 两种情况下 `五类之和 === totalTokens` 都成立。
  */
 export function attributeSurface(measure: TokenMeasure, seqIndex: SeqSourceIndex): AttributionLedger {
   const bySource: Record<AttributionSource, number> = { system: 0, user: 0, tool: 0, assistant: 0, unknown: 0 }
   let unknownNodes = 0
+  const total = Number.isFinite(measure.totalTokens) && measure.totalTokens > 0 ? measure.totalTokens : 0
+  // 计量预算：以 totalTokens 为权威，按数组顺序计到总量为止（评审 R81：节点和 > total 时不能放大总量）。
+  let remaining = total
+  let overflowTokens = 0
   // 按数组位置顺序遍历（AC:1564：不得按 seq 排序）。
   for (const node of measure.nodes) {
-    const tokens = nodeTokens(node)
+    const raw = nodeTokens(node)
+    const tokens = Math.min(raw, remaining)
+    overflowTokens += raw - tokens
+    remaining -= tokens
     const source = seqIndex.get(node.seq)
     if (source === undefined) {
       bySource.unknown += tokens
@@ -85,7 +96,6 @@ export function attributeSurface(measure: TokenMeasure, seqIndex: SeqSourceIndex
     bySource[source] += tokens
   }
   let attributed = ATTRIBUTION_SOURCES.reduce((sum, source) => sum + bySource[source], 0)
-  const total = Number.isFinite(measure.totalTokens) && measure.totalTokens > 0 ? measure.totalTokens : 0
   if (attributed < total) {
     // 未被任何节点覆盖的差额：属于「索引缺口」，计入 unknown（不摊派）。
     bySource.unknown += total - attributed
@@ -96,5 +106,6 @@ export function attributeSurface(measure: TokenMeasure, seqIndex: SeqSourceIndex
     bySource,
     attributedTokens: attributed,
     unknownNodes,
+    overflowTokens,
   }
 }

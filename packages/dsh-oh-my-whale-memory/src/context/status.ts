@@ -83,10 +83,3 @@ export async function readCompactionStatus(connection: lbug.Connection): Promise
   }
 }
 
-/**
- * INV-7 的可执行判据（Story 8.1）：只读实例**不得**注册压缩事件接线。
- * 抽成纯函数是为了让「index 里那行三元判断」本身可被测试，而不是靠读代码相信。
- */
-export function shouldWireCompaction(readonlyMode: boolean): boolean {
-  return !readonlyMode
-}
