@@ -304,7 +304,7 @@ export async function forgetMemory(
       triggerId: null,
     })
     await insertKeyedDecision(connection, {
-      judgeKey: buildJudgeKey(FORGET_POLICY, id, id),
+      judgeKey: buildJudgeKey(FORGET_POLICY, 'supersede', id, id),
       newId: id,
       oldId: id,
       action: 'supersede',
@@ -327,7 +327,7 @@ export async function forgetMemory(
         triggerId: rootLogId,
       })
       await insertKeyedDecision(connection, {
-        judgeKey: buildJudgeKey(FORGET_POLICY, victim.id, id),
+        judgeKey: buildJudgeKey(FORGET_POLICY, 'supersede', victim.id, id),
         newId: id,
         oldId: victim.id,
         action: 'supersede',

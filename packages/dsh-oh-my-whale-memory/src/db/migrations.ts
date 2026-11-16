@@ -17,6 +17,7 @@
  */
 import { SCHEMA_VERSION } from './schema.js'
 import { MIGRATION_0002 } from './migrations/0002-evidence-degraded-and-redact.js'
+import { MIGRATION_0003 } from './migrations/0003-judge-key-action.js'
 
 export interface MigrationStatement {
   /** 目标节点表名（只能是本仓导出的常量，绝不接受外部输入）。 */
@@ -26,15 +27,26 @@ export interface MigrationStatement {
   readonly ddl: string
 }
 
+/**
+ * 一条迁移里的**数据改写**步骤（Story 5.4 新增）。
+ *
+ * 之前的迁移只加列，所以清单里只有 `statements`。`judge_key` 含 `action` 之后既有行必须重算键——
+ * 那是数据变换，SQL 表达不了（键是 `uuid5`）。`run` 在同一事务内、所有 `statements` 之后执行，
+ * 必须自己保证幂等（重放的第二次要 no-op）。
+ */
+export type MigrationDataStep = (connection: import('@ladybugdb/core').Connection) => Promise<void>
+
 export interface Migration {
   /** 单调递增的十进制迁移号，与文件名前缀一致（0002 → 2）。 */
   readonly version: number
   readonly name: string
   readonly statements: readonly MigrationStatement[]
+  /** 可选的数据改写步骤；缺省 = 纯 DDL 迁移。 */
+  readonly run?: MigrationDataStep
 }
 
 /** 全部迁移，按 version 升序（运行器按此顺序逐条应用）。 */
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002]
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003]
 
 /** 目标版本（number 形态，便于与迁移号比较）。 */
 export const TARGET_SCHEMA_VERSION = Number(SCHEMA_VERSION)

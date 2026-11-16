@@ -261,10 +261,25 @@ const COUNT_UNCERTAIN_STATEMENT =
 const KEYED_DECISION_PROBE = `CALL table_info('${KEYED_DECISION_TABLE}') RETURN name`
 
 /**
- * AD-18 键式，逐字：uuid5('judge:' + policy + ':' + [old_id, new_id].sort().join(':'))。
- * 键与新旧 id 的先后无关，重放/重裁决得到同一个键。
+ * AD-18 键式（Story 5.4 / AC:1299-1301 修正后逐字）：
+ * `uuid5('judge:' + policy + ':' + action + ':' + [old_id, new_id].sort().join(':'))`。
+ *
+ * **`action` 必须入键**：同一节点对的 `merge` 与 `supersede` 是两条不同裁决，键相同会互相吞
+ *（后到的 MERGE 命中已有键 → 字段保持首次写入的值，第二条裁决静默丢失）。键与新旧 id 的先后无关，
+ * 重放/重裁决得到同一个键。
+ *
+ * 旧键形态（不含 action）由 {@link buildLegacyJudgeKey} 提供：迁移 0003 之前落库的行用它算出的键，
+ * 读侧在找不到新键时回退查一次旧键（旧键只读兼容，新写入一律新键）。
  */
-export function buildJudgeKey(policy: string, oldId: string, newId: string): string {
+export function buildJudgeKey(policy: string, action: string, oldId: string, newId: string): string {
+  return uuid5('judge:' + policy + ':' + action + ':' + [oldId, newId].sort().join(':'))
+}
+
+/**
+ * Story 5.4 迁移前的旧键形态（不含 action）：**只用于读兼容**，不得用于新写入。
+ * 与 `buildJudgeKey` 的差别只有分隔段：`judge:<policy>:<old:new>`。
+ */
+export function buildLegacyJudgeKey(policy: string, oldId: string, newId: string): string {
   return uuid5('judge:' + policy + ':' + [oldId, newId].sort().join(':'))
 }
 

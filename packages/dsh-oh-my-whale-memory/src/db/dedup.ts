@@ -510,7 +510,7 @@ export async function writeDeduplicatedMemory(
     // 评审 P4：这次版本替换必须留下可重建的键式裁决，否则 AUDIT_GAP_STATEMENT
     //（已失效且无 k.old_id = m.id 的裁决行）会把每一次正常替换都永久计成缺口。
     await insertKeyedDecision(connection, {
-      judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, oldVersion.id, id),
+      judgeKey: buildJudgeKey(DEFAULT_CAPTURE_POLICY, 'supersede', oldVersion.id, id),
       newId: id,
       oldId: oldVersion.id,
       action: 'supersede',
