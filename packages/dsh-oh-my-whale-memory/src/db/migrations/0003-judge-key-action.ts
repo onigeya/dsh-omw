@@ -39,6 +39,9 @@ const MERGE_ROW = [
   '  ON CREATE SET k.new_id = $new_id, k.old_id = $old_id, k.action = $action,',
   '    k.policy = $policy, k.l0_refs = $l0_refs, k.resolution_source = $resolution_source,',
   '    k.write_pending = $write_pending, k.invalidated_by = $invalidated_by, k.ts = $ts',
+  // 目标键已存在（两条旧裁决并到同一新键）时：其余字段保持首次写入值，但失效因果必须取并集，
+  // 否则随后删掉旧行会把它整条丢掉（评审 MIGR54 第 2 条）。
+  '  ON MATCH SET k.invalidated_by = $invalidated_by',
 ].join('\n')
 
 const DELETE_ROW = 'MATCH (k:' + KEYED_DECISION_TABLE + ' {judge_key: $judge_key}) DELETE k'

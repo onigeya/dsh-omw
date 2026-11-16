@@ -447,3 +447,45 @@ describe('迁移 0003：judge_key 加 action（Story 5.4 / AC:1299-1301）', () 
     await store.close()
   }, 60_000)
 })
+
+describe('迁移 0003：目标键已存在时的失效因果合并（评审 MIGR54 第 2 条）', () => {
+  it('新键行已存在 + 旧键行 ⇒ 合并 invalidated_by 后只剩一行，因果不丢', async () => {
+    const dir = await makeTempDir('omw-migr-judgekey-merge-')
+    const dbPath = resolveMemoryDbPath(dir)
+    const policy = 'last-writer-wins'
+    const oldId = 'old-merge-1'
+    const newId = 'new-merge-1'
+    const legacyKey = buildLegacyJudgeKey(policy, oldId, newId)
+    const expectedKey = buildJudgeKey(policy, 'supersede', oldId, newId)
+
+    runChild('create', dbPath, [
+      V1_MEMORY_TABLE,
+      V1_L0_TABLE,
+      V1_GENERATION_LOG,
+      createKeyedDecisionTableStatement(),
+      ...metaStatements('2'),
+      // 旧键行带一条因果；同 pair 的新键行已存在（模拟「半迁移」或手工数据）并带另一条因果。
+      `CREATE (:keyed_decision {judge_key: '${legacyKey}', new_id: '${newId}', old_id: '${oldId}', ` +
+      `action: 'supersede', policy: '${policy}', l0_refs: [], resolution_source: 'auto', ` +
+      `write_pending: false, ts: '2026-01-01T00:00:00.000Z', ` +
+      `invalidated_by: MAP(['${oldId}|${newId}'], [['trigger-old']])})`,
+      `CREATE (:keyed_decision {judge_key: '${expectedKey}', new_id: '${newId}', old_id: '${oldId}', ` +
+      `action: 'supersede', policy: '${policy}', l0_refs: [], resolution_source: 'auto', ` +
+      `write_pending: false, ts: '2026-01-02T00:00:00.000Z', ` +
+      `invalidated_by: MAP(['${oldId}|${newId}'], [['trigger-new']])})`,
+    ])
+
+    const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    const rows = await queryRows(
+      store.connection,
+      'MATCH (k:keyed_decision) RETURN k.judge_key AS key, k.invalidated_by AS causes',
+    )
+    expect(rows).toHaveLength(1)
+    expect(String(rows[0]?.key)).toBe(expectedKey)
+    const causes = rows[0]?.causes as Record<string, unknown>
+    const list = (causes?.[`${oldId}|${newId}`] ?? []) as unknown[]
+    // 两条因果都在：旧行的 trigger-old 不能被 ON CREATE-only 的 MERGE 吞掉。
+    expect(list.map(String).sort()).toEqual(['trigger-new', 'trigger-old'])
+    await store.close()
+  }, 60_000)
+})

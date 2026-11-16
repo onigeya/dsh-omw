@@ -188,6 +188,11 @@ export interface KeyedDecisionEntry {
 /** 回填一次失效因果所需的最小信息。 */
 export interface InvalidationCauseInput {
   /** keyed_decision 主键（AD-18 键式）。 */
+  /**
+   * 旧键回退（Story 5.4）：迁移 0003 之前落库的行用不含 action 的键。按顺序尝试，第一个命中的
+   * 就是目标行；全部不命中才报 `audit_record_missing`。新写入一律用 `buildJudgeKey` 的新键。
+   */
+  fallbackJudgeKeys?: readonly string[]
   judgeKey: string
   /** 有向边对的 source：新事实（触发者）。 */
   sourceId: string

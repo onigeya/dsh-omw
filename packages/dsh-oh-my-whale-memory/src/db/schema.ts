@@ -257,7 +257,7 @@ export const GENERATION_LOG_TABLE = 'generation_log'
 /**
  * 审计账本：keyed_decision（Story 1.10 / AD-18、AD-19、AD-21）。
  *
- * - judge_key：AD-18 内容键（uuid5('judge:' + policy + ':' + 排序后的 ids)），主键
+ * - judge_key：AD-18 内容键（Story 5.4 起**含 action**：`uuid5('judge:' + policy + ':' + action + ':' + 排序后的 ids)`），主键；迁移 0003 已把旧键行就地重算
  * - resolution_source：auto|review|user 三档（v1 只加字段不加流程）
  * - write_pending：中间态，崩溃恢复优先重放
  * - invalidated_by：MAP(STRING, STRING[]) 的多对一失效因果，键 source_id|target_id
