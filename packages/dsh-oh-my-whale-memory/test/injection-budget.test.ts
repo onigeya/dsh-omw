@@ -174,3 +174,41 @@ describe('applyInjectionBudget：渲染顺序（原则开头 / 证据跟随）',
     expect(result.text.startsWith('相关记忆（开局注入）：')).toBe(true)
   })
 })
+
+describe('Story 7.1 / AC:1369-1372：persona 恒置顶且永不因预算被裁', () => {
+  it('预算耗尽（可删集合全被裁掉）时 persona 仍在注入集内，且是首条', () => {
+    // 单个 persona 条目 + 30 条超量可删条目：可删集合会被 20 条上限与 8000 字符总长同时裁掉。
+    const persona = item('persona-1', '我偏好先看证据再下结论', { kind: 'persona', priority: -1 })
+    const result = applyInjectionBudget({
+      ...EMPTY,
+      inviolable: [persona],
+      l1: Array.from({ length: 30 }, (_, index) => item(`l${index}`, 'x'.repeat(500))),
+    })
+
+    // persona 在注入集里、未被截断、排在最前（FR-16 的二次加权）。
+    expect(result.keptInviolable).toBe(1)
+    const first = result.items[0]
+    expect(first?.id).toBe('persona-1')
+    expect(first?.inviolable).toBe(true)
+    expect(first?.truncated).toBe(false)
+    expect(first?.text).toBe('我偏好先看证据再下结论')
+    // 注入文本里确实出现，且出现在任何可删条目之前。
+    const lines = result.text.split('\n')
+    const personaLine = lines.findIndex((line) => line.includes('我偏好先看证据再下结论'))
+    expect(personaLine).toBeGreaterThanOrEqual(0)
+    expect(lines.slice(0, personaLine).some((line) => line.startsWith('- ['))).toBe(false)
+  })
+
+  it('可删集合被 20 条上限裁掉时，persona 仍不被计入名额', () => {
+    const persona = item('persona-2', '我禁止自动提交', { kind: 'persona', priority: -1 })
+    const result = applyInjectionBudget({
+      ...EMPTY,
+      inviolable: [persona],
+      l1: Array.from({ length: 25 }, (_, index) => item(`d${index}`, 'y'.repeat(10))),
+    })
+
+    expect(result.items.filter((entry) => entry.inviolable)).toHaveLength(1)
+    expect(result.items.filter((entry) => !entry.inviolable)).toHaveLength(INJECTION_MAX_ITEMS)
+    expect(result.items[0]?.id).toBe('persona-2')
+  })
+})

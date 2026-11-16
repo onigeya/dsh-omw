@@ -932,7 +932,7 @@ export interface MemoryPendingConflictEntry {
 function renderPendingConflictLines(snapshot: MemoryStatusSnapshot): string[] {
   const count = snapshot.pendingConflicts
   if (count === undefined) return []
-  if (count === null) return ['pending_conflicts: 未知（库缺少待裁决表）']
+  if (count === null) return ['pending_conflicts: 未知（库缺少 pending_decision 表）']
   const lines = [`pending_conflicts: ${count}`]
   const entries = snapshot.pendingConflictEntries ?? []
   for (const entry of entries.slice(0, 5)) {

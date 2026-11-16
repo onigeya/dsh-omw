@@ -27,6 +27,7 @@ import {
 } from '../src/db/pending'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll } from '../src/db/rows'
+import { runStatement } from '../src/db/backend'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
@@ -230,6 +231,13 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
       `MATCH (k:keyed_decision) WHERE k.old_id = '${old.id}' AND k.action = 'supersede' RETURN k.resolution_source AS source`,
     )
     expect(keyed[0]?.source).toBe('user')
+    // 评审 R71：中间态的 await-confirmation 行必须在结案时删掉——否则它会替旧节点在
+    // audit_gap 里永久作证，把这下面的 0 变成假绿。
+    const dangling = await queryAll(
+      store.connection,
+      `MATCH (k:keyed_decision) WHERE k.old_id = '${old.id}' AND k.action = 'await-confirmation' RETURN count(k) AS c`,
+    )
+    expect(Number(dangling[0]?.c ?? 0)).toBe(0)
     // 合法的 user 裁决让 audit_gap 不因这次作废上涨
     expect(await computeAuditGap(store.connection)).toBe(0)
   })
@@ -246,5 +254,72 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
     // 真正的跨进程重启由既有 db-parent-id/db-support-column 的子进程手法覆盖，本用例只钉「数据在库里」。
     const rows = await queryAll(store.connection, 'MATCH (p:pending_decision) RETURN count(p) AS c')
     expect(Number(rows[0]?.c ?? 0)).toBe(await countPendingDecisions(store.connection))
+  })
+
+  it('同一 id 二次裁决 ⇒ not_found（幂等，不重复写节点）', async () => {
+    const old = await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'persona',
+      priority: -1,
+      text: '我只看结论',
+      embedding: [0, 0, 0, 1],
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'persona',
+      priority: -1,
+      text: '我看过程和结论',
+      embedding: [0, 0, 0.01, 1],
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    const pending = (await listPendingDecisions(store.connection, { limit: 5 })).find((item) => item.oldId === old.id)
+    expect(pending).toBeDefined()
+    await resolvePendingDecision(store.connection, pending!.id, 'keep', { now: () => NOW })
+    await expect(resolvePendingDecision(store.connection, pending!.id, 'keep', { now: () => NOW }))
+      .rejects.toMatchObject({ code: 'pending_decision_not_found' })
+  })
+
+  it('audit_gap 不被「无裁决的作废」掩盖：手工作废仍计 1', async () => {
+    // 反向证明：如果 audit_gap 只要求「任一行 keyed 引用该节点」，那么手工把节点置无效应该为 0；
+    // 它必须为 1（没有任何裁决行），否则基线用例的 0 就是假绿。
+    const before = await computeAuditGap(store.connection)
+    const node = await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'work_fact',
+      text: '手工作废的节点',
+      embedding: [0.5, 0.5, 0.5, 0.5],
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    await runStatement(
+      store.connection,
+      `MATCH (m:memory {id: '${node.id}'}) SET m.invalid_at = '${T0}'`,
+    )
+    expect(await computeAuditGap(store.connection)).toBe(before + 1)
+  })
+
+  it('pending 列表按时间倒序且 limit 生效（n=7 ⇒ 只回 5 条）', async () => {
+    const countBefore = await countPendingDecisions(store.connection)
+    for (let index = 0; index < 7; index += 1) {
+      await insertPendingDecision(store.connection, {
+        id: `p-${String(index)}`,
+        oldId: `old-${String(index)}`,
+        newId: `new-${String(index)}`,
+        payload: `候选 ${String(index)}`,
+        kind: 'persona',
+        priority: -1,
+        actor: 'agent',
+        createdAt: `2026-07-0${String(index + 1)}T00:00:00.000Z`,
+      })
+    }
+    const list = await listPendingDecisions(store.connection, { limit: 5 })
+    expect(list).toHaveLength(5)
+    // 倒序：在本次插入的 p-* 子集里，最新的 p-6 在最前（库里还有前面用例留下的真实冲突行）
+    const mine = list.map((item) => item.id).filter((id) => id.startsWith('p-'))
+    expect(mine[0]).toBe('p-6')
+    expect(await countPendingDecisions(store.connection)).toBe(countBefore + 7)
   })
 })

@@ -407,7 +407,7 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'inbox_backlog: n/a（无积压）',
         'last_refine_at: n/a（从未完成精炼）',
         'rerank_latency: n/a (v1 无精排)',
-        'pending_conflicts: 未知（库缺少待裁决表）',
+        'pending_conflicts: 未知（库缺少 pending_decision 表）',
         'strategy_gate: n/a（Epic 7 真源在 Story 7.3）',
         'backend: native',
       ].join('\n'))

@@ -22,7 +22,7 @@ import { memoryNodeId } from './id.js'
 import { writeMemoryVersion } from './memory.js'
 import { runPrepared } from './backend.js'
 import { queryRows } from './rows.js'
-import { MEMORY_TABLE, PENDING_DECISION_TABLE } from './schema.js'
+import { KEYED_DECISION_TABLE, MEMORY_TABLE, PENDING_DECISION_TABLE } from './schema.js'
 import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
 import { runInTransaction } from './transaction.js'
 
@@ -67,6 +67,13 @@ const READ_PENDING = [
 ].join('\n')
 
 const DELETE_PENDING = 'MATCH (p:' + PENDING_DECISION_TABLE + ' {id: $id}) DELETE p'
+
+/** 结案中间态：删掉这条冲突对应的 `await-confirmation` keyed 行（见 resolvePendingDecision 注释）。 */
+const DELETE_KEYED_AWAIT = [
+  'MATCH (k:' + KEYED_DECISION_TABLE + ')',
+  "  WHERE k.old_id = $old_id AND k.new_id = $new_id AND k.action = 'await-confirmation'",
+  'DELETE k',
+].join('\n')
 
 const LIST_PENDING = [
   'MATCH (p:' + PENDING_DECISION_TABLE + ')',
@@ -196,6 +203,12 @@ export async function resolvePendingDecision(
       resolutionSource: 'user',
       ts: nowIso,
     })
+    // 结案中间态：删掉 `await-confirmation` 的 keyed 行，keyed 表只保留最终裁决。
+    // 不删的后果（评审 R71 第 4 条）：这行永远不被 `markKeyedDecisionPublished` 翻回，且因为
+    // `old_id` 指向旧节点，会替旧节点在 `audit_gap` 里**永久作证**，掩盖它将来任何漏账。
+    // 「曾经等待过」的留痕在 `generation_log`（`routePersonaConflict` 已写 await_confirmation 行）。
+    const closePending = await connection.prepare(DELETE_KEYED_AWAIT)
+    await runPrepared(connection, closePending, { old_id: pending.oldId, new_id: pending.newId })
     if (resolution === 'accept') {
       const invalidate = await connection.prepare(SET_OLD_INVALID)
       await runPrepared(connection, invalidate, { id: pending.oldId, invalid_at: nowIso })

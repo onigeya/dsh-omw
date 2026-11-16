@@ -288,7 +288,8 @@ async function routePersonaConflict(
     policy: PERSONA_CONFLICT_POLICY,
     l0Refs: sourceRefs,
     resolutionSource: 'auto',
-    writePending: true,
+    // 不写 `write_pending: true`：persona 冲突**没有发布点**（本次不写节点），
+    // 该标记找不到任何会把它翻回 false 的路径，写 true 只会在恢复消费者上线后被当成「待重放」（评审 R71）。
     ts: nowIso,
   })
   await insertPendingDecision(connection, {
