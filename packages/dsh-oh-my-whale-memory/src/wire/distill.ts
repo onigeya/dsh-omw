@@ -112,6 +112,10 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     logger: ctx.logger,
     // Story 8.6 / T4：节点 text 落库前的净化（精炼口）。
     purify: resolved.purify,
+    // Story 9.1 / AD-31：抽取路径上的单一判定点。9.2 之前没有 Turtle 解析器 ⇒ index=null；
+    // 档位 off 时判定函数不执行，默认行为逐条不变；档位非 off 时按「闸门不可用 ⇒ 整闸
+    // fail-open」显式告警，不静默丢弃候选。
+    ontology: { index: null, policy: resolved.ontologyGate },
     // Story 10.2：指针 payload 的正文 hydrate 通道（唯一读宿主处，AD-36）。
     hostLog,
   })

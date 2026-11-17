@@ -78,6 +78,9 @@ export const MEMORY_CONFIG_DEFAULTS = {
   // 关闭时反思不产生任何候选（fail-closed，spec 的 deferred 项）；打开后候选仍默认不可见，
   // 只有通过独立晋升门（accepted）才进常驻层。
   selfKnowledgeCaptureEnabled: false,
+  // Story 9.1 / AD-31：抽取期本体约束闸门的档位。默认 **off**——默认行为与未启用本体时
+  // 逐条一致（SM-9 ④ 的可回退对照）；档位只在 9.2 加载本体后才可能有可观察效果。
+  ontologyGateLevel: 'off' as const,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -137,6 +140,23 @@ const StrategyGateSchema = Schema.object({
   minConfidence: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyMinConfidence),
   expiryDays: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
   maxPendingPerSession: Schema.number().default(MEMORY_CONFIG_DEFAULTS.strategyMaxPendingPerSession),
+}).default({}).volatile()
+
+/**
+ * Story 9.1 / AD-31：本体闸门的档位与逐维覆盖（全部 `.volatile()`，INV-12）。
+ *
+ * 子对象整体 `.volatile()`、子字段 plain（AD-11 的 volatile 嵌套约束）。默认 `off`：
+ * 关闭时判定函数完全不执行，默认行为与未启用本体时逐条一致（off 下逐维覆盖被忽略，
+ * 保证「off 产出的图与未启用本体逐条一致」）。逐维覆盖只在 align / strict 之上生效。
+ */
+const OntologyGateSchema = Schema.object({
+  level: Schema.union(['off', 'align', 'strict'] as const).default(MEMORY_CONFIG_DEFAULTS.ontologyGateLevel),
+  nameNormalization: Schema.boolean(),
+  duplicateTypeDiscard: Schema.boolean(),
+  entityType: Schema.boolean(),
+  relationType: Schema.boolean(),
+  domainRange: Schema.boolean(),
+  datatype: Schema.boolean(),
 }).default({}).volatile()
 
 /** FR-18 全字段 Config schema。每项 `.volatile()`；凭据标 `.role('secret')`。 */
@@ -216,6 +236,8 @@ export const Config = Schema.object({
    * 只有独立晋升门产生的 accepted 才进常驻层（AD-39）。
    */
   selfKnowledgeCaptureEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.selfKnowledgeCaptureEnabled).volatile(),
+  /** Story 9.1：本体约束闸门档位 + 逐维覆盖（默认 off，见上方 OntologyGateSchema）。 */
+  ontologyGate: OntologyGateSchema,
 })
 
 /**
@@ -286,7 +308,26 @@ export interface RuntimeConfig {
    * 关闭时零候选；打开也只写候选，可见性仍由晋升门与 `isVisible` 决定。
    */
   selfKnowledgeCaptureEnabled: boolean
+  /**
+   * Story 9.1 / AD-31：本体约束闸门（判定侧）。`level` 默认 off；逐维覆盖缺省 = 沿用档位默认。
+   * 结构上与 `ontology/gate.ts` 的 `OntologyGatePolicy` 同形，两处靠结构类型直接对接。
+   */
+  ontologyGate: OntologyGateConfig
   warnings: string[]
+}
+
+/** Story 9.1：本体闸门三档（off / align / strict；不设中间档）。 */
+export type OntologyGateLevel = 'off' | 'align' | 'strict'
+
+/** Story 9.1：闸门档位 + 逐维覆盖（未给的覆盖项 = 沿用档位默认）。 */
+export interface OntologyGateConfig {
+  readonly level: OntologyGateLevel
+  readonly nameNormalization?: boolean
+  readonly duplicateTypeDiscard?: boolean
+  readonly entityType?: boolean
+  readonly relationType?: boolean
+  readonly domainRange?: boolean
+  readonly datatype?: boolean
 }
 
 /** 统一读法：既接受 volatile 节点（.get()），也接受普通值，便于纯单测直接传值包装。 */
@@ -339,6 +380,25 @@ function requireNonNegativeWeight(field: string, value: number): number {
 }
 
 /**
+ * Story 9.1：逐维开关的严格布尔校验。未给 = undefined（沿用档位默认）；给了非布尔值 =
+ * 配置错误（静默 truthy 强转会让「关闭这一维」与「拼错字段」产生同样的结果）。
+ */
+function optionalBoolean(field: string, value: boolean | undefined): boolean | undefined {
+  if (value === undefined) return undefined
+  if (typeof value !== 'boolean') throw new Error(`${field}（期望布尔值，实际 ${JSON.stringify(value)}）`)
+  return value
+}
+
+/** 把一维覆盖收进 config 对象；未给（undefined）时不落键，保证「缺省 = 沿用档位默认」。 */
+function gateOverride<K extends Exclude<keyof OntologyGateConfig, 'level'>>(
+  key: K,
+  value: boolean | undefined,
+): Pick<OntologyGateConfig, K> | Record<string, never> {
+  const checked = optionalBoolean('ontologyGate.' + key, value)
+  return checked === undefined ? {} : ({ [key]: checked } as Pick<OntologyGateConfig, K>)
+}
+
+/**
  * 分级校验入口。
  * 硬校验失败即抛 Error（仅阻塞本插件，宿主继续运行）；
  * Embedding token/model 缺失走降级（warn + embeddingMode='disabled'，FR-18）。
@@ -379,6 +439,15 @@ export function resolveRuntimeConfig(config: {
     purifyMinRemainder?: Getter<number>
     personaSpecEnabled?: Getter<boolean>
     selfKnowledgeCaptureEnabled?: Getter<boolean>
+    ontologyGate?: Getter<{
+      level?: string
+      nameNormalization?: boolean
+      duplicateTypeDiscard?: boolean
+      entityType?: boolean
+      relationType?: boolean
+      domainRange?: boolean
+      datatype?: boolean
+    }>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -517,6 +586,32 @@ export function resolveRuntimeConfig(config: {
     read(config.selfKnowledgeCaptureEnabled ?? MEMORY_CONFIG_DEFAULTS.selfKnowledgeCaptureEnabled) === true
   // ratio 的负数/非有限值不抛错：语义是「预算 0 + 可见告警」（AC:1832，由 T1 产出 warning）。
   const injectionRatio = Number(read(config.injectionRatio ?? MEMORY_CONFIG_DEFAULTS.injectionRatio))
+  // Story 9.1 / AD-31：闸门档位只认三档（拼错档位会静默退化成「哪几维默认开」的猜测，
+  // 与 AD-31「三档硬编码」冲突）；逐维覆盖只认布尔。
+  const ontologyRaw = read(config.ontologyGate ?? {}) as {
+    level?: string
+    nameNormalization?: boolean
+    duplicateTypeDiscard?: boolean
+    entityType?: boolean
+    relationType?: boolean
+    domainRange?: boolean
+    datatype?: boolean
+  }
+  const ontologyLevelRaw = ontologyRaw.level ?? MEMORY_CONFIG_DEFAULTS.ontologyGateLevel
+  if (ontologyLevelRaw !== 'off' && ontologyLevelRaw !== 'align' && ontologyLevelRaw !== 'strict') {
+    throw new Error(
+      `ontologyGate.level（期望 off / align / strict，实际 ${JSON.stringify(ontologyLevelRaw)}）`,
+    )
+  }
+  const ontologyGate = {
+    level: ontologyLevelRaw as OntologyGateLevel,
+    ...gateOverride('nameNormalization', ontologyRaw.nameNormalization),
+    ...gateOverride('duplicateTypeDiscard', ontologyRaw.duplicateTypeDiscard),
+    ...gateOverride('entityType', ontologyRaw.entityType),
+    ...gateOverride('relationType', ontologyRaw.relationType),
+    ...gateOverride('domainRange', ontologyRaw.domainRange),
+    ...gateOverride('datatype', ontologyRaw.datatype),
+  }
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -601,6 +696,7 @@ export function resolveRuntimeConfig(config: {
     purify: { r1: purifyR1, r2: purifyR2, r3: purifyR3, minRemainder: purifyMinRemainder },
     personaSpecEnabled,
     selfKnowledgeCaptureEnabled,
+    ontologyGate,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -647,4 +743,6 @@ export interface ConfigShape {
   purifyMinRemainder: Volatile<number>
   personaSpecEnabled: Volatile<boolean>
   selfKnowledgeCaptureEnabled: Volatile<boolean>
+  /** Story 9.1：本体闸门档位 + 逐维覆盖（默认 level=off）。 */
+  ontologyGate: Volatile<OntologyGateConfig>
 }

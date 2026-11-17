@@ -38,7 +38,15 @@ import {
 import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
 import { purifyText, type PurifyOptions, type PurifyRule } from '../context/purify.js'
 import { recordPurifyRun } from '../context/purify-ledger.js'
-import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute } from './llm-refine.js'
+import { classifyCandidate, isOntologyGateActive, ONTOLOGY_DIMENSIONS, type OntologyGatePolicy } from '../ontology/gate.js'
+import type { CandidateAssertion, OntologyIndex } from '../ontology/index.js'
+import {
+  ONTOLOGY_DISCARD_ACTION,
+  emptyOntologyDropCounts,
+  ontologyDropDetail,
+  type OntologyDropCounts,
+} from '../ontology/ledger.js'
+import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute, type RefinedFact } from './llm-refine.js'
 import type { RelationRunner } from '../wiki/relations.js'
 
 /** 单次 `process` 的硬上界（R2：一次尝试 ≤30s，含 embedding；重试不在同一次尝试内）。 */
@@ -118,6 +126,17 @@ export interface InboxProcessorDeps {
    * 条目完全不使用它（兼容读）。
    */
   readonly hostLog?: HostLogServiceLike | null
+  /**
+   * Story 9.1 / AD-31：抽取路径上的**单一判定点**（本体闸门）。判定发生在写 L1 正式区之前。
+   *
+   * `index=null` 表示本体尚未加载（9.2 之前的生产路径）：只要档位 / 逐维开关使闸门生效，
+   * 就按 AD-31「闸门不可用 ⇒ 整闸 fail-open」放行并显式告警，绝不静默丢弃候选。
+   * `policy.level=off` 且无逐维覆盖时判定函数完全不执行，默认行为逐条不变。
+   */
+  readonly ontology?: {
+    readonly index: OntologyIndex | null
+    readonly policy: OntologyGatePolicy
+  } | null
 }
 
 export interface EmbedFactsResult {
@@ -175,13 +194,15 @@ function insertRefineAudit(
    * 统计不到（曾经就是这样：reason 前缀写了 write_evidence_skipped，action 仍是 refine_inbox）。
    */
   action: string = REFINE_INBOX_ACTION,
+  /** Story 9.1：本体闸门丢弃账本的 detail（JSON；仅 ontology_discard 行使用）。 */
+  detail?: string,
 ): Promise<string> {
   return auditWriter(connection, {
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
     l0Refs,
-  })({ action, outcome, reason })
+  })({ action, outcome, reason, ...(detail === undefined ? {} : { detail }) })
 }
 
 /** 失败审计行：必须另开事务写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
@@ -212,6 +233,18 @@ async function recordUnresolvablePointers(
 }
 
 /**
+ * 9.1 的接线适配：一条 L1 卡片 = 一条「kind 是实体类型」的类型断言。
+ *
+ * 9.2 之前精炼产物没有 subject/relation/object 三元组；把卡片映射成
+ * `subject=kind, type=kind` 后，闸门的 ④⑤⑥ 因「未解析」自然放行（AD-31：未解析 ≠ 违反），
+ * ③ 则成为唯一实际生效的闭世界校验：未在词表中声明的 kind 会在 align/strict 下被丢弃。
+ * 使用 kind 而不是卡片正文作为 subject，避免把「名称归一化」误用到自然语言句子上。
+ */
+function candidateOfFact(fact: RefinedFact): CandidateAssertion {
+  return { subject: fact.kind, type: fact.kind }
+}
+
+/**
  * 组装 2.3 的精炼处理器：交给 `createInboxConsumer({ process })` 注入（R4）。
  * 返回的处理器已完成全部队列记账（标 done / 抛错交给消费者记失败），调用方无需再包装。
  */
@@ -219,6 +252,10 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
   const now = deps.now ?? (() => new Date())
   const timeoutMs = deps.timeoutMs ?? INBOX_PROCESS_TIMEOUT_MS
   const llmTimeoutMs = deps.llmTimeoutMs ?? INBOX_LLM_TIMEOUT_MS
+  // Story 9.1：闸门开关在构造时解析一次；单条判定只做 O(1) 查表（INV-17，不进热路径构建索引）。
+  const ontology = deps.ontology ?? null
+  const ontologyActive = ontology !== null && isOntologyGateActive(ontology.policy)
+  let warnedOntologyUnavailable = false
 
   return async (item: InboxItem): Promise<InboxProcessResult> => {
     const connection = deps.connection()
@@ -306,7 +343,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     let purifyRemovedChars = 0
     let purifyRemovedTokens = 0
     let purifySourceChars = 0
-    const facts = refined.facts.map((fact) => {
+    const purifiedFacts = refined.facts.map((fact) => {
       const result = purifyText(fact.text, deps.purify ?? null)
       purifySourceChars += fact.text.length
       if (!result.changed) return fact
@@ -315,6 +352,34 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       purifyRemovedTokens += result.removedTokens
       return { ...fact, text: result.text }
     })
+
+    // ②′ Story 9.1 / AD-31：抽取路径上的单一判定点。必须在写 L1 正式区**之前**；
+    // L0 已经由采集口 append-only 写入，不受这里影响（AD-4）。判定失败姿态 = 丢弃，
+    // 不重试、不入死信；丢弃按维分桶记入同一事务的 generation_log（T5）。
+    let facts = purifiedFacts
+    let ontologyDrops: OntologyDropCounts | null = null
+    if (ontologyActive) {
+      if (ontology === null || ontology.index === null) {
+        // AD-31:437：本体未加载属基础设施故障，整闸 fail-open（本次全放行 + 显式告警），
+        // 绝不静默丢弃 100% 候选。
+        if (!warnedOntologyUnavailable) {
+          warnedOntologyUnavailable = true
+          deps.logger?.warn(
+            '本体闸门已配置为 ' + ontology?.policy.level + ' 但没有可用的本体索引：整闸 fail-open，本次候选全部放行',
+          )
+        }
+      } else {
+        const counts = { ...emptyOntologyDropCounts() } as Record<(typeof ONTOLOGY_DIMENSIONS)[number], number>
+        const kept: RefinedFact[] = []
+        for (const fact of purifiedFacts) {
+          const verdict = classifyCandidate(candidateOfFact(fact), ontology.index, ontology.policy)
+          if (verdict.passed) kept.push(fact)
+          else counts[verdict.dimension] += 1
+        }
+        facts = kept
+        ontologyDrops = Object.freeze(counts)
+      }
+    }
 
     // ③ 写时嵌入：在写库事务之前（AC:589）。
     const embedded = await embedTexts(
@@ -406,6 +471,23 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
             }))),
         )
         await insertRefineAudit(connection, auditRefs, 'success', null, now)
+        // Story 9.1 / T5：丢弃账本按维分桶（一行一维，detail 记条数）。各维之和 =
+        // 本次被丢弃的候选数；只在成功事务里写，回滚 / R1 命中都不会留下半截账。
+        if (ontologyDrops !== null) {
+          for (const dimension of ONTOLOGY_DIMENSIONS) {
+            const dropped = ontologyDrops[dimension]
+            if (dropped <= 0) continue
+            await insertRefineAudit(
+              connection,
+              auditRefs,
+              'success',
+              'dimension=' + dimension,
+              now,
+              ONTOLOGY_DISCARD_ACTION,
+              ontologyDropDetail(dimension, dropped),
+            )
+          }
+        }
         if (edgeResult.skipped.length > 0) {
           // 评审 P16（T18）：落独立 action（不是 refine_inbox 的 reason 文本）。
           // countRelatedSkips 按 action 白名单计数，只改 reason 统计不到（AD-21 降级必须可见）。

@@ -127,6 +127,8 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'persona: disabled(awaiting-approval)',
       // Story 11.3 / T6：Self-Knowledge 计数行（本文件不写自省表 ⇒ 全 0）。
       'self_knowledge: candidate=0 accepted=0 rejected=0 record-only=0',
+      // Story 9.1 / T7：本体闸门默认 off（判定不执行）。
+      'ontology: off',
       // Story 4.3 / D-1：健康五行追加在末尾（本文件只写 memory 行，两个队列都是空的）。
       'inbox_backlog: n/a（无积压）',
       'last_refine_at: n/a（从未完成精炼）',
