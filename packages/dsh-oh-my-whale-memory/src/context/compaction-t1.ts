@@ -2,7 +2,7 @@
  * T1 无损折叠：判定、渲染、锚点与编排（Story 8.3 / AC:1693-1699、AC:1709-1711、NFR18）。
  *
  * 四件事，都不碰库、不碰时钟、不调 LLM：
- * 1. `classifyT1`：这段区间是否必须走 T1（含 user 原话 / system 消息）；
+ * 1. `classifyT1`：这段区间是否必须走 T1（含 user 原话 / system 消息 / 动态骨架）；
  * 2. `renderRegionText`：把区间渲染成逐字文本（句柄正文就是它，还原率必须 100%）；
  * 3. `fnv1aAnchor`：文本的确定性锚点，作为句柄 `(session, seq)` 幂等键（矩阵行 5）；
  * 4. `summarizeWithT1`：`summarize()` 的编排（只读 / 非 T1 / writer 缺失 / 写失败 ⇒ 委托 stock）。
@@ -10,9 +10,13 @@
  * **为什么去掉开头唯一的 system head**：stock 的 `buildSummarizationInput` 会把会话的
  * system prompt 作为前缀拼进 `messages[0]`（只用于复用缓存前缀），它不是「被压内容」；
  * 把它算 T1 会让每次压缩都变成 T1，也让句柄正文里混进系统提示。
+ *
+ * Story 8.5 / T4：动态骨架消息（`source.kind === SKELETON_SOURCE_KIND`）按受保护内容处理，
+ * 因此它既不进 T2/T3 的可压预算，也不会被折成句柄丢失。
  */
 import { estimateTokens } from './fold.js'
 import { formatHandleBlock } from './handle.js'
+import { SKELETON_SOURCE_KIND } from '../shared/injection-vocab.js'
 import type { HandleWriter } from './handle-writer.js'
 
 /** 只声明渲染用得到的最小形状：不 import `dsh-llm` 的 `Message`，避免嵌套依赖的类型双身份。 */
@@ -24,6 +28,11 @@ export interface T1ContentBlockLike {
 export interface T1MessageLike {
   readonly role: string
   readonly content: readonly (T1ContentBlockLike | string)[] | string
+  /**
+   * 消息来源标签（宿主 `source.kind` 的结构视图）。Story 8.5 / T4：动态骨架被物化成消息时
+   * 这里会出现 {@link SKELETON_SOURCE_KIND}，压缩判据据此把它当**受保护内容**。
+   */
+  readonly source?: { readonly kind?: unknown } | null
 }
 
 const FNV_OFFSET_BASIS = 0x811c9dc5
@@ -35,9 +44,22 @@ export function regionMessages(messages: readonly T1MessageLike[]): readonly T1M
   return messages.length > 0 && messages[0]?.role === 'system' ? messages.slice(1) : messages
 }
 
-/** 段内是否必须走 T1：region 里出现 user / system 即为真；只有 assistant / tool 交给 stock。 */
+/** 是否为动态骨架消息（Story 8.5 / T4：骨架与 T1 一样不计入可压预算）。 */
+export function isSkeletonMessage(message: T1MessageLike): boolean {
+  const kind = message.source?.kind
+  return typeof kind === 'string' && kind === SKELETON_SOURCE_KIND
+}
+
+/**
+ * 段内是否必须走 T1：region 里出现 user / system **或动态骨架**即为真；只有 assistant / tool
+ * 交给 stock。
+ *
+ * Story 8.5 / T4：骨架是「用户明确要求别忘」的内容，折掉它就是自噬；无论宿主把骨架物化成
+ * 哪种 role，只要带 {@link SKELETON_SOURCE_KIND} 标签就按受保护内容处理。
+ */
 export function classifyT1(messages: readonly T1MessageLike[]): boolean {
-  return regionMessages(messages).some((message) => message.role === 'user' || message.role === 'system')
+  return regionMessages(messages).some((message) =>
+    message.role === 'user' || message.role === 'system' || isSkeletonMessage(message))
 }
 
 /**

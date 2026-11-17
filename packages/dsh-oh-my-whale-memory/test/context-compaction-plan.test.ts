@@ -46,6 +46,20 @@ describe('T1 短路（AC:1693-1695）', () => {
     expect(plan.decisions[0]?.reason).toBe('protected-memory')
   })
 
+  // Story 8.5 / T4：动态骨架段同样 T1，且计入 protectedTokens（不进可压预算）。
+  it('动态骨架段（hasSkeleton）⇒ T1，reason=skeleton-fact，不计入可压预算', () => {
+    const plan = planCompaction([
+      segment({ start: 1, end: 10, tokens: 100, entropy: 0.1 }),
+      segment({ start: 11, end: 20, tokens: 321, hasSkeleton: true }),
+    ])
+    expect(plan.decisions[1]?.tier).toBe('T1')
+    expect(plan.decisions[1]?.reason).toBe('skeleton-fact')
+    expect(plan.compactableTokens).toBe(100)
+    expect(plan.protectedTokens).toBe(321)
+    expect(plan.decision).toBe('compact')
+    expect(compactableSpans(plan)).toEqual([{ start: 1, end: 10 }])
+  })
+
   it('T1 不计入可压预算：一个可压段 + 一个 T1 段 ⇒ compactableTokens 只算可压段', () => {
     const plan = planCompaction([
       segment({ start: 1, end: 10, tokens: 100, entropy: 0.1 }),
