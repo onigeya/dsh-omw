@@ -10,7 +10,8 @@ import { defineConfig } from 'tsdown'
  * `scripts.build` = `tsdown && tsc -p tsconfig.build.json`。
  */
 export default defineConfig({
-  entry: ['src/index.ts'],
+  // 两个入口：function 插件本体（命名导出）+ 压缩 provider 子路径（default export，AC:1707）。
+  entry: ['src/index.ts', 'src/compaction.ts'],
   outDir: 'lib',
   format: ['esm'],
   platform: 'node',

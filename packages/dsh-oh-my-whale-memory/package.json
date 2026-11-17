@@ -10,10 +10,15 @@
       "types": "./lib/types/index.d.ts",
       "default": "./lib/index.js"
     },
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./compaction": {
+      "types": "./lib/types/compaction.d.ts",
+      "default": "./lib/compaction.js"
+    }
   },
   "files": [
     "lib/index.js",
+    "lib/compaction.js",
     "lib/types"
   ],
   "engines": {
@@ -35,10 +40,14 @@
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
-    "@deepseek-ai/dsh-tools": "0.2.2-rc.1"
+    "@deepseek-ai/dsh-tools": "0.2.2-rc.1",
+    "@deepseek-ai/dsh-compaction": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.2-rc.3"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.1.0",
+    "@deepseek-ai/dsh-compaction": "0.2.2-rc.3",
+    "@deepseek-ai/dsh-compaction-basic": "0.2.2-rc.3",
     "@deepseek-ai/dsh-llm": "0.2.2-rc.1",
     "@deepseek-ai/dsh-scope": "0.2.2-rc.1",
     "@deepseek-ai/dsh-tools": "0.2.2-rc.1",

@@ -16,3 +16,21 @@
 - insert:
     - id: dsh-oh-my-whale-memory
       name: dsh-oh-my-whale-memory
+# Story 8.3 / AC:1664 + A1（spec-8-3 §4）：关掉宿主的 stock 压缩引擎，换成我们的 provider。
+#
+# 为什么不是「按 id 覆盖 name」：patch 里的 name 是**断言**不是替换值 —— 与解析值不一致时整条
+# patch 会被跳过（dsh-app-boot/lib/index.js:546-549），而 name 已被解构进不了 overrides，
+# 所以 patch 层面根本改不了任何条目的 name。
+#
+# 各 profile 的实测差异（dsh --profile <p> --dump-config）：
+# - web：compaction-basic 本就 disabled: true ⇒ 这行是幂等的重复设置；
+# - headless / dsh-tui：stock 启用 ⇒ 靠这行关掉。
+# name 必须写**全包名**（与解析值逐字相等）；短名会让整条 patch 被跳过。
+- id: compaction-basic
+  name: '@deepseek-ai/dsh-compaction-basic'
+  disabled: true
+
+- insert:
+    - id: omw-compaction-engine
+      # AD-2：发布名已锁定；provider 走子路径入口（default export 只允许出现在这里）。
+      name: dsh-oh-my-whale-memory/compaction

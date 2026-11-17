@@ -1,6 +1,6 @@
 // 包元数据与导出契约门禁（AD-33 / AD-35 / PRD §14）。P1-R9。
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 const root = new URL('..', import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')
 const bundleDir = join(root, 'packages/dsh-oh-my-whale')
 const memDir = join(root, 'packages/dsh-oh-my-whale-memory')
@@ -82,8 +82,19 @@ const indexSrc = readFileSync(join(memDir, 'src/index.ts'), 'utf8')
 const all = []
 const walk = (d) => { for (const e of readdirSync(d)) { const p = join(d, e); if (statSync(p).isDirectory()) walk(p); else if (p.endsWith('.ts')) all.push(p) } }
 walk(join(memDir, 'src'))
-const defs = all.filter((p) => /export\s+default\b/.test(readFileSync(p, 'utf8')))
-if (defs.length) fail('function 插件禁 default export：' + defs.join(', ')); else ok('无 default export')
+// AC:1707：provider 的 default export 只允许出现在**子路径入口**里。这里按 package.json#exports
+// 判定"哪些文件是子路径入口"，而不是硬编码文件名——新增子路径入口时约束自动跟上。
+const pkg = JSON.parse(readFileSync(join(memDir, 'package.json'), 'utf8'))
+// `./lib/compaction.js` ⇒ 允许的源文件名 `compaction.ts`（只比文件名，避免 Windows 路径分隔符差异）。
+const subpathEntryNames = Object.entries(pkg.exports ?? {})
+  .filter(([key]) => key !== '.' && key !== './package.json')
+  .map(([, value]) => String(value?.default ?? ''))
+  .filter((target) => target.startsWith('./lib/') && target.endsWith('.js'))
+  .map((target) => target.slice('./lib/'.length).replace(/\.js$/, '.ts'))
+const defs = all
+  .filter((p) => /export\s+default\b/.test(readFileSync(p, 'utf8')))
+  .filter((p) => !subpathEntryNames.includes(basename(p)))
+if (defs.length) fail('功能插件本体禁 default export（子路径入口除外）：' + defs.join(', ')); else ok('无越界 default export')
 for (const f of ['src/db/schema.ts', 'src/db/audit.ts', 'src/db/backend.ts']) {
   try { readFileSync(join(memDir, f)); ok(f) } catch { fail('缺 ' + f) }
 }
