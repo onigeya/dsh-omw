@@ -519,6 +519,7 @@ export async function apply(
       promotion,
       l1Processor: distill.l1Processor,
       l2Processor: distill.l2Processor,
+      summaryRewriteProcessor: distill.summaryRewriteProcessor,
       maintenance: distill.maintenance,
     }))
   }

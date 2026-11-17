@@ -15,6 +15,7 @@ import type { EmbeddingProfile } from '../db/embedding-profile.js'
 import { createEmbeddingBackfill } from '../embedding/backfill.js'
 import { createEmbeddingClient, type EmbedClient } from '../embedding/client.js'
 import { createInboxProcessor } from '../distill/processor.js'
+import { createSummaryRewriteProcessor } from '../distill/summary-rewrite.js'
 import { routeFromSession } from '../distill/session-route.js'
 import type { LlmPort, RefineRoute } from '../distill/llm-refine.js'
 import { createL2PromotionProcessor } from '../distill/promotion.js'
@@ -40,6 +41,10 @@ export interface DistillWiringOptions {
 export interface DistillWiring {
   readonly l1Processor: InboxProcessor
   readonly l2Processor: InboxProcessor
+  /**
+   * Story 8.4 / T6：`summary-rewrite` 条目的处理器（复用同一条 L1 消费链，按 kind 路由）。
+   */
+  readonly summaryRewriteProcessor: InboxProcessor
   /**
    * L1 消费者的维护钩子：向量回填（有客户端才跑）+ EVIDENCE 回填（恒跑）。
    * 评审 P18a（T19）：串行跑两个回填，两者都在事务外做裸 prepare/execute，
@@ -144,9 +149,20 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     logger: ctx.logger,
   })
 
+  // Story 8.4 / T6：摘要重写处理器。与 L1 精炼共用同一个 llm 端口/路由/消费链与失败退避，
+  // 只是失败计数上限不同（连续两轮失败即停止，防无限重写）。
+  const summaryRewriteProcessor: InboxProcessor = createSummaryRewriteProcessor({
+    connection: connectionOrNull,
+    llm: llmPort,
+    resolveRoute,
+    chainDepthThreshold: resolved.chainDepthThreshold,
+    logger: ctx.logger,
+  })
+
   return {
     l1Processor,
     l2Processor,
+    summaryRewriteProcessor,
     maintenance: async () => {
       const embedded = embeddingBackfill ? await embeddingBackfill.runOnce() : 0
       const evidenced = await evidenceBackfill.runOnce()

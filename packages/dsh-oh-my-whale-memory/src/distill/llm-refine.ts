@@ -133,6 +133,113 @@ export function splitToBudget(text: string, budget: number = MAX_REFINE_FACT_TOK
   return splitTextToBudget(text, budget)
 }
 
+/* ------------------------------------------------------------------------- *
+ * 摘要重写（Story 8.4 / T6、FR-29、INV-13）
+ *
+ * prompt 与输出 schema 仍在**同一文件**（§14：改 prompt 必须同步改 schema）。
+ * 复用与精炼完全相同的调用/失败分类路径（`foldStream` + `classifyThrown` +
+ * `classifyFinish`），所以重试与降级语义不需要第二套实现。
+ * ------------------------------------------------------------------------- */
+
+/** 摘要重写的 prompt 版本；改 prompt 或 schema 必须同时递增并同步下方 schema。 */
+export const SUMMARY_REWRITE_PROMPT_VERSION = '1'
+
+/** 单次重写请求的输出预算（摘要不是卡片集合，给得比精炼小）。 */
+export const SUMMARY_REWRITE_MAX_OUTPUT_TOKENS = 1024
+
+/** 重写输出 schema（与 prompt 同文件）。 */
+export const SUMMARY_REWRITE_OUTPUT_SCHEMA = [
+  '{',
+  '  "summary": string   // 重写后的摘要正文，必填、非空',
+  '}',
+].join('\n')
+
+/** 重写指令：把被反复展开的原文压成一段自足的摘要。 */
+export const SUMMARY_REWRITE_INSTRUCTION = [
+  '把下面的原文重写成一段简洁、自足的摘要。',
+  '摘要要让读者不必再看原文就能继续工作：保留事实、决策、约束与关键标识（路径/端点/版本号/ID）。',
+  '丢弃重复、寒暄与过程性细节；不要编造原文没有的事实，不要输出 markdown 代码块。',
+  '只输出一个 JSON 对象，严格按下面的 schema。',
+].join('\n')
+
+/** 组装一次重写请求（prompt 与 schema 同源）。 */
+export function buildSummaryRewriteMessages(text: string): RequestMessage[] {
+  const instruction = [
+    REFINE_SENTINEL_PREAMBLE,
+    '',
+    SUMMARY_REWRITE_INSTRUCTION,
+    '',
+    '输出 JSON schema：',
+    SUMMARY_REWRITE_OUTPUT_SCHEMA,
+    '',
+    '原文：',
+    text,
+  ].join('\n')
+  return [{ role: 'user', content: [{ type: 'text', text: instruction }] }]
+}
+
+export interface SummaryRewriteInput {
+  readonly llm: LlmPort
+  readonly route: RefineRoute
+  /** 被重写的原文（句柄正文；逐字来自 L0 折叠）。 */
+  readonly text: string
+  readonly signal: AbortSignal
+  readonly maxTokens?: number
+}
+
+export type SummaryRewriteResult =
+  | { readonly ok: true; readonly summary: string }
+  | { readonly ok: false; readonly failure: RefineFailure }
+
+/** 解析重写输出；空/非法一律 null（调用方归为可重试失败）。 */
+export function parseSummaryRewriteOutput(text: string): string | null {
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start < 0 || end <= start) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text.slice(start, end + 1))
+  } catch {
+    return null
+  }
+  const summary = (parsed as { readonly summary?: unknown } | null)?.summary
+  if (typeof summary !== 'string') return null
+  const trimmed = summary.trim()
+  return trimmed.length === 0 ? null : trimmed
+}
+
+/**
+ * 一次摘要重写：单次 `ctx.llm.stream`（与精炼同一纪律：重试不在同一次尝试内），
+ * 失败分类直接复用精炼的 `classifyThrown` / `classifyFinish`。
+ */
+export async function rewriteSummaryText(input: SummaryRewriteInput): Promise<SummaryRewriteResult> {
+  let folded: FoldedStream
+  try {
+    folded = await foldStream(
+      input.llm.stream({
+        provider: input.route.provider,
+        model: input.route.model,
+        messages: buildSummaryRewriteMessages(input.text),
+        maxTokens: input.maxTokens ?? SUMMARY_REWRITE_MAX_OUTPUT_TOKENS,
+        signal: input.signal,
+      }),
+    )
+  } catch (error) {
+    return { ok: false, failure: classifyThrown(error, input.signal) }
+  }
+  const finishFailure = classifyFinish(folded, input.signal)
+  if (finishFailure) return { ok: false, failure: finishFailure }
+  const text = folded.text.trim()
+  if (text.length === 0) {
+    return { ok: false, failure: { reason: 'empty-response', message: '模型返回空文本', retryable: true } }
+  }
+  const summary = parseSummaryRewriteOutput(text)
+  if (summary === null) {
+    return { ok: false, failure: { reason: 'json-parse-failed', message: '模型输出不是合法 JSON schema', retryable: true } }
+  }
+  return { ok: true, summary }
+}
+
 /**
  * 解析模型输出为原子卡片；无法解析、结构不符、或非空数组但元素全部无用返回 null
  * （调用方归为可重试失败，评审 T25）。
