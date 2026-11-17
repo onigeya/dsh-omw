@@ -246,6 +246,8 @@ describe('档位注册表（Story 8.4 / T4：按 sessionId 交接、teardown 复
     expect(row[0]?.tier).toBe('T1')
     expect(row[0]?.delegate).toBe('omw-t1-fold')
     expect(row[0]?.plan_json).toContain('protected-content')
+    // 读完即清：同一会话的下一条 summary 不会继承这份档位。
+    expect(readCompactionPlan(sessionId)).toBeNull()
     wiring.stop()
     resetCompactionPlans()
   })
