@@ -18,6 +18,15 @@ import { captureAttribution, type AttributionSnapshot } from './status.js'
 /** 宿主 `TokenMeter` 的最小形态：本模块只用 `measure()`（AD-26 的可选服务面）。 */
 export interface TokenMeterLike {
   measure(session: unknown, requestHeader?: unknown): TokenMeasure
+  /**
+   * Story 8.5 / T2：注入预算需要窗口与压力（AC:1827 的 `contextWindow − pressureTokens`）。
+   * 宿主契约 `contextPressure(session)` 同步返回最新记录的 `pressureTokens` / `contextWindow`
+   * （`docs/subsystems/token-meter.md:58,114`）；两者都可能缺失（路由未声明容量）。
+   */
+  contextPressure?(session: unknown): {
+    readonly pressureTokens?: number
+    readonly contextWindow?: number
+  }
 }
 
 export interface AttributionTapOptions {

@@ -25,6 +25,7 @@ import {
 } from '../injection/openstart.js'
 import type { InjectionStore } from '../injection/state.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
+import { computeInjectionBudget } from '../recall/injection-budget.js'
 import type { SessionEventHost } from './host.js'
 
 /**
@@ -65,6 +66,14 @@ export interface InjectionWiringOptions {
    * 监听器都必须在该预算内向宿主交回决策，不阻塞首个请求（F-01 / D2）。
    */
   readonly generationBudgetMs?: number
+  /**
+   * Story 8.5 / T2：宿主窗口与压力（`tokenMeter.contextPressure(session)`）。
+   * 可选服务缺失 / 抛错一律返回 undefined ⇒ 预算退回绝对上限（AC:1829：不假设窗口）。
+   */
+  readonly contextPressure?: (session: unknown) => {
+    readonly pressureTokens?: number
+    readonly contextWindow?: number
+  } | undefined
 }
 
 export function wireInjection(ctx: Context, options: InjectionWiringOptions): void {
@@ -92,6 +101,18 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       : routeFromSession(session)),
     logger: ctx.logger,
     budgetMs,
+    // Story 8.5 / T2：注入预算改读 T1 的 tokens 公式（窗口/压力缺席即退回绝对上限）。
+    resolveBudget: (session) => {
+      const pressure = options.contextPressure?.(session)
+      return computeInjectionBudget({
+        contextWindow: pressure?.contextWindow,
+        pressureTokens: pressure?.pressureTokens,
+        injectionTokenCap: options.resolved.injectionTokenCap,
+        ratio: options.resolved.injectionRatio,
+        singleCap: options.resolved.injectionSingleCap,
+        summaryCap: options.resolved.injectionSummaryCap,
+      })
+    },
   })
   const host = ctx as unknown as AgentPreStepHost
   host.on?.('agent/pre-step', async (payload, next) => {

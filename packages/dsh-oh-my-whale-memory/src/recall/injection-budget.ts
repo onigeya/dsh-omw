@@ -47,7 +47,7 @@ export interface InjectionBudgetInput {
   readonly summaryCap: number
 }
 
-export interface InjectionBudgetResult {
+export interface InjectionTokenBudget {
   /** 本次注入可用总额度（tokens，恒 ≥ 0 的整数）。 */
   readonly budget: number
   /** 单条绝对上限（tokens，恒 ≥ 0 的整数）。 */
@@ -73,7 +73,7 @@ function usableWindow(value: number | null | undefined): number | undefined {
 /**
  * 计算一次注入的 tokens 预算（矩阵 1–7）。**不抛错**：坏输入折成 0/缺省值 + warning。
  */
-export function computeInjectionBudget(input: InjectionBudgetInput): InjectionBudgetResult {
+export function computeInjectionBudget(input: InjectionBudgetInput): InjectionTokenBudget {
   const warnings: string[] = []
   const cap = nonNegativeInt(input.injectionTokenCap)
   const singleCap = nonNegativeInt(input.singleCap)

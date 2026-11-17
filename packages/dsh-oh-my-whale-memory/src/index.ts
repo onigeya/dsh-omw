@@ -291,6 +291,18 @@ export async function apply(
     store: injectionStore,
     recallStore: retrieval.recallStore,
     resolved,
+    // Story 8.5 / T2：窗口/压力来自宿主 `tokenMeter.contextPressure()`（可选服务）。
+    // 缺失/抛错一律 undefined ⇒ 预算退回绝对上限，注入面照常工作。
+    contextPressure: (session) => {
+      const meter = (ctx.get?.('tokenMeter') ?? undefined) as TokenMeterLike | undefined
+      const read = meter?.contextPressure
+      if (typeof read !== 'function') return undefined
+      try {
+        return read.call(meter, session)
+      } catch {
+        return undefined
+      }
+    },
   }))
 
   // AC1：库路径唯一来源是 profile 目录（$DSH_HOME/profiles/<name>），插件不自拼 DSH_HOME。

@@ -16,8 +16,11 @@ import type { Volatile } from '@deepseek-ai/cordis'
 /**
  * 配置缺省值的唯一来源：schema 的 `default(...)` 与 `resolveRuntimeConfig` 的兜底必须同源。
  * 两处若各写一份数字，「宿主未注入该字段」与「volatile 节点取默认值」会给出不同结果（没有测试绑住两者）。
+ *
+ * Story 8.5 起也对外导出：注入裁剪（`injection/budget.ts`）的缺省额度必须与 schema 同源，
+ * 否则「没配额度」与「额度取默认值」会算出两个不同的预算。
  */
-const MEMORY_CONFIG_DEFAULTS = {
+export const MEMORY_CONFIG_DEFAULTS = {
   captureSteps: 50,
   inboxRefineConcurrency: 4,
   injectOnNewSession: true,
@@ -47,6 +50,15 @@ const MEMORY_CONFIG_DEFAULTS = {
   chainDepthThreshold: 2,
   // 反思驱动的阈值自调开关（AC:1737-1740）。默认关：没有建议生产端时开启也只是 no-op。
   compactionSelfTuneEnabled: false,
+  // Story 8.5 / AC:1827-1832、AD-25：注入预算一律 tokens。
+  // `injectionTokenCap` 4096 与两项单条/摘要上限都是**经验值**（AC:1792 要求字段文档显式标注），
+  // 不是实测标定；`injectionRatio` 0.5 是 AC:1832 钉死的 v1 落地值（PRD §8 Q-19）。
+  injectionTokenCap: 4096,
+  injectionRatio: 0.5,
+  injectionSingleCap: 512,
+  injectionSummaryCap: 512,
+  // 常驻层 / 动态骨架的绝对上限，**不套窗口公式**（AC:1827，默认 2000）。
+  alwaysOnTokenCap: 2000,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -145,6 +157,16 @@ export const Config = Schema.object({
   chainDepthThreshold: Schema.number().default(MEMORY_CONFIG_DEFAULTS.chainDepthThreshold).volatile(),
   /** Story 8.4 / AC:1737-1740：自调开关；关时不改任何数值（建议生产端见 spec 的 deferred）。 */
   compactionSelfTuneEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.compactionSelfTuneEnabled).volatile(),
+  /**
+   * Story 8.5 / AC:1826-1832、AD-25：注入预算一律 tokens（字符口径退役）。
+   * `min(injectionTokenCap, injectionRatio × (contextWindow − pressureTokens))`，单条 / 摘要各一个
+   * 绝对上限；`alwaysOnTokenCap` 是常驻层 / 动态骨架的绝对上限（不套窗口公式）。
+   */
+  injectionTokenCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionTokenCap).volatile(),
+  injectionRatio: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionRatio).volatile(),
+  injectionSingleCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionSingleCap).volatile(),
+  injectionSummaryCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionSummaryCap).volatile(),
+  alwaysOnTokenCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.alwaysOnTokenCap).volatile(),
 })
 
 /**
@@ -182,6 +204,20 @@ export interface RuntimeConfig {
   chainDepthThreshold: number
   /** Story 8.4：自调开关（默认 false；无建议生产端时即使开启也不改数值）。 */
   compactionSelfTuneEnabled: boolean
+  /** Story 8.5 / AC:1827：注入总预算的绝对上限（tokens，已校验为正整数）。 */
+  injectionTokenCap: number
+  /**
+   * Story 8.5 / AC:1832：窗口占比（默认 0.5）。**刻意不在这里校验负数**：
+   * 负 ratio 的语义是「预算按 0 计 + 可见告警」（由 `computeInjectionBudget` 产出），
+   * 在这里抛错会让一句可解释的降级变成启动失败。
+   */
+  injectionRatio: number
+  /** Story 8.5 / AC:1827：单条正文绝对上限（tokens，已校验为正整数）。 */
+  injectionSingleCap: number
+  /** Story 8.5 / AC:1827：摘要正文绝对上限（tokens，已校验为正整数）。 */
+  injectionSummaryCap: number
+  /** Story 8.5 / AC:1827：常驻层 / 动态骨架的绝对上限（tokens，不套窗口公式）。 */
+  alwaysOnTokenCap: number
   warnings: string[]
 }
 
@@ -261,6 +297,11 @@ export function resolveRuntimeConfig(config: {
     expandCountThreshold?: Getter<number>
     chainDepthThreshold?: Getter<number>
     compactionSelfTuneEnabled?: Getter<boolean>
+    injectionTokenCap?: Getter<number>
+    injectionRatio?: Getter<number>
+    injectionSingleCap?: Getter<number>
+    injectionSummaryCap?: Getter<number>
+    alwaysOnTokenCap?: Getter<number>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -343,6 +384,26 @@ export function resolveRuntimeConfig(config: {
   const compactionSelfTuneEnabled = read(
     config.compactionSelfTuneEnabled ?? MEMORY_CONFIG_DEFAULTS.compactionSelfTuneEnabled,
   ) === true
+  // Story 8.5 / AC:1826-1832：四项注入预算上限必须可运行期覆盖（INV-12），且都是正数。
+  // 0 / 负数 / NaN 会让注入静默变成「零注入」或「无限注入」，与 captureSteps 同款 fail-loud。
+  const injectionTokenCap = requirePositiveInt(
+    'injectionTokenCap',
+    read(config.injectionTokenCap ?? MEMORY_CONFIG_DEFAULTS.injectionTokenCap),
+  )
+  const injectionSingleCap = requirePositiveInt(
+    'injectionSingleCap',
+    read(config.injectionSingleCap ?? MEMORY_CONFIG_DEFAULTS.injectionSingleCap),
+  )
+  const injectionSummaryCap = requirePositiveInt(
+    'injectionSummaryCap',
+    read(config.injectionSummaryCap ?? MEMORY_CONFIG_DEFAULTS.injectionSummaryCap),
+  )
+  const alwaysOnTokenCap = requirePositiveInt(
+    'alwaysOnTokenCap',
+    read(config.alwaysOnTokenCap ?? MEMORY_CONFIG_DEFAULTS.alwaysOnTokenCap),
+  )
+  // ratio 的负数/非有限值不抛错：语义是「预算 0 + 可见告警」（AC:1832，由 T1 产出 warning）。
+  const injectionRatio = Number(read(config.injectionRatio ?? MEMORY_CONFIG_DEFAULTS.injectionRatio))
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -415,6 +476,11 @@ export function resolveRuntimeConfig(config: {
     expandCountThreshold,
     chainDepthThreshold,
     compactionSelfTuneEnabled,
+    injectionTokenCap,
+    injectionRatio,
+    injectionSingleCap,
+    injectionSummaryCap,
+    alwaysOnTokenCap,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -450,4 +516,9 @@ export interface ConfigShape {
   expandCountThreshold: Volatile<number>
   chainDepthThreshold: Volatile<number>
   compactionSelfTuneEnabled: Volatile<boolean>
+  injectionTokenCap: Volatile<number>
+  injectionRatio: Volatile<number>
+  injectionSingleCap: Volatile<number>
+  injectionSummaryCap: Volatile<number>
+  alwaysOnTokenCap: Volatile<number>
 }

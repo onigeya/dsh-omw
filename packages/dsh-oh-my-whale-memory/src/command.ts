@@ -1147,7 +1147,7 @@ function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   return lines
 }
 
-/** 注入状态行（Story 3.3 / B4；单位标注=字符，AC:935）。 */
+/** 注入状态行（Story 3.3 / B4；Story 8.5 / T2 起单位=tokens，AC:1801）。 */
 function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   if (snapshot.injectionEnabled === false) {
     return ['injection: disabled（Config injectOnNewSession=false）']
@@ -1156,13 +1156,12 @@ function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   if (injection === null || injection === undefined) {
     return ['injection: 未知（本实例尚未触发开局注入）']
   }
-  // 单位显式标注为字符（AC:935：tokens 化归 Story 8.5，不在本 story 内转换）。
   const marks = [
     injection.degraded ? '，降级' : '',
     injection.truncated ? '，已截断' : '',
   ].join('')
   const lines = [
-    `injection: enabled（预算单位=字符；上次注入 ${injection.items} 条 / ${injection.chars} 字符${marks}）`,
+    `injection: enabled（预算单位=tokens；上次注入 ${injection.items} 条 / ${injection.tokens} tokens${marks}）`,
   ]
   if (injection.overBudget) {
     lines.push('injection: 预算超限（不可删集合先保留）')
