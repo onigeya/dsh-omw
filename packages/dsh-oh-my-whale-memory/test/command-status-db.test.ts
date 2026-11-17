@@ -17,6 +17,7 @@ import { spawn } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import * as plugin from '../src/index'
+import { CAPTURE_OVERSIZE_ACTION, UNRESOLVABLE_POINTERS_ACTION, insertGenerationLog } from '../src/db/audit'
 import { openMemoryDatabase } from '../src/db/database'
 import { ensureMemoryDbDirectory, resolveMemoryDbPath } from '../src/db/paths'
 import { queryAll, type MemoryConnection } from '../src/db/memory'
@@ -500,3 +501,32 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
   }, 30_000)
 })
 
+
+describe('Story 10.2：指针化三计数（unresolvable_pointers / oversize_items / trigger）', () => {
+  // 放在文件最后：这里会往审计表追加两行，后续用例不再共享这份库的精确行断言。
+  it('从 generation_log.action 计数，并在 capture 块渲染两个新计数行', async () => {
+    await insertGenerationLog(connection, {
+      recordedAt: '2026-11-17T00:00:00.000Z',
+      actor: 'system',
+      kind: 'refine',
+      action: UNRESOLVABLE_POINTERS_ACTION,
+      outcome: 'uncertain',
+      reason: 'missing=1',
+    })
+    await insertGenerationLog(connection, {
+      recordedAt: '2026-11-17T00:00:01.000Z',
+      actor: 'system',
+      kind: 'capture',
+      action: CAPTURE_OVERSIZE_ACTION,
+      outcome: 'uncertain',
+      reason: 'seqs=0',
+    })
+
+    const result = await registered!.handler({ rawInput: ' status' })
+
+    expect(result.kind).toBe('success')
+    expect(result.text).toContain('capture_trigger: steps(degraded)')
+    expect(result.text).toContain('unresolvable_pointers: 1')
+    expect(result.text).toContain('oversize_items: 1')
+  })
+})
