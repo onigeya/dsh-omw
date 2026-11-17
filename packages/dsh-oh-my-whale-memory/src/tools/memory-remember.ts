@@ -21,7 +21,7 @@ import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tool
 import { MemoryDbError, type MemoryDbErrorCode } from '../db/errors.js'
 import type { UpsertMemoryResult } from '../db/memory.js'
 import type { MemoryActor } from '../db/audit.js'
-import { MEMORY_KINDS, MEMORY_REMEMBER_LAYER, isMemoryPriority, type MemoryKind } from '../shared/memory-vocab.js'
+import { LEGACY_USER_PORTRAIT_KIND, MEMORY_KINDS, MEMORY_REMEMBER_LAYER, isMemoryPriority, normalizeMemoryKind, type MemoryKind } from '../shared/memory-vocab.js'
 
 /** 工具名（模型可见；宿主内唯一）。 */
 export const MEMORY_REMEMBER_TOOL_NAME = 'memory_remember'
@@ -43,7 +43,7 @@ export const MEMORY_REMEMBER_TOOL_DESCRIPTION = [
   '不要记录 ephemeral / transient content：当前任务的进度、一次性中间结果、临时变量、闲聊与寒暄都不是长期记忆，不要写入。',
   'content 写记忆原文，保留用户原始措辞与关键参数；同一内容重复调用会命中同一节点（幂等，不会产生重复记忆）。',
   'context 可选，填来源消息 id 或卡片 id，用于溯源；省略则不记来源。',
-  'kind 可选，取七类之一：persona / episodic / instruction / work_fact / work_task / work_method / work_artifact；'
+  'kind 可选，取七类之一：' + MEMORY_KINDS.join(' / ') + '；'
   + 'priority 可选，取 -1..100 的整数，-1 表示全局强规则（恒置顶）。两者省略时 kind 为空、priority 为 0；'
   + '同一内容重复写入命中同一节点，分类以最新一次写入为准。',
 ].join('\n')
@@ -95,8 +95,10 @@ const PARAMETERS = {
   },
   kind: {
     type: 'string',
-    enum: MEMORY_KINDS,
-    description: '记忆分类（FR-15 七类），可选；省略时落库为空串。',
+    // Story 11.4：enum 收 legacy 别名是为了让旧调用方在**边界**归一化，而不是被宿主直接拒绝；
+    // 落库值仍只可能是规范值（handler 归一化 + writeMemoryVersion 兜底）。
+    enum: [...MEMORY_KINDS, LEGACY_USER_PORTRAIT_KIND],
+    description: '记忆分类（FR-15 七类；兼容期接受旧值 persona 并归一化为 user_portrait），可选；省略时落库为空串。',
   },
   priority: {
     type: 'integer',
@@ -184,6 +186,21 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
         if (args.priority !== undefined && !isMemoryPriority(args.priority)) {
           return failed('invalid_priority', 'priority 必须是 -1..100 的整数（-1 = 全局强规则）')
         }
+        // Story 11.4：输入边界的分类归一化。宿主按 enum 只放行规范值；直接 API 调用（或兼容期
+        // 旧调用方）传 legacy `persona` 时在这里归一化为 `user_portrait`——旧值绝不进库。
+        // 既不是规范值也不是已知别名的串直接拒绝，不静默写成"未分类"。
+        let kind: string | undefined
+        if (args.kind !== undefined) {
+          const normalized = normalizeMemoryKind(args.kind)
+          if (normalized === '') {
+            return failed(
+              'invalid_kind',
+              'kind 只接受七类规范值（' + MEMORY_KINDS.join(' / ') + '；兼容别名 persona），实际 ' +
+                JSON.stringify(args.kind),
+            )
+          }
+          kind = normalized
+        }
         const store = getDb()
         if (!store) {
           return failed('db_unavailable', '记忆库未就绪（无 profile 归属或库句柄缺失），本次未写入')
@@ -198,7 +215,7 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
           sourceRefs: context === undefined || context.length === 0 ? [] : [context],
           // Story 1.11 / FR-20：分类与优先级必须真的到达写路径，缺省仍由 db 层
           // 的 `?? ''` / `?? 0` 兜底，因此 undefined 透传等价于"未分类"。
-          kind: args.kind,
+          kind,
           priority: args.priority,
         })
         const stored: MemoryRememberStored = { action: 'stored', id: result.id }
@@ -213,3 +230,4 @@ export function createMemoryRememberTool(getDb: () => MemoryRememberStore | unde
     },
   })
 }
+

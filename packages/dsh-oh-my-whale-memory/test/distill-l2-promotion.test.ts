@@ -602,8 +602,8 @@ describe('评审 P14：降级审计与重试分支（T13/T19/T21/T24/T25/T26）'
   })
 
   it('⑥ 多来源：support 取并集、kind 取主流、priority 取最大、边逐来源写', async () => {
-    const a = await seedL1('multi-a', { kind: 'persona', priority: 9 })
-    const b = await seedL1('multi-b', { kind: 'persona', priority: 2 })
+    const a = await seedL1('multi-a', { kind: 'user_portrait', priority: 9 })
+    const b = await seedL1('multi-b', { kind: 'user_portrait', priority: 2 })
     const l1Ids = [a.l1, b.l1]
     const item = await claimL2(a.l1, JSON.stringify({ l1Ids }))
     const statement = 'L2 综合陈述 multi-' + String(seq++)
@@ -612,7 +612,7 @@ describe('评审 P14：降级审计与重试分支（T13/T19/T21/T24/T25/T26）'
     await run(item)
     const l2 = await l2ByText(statement)
     expect(l2).not.toBeNull()
-    expect(l2).toMatchObject({ kind: 'persona', priority: 9, support: 2 })
+    expect(l2).toMatchObject({ kind: 'user_portrait', priority: 9, support: 2 })
     const refs = String((await memoryRows(String(l2!.id)))[0]!.refs)
     expect(refs).toContain(a.l1)
     expect(refs).toContain(b.l1)

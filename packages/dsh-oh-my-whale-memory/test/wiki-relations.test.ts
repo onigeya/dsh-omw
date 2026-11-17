@@ -133,7 +133,7 @@ describe('selectRelatedTargets（应用层校验）', () => {
   const candidate = { id: 'cand', layer: 'L1', kind: 'work_fact' }
   const neighbors: RecallNeighbor[] = [
     { id: 'n-same-kind-far', layer: 'L1', kind: 'work_fact', text: '同类较远', distance: 0.05 },
-    { id: 'n-other-kind-near', layer: 'L1', kind: 'persona', text: '异类较近', distance: 0.01 },
+    { id: 'n-other-kind-near', layer: 'L1', kind: 'user_portrait', text: '异类较近', distance: 0.01 },
     { id: 'n-cross-layer', layer: 'L2', kind: 'work_fact', text: '跨层', distance: 0.02 },
   ]
 
@@ -182,7 +182,7 @@ describe('buildRelationMessages（prompt 与 schema 同文件）', () => {
       { id: 'cand-1', layer: 'L1', kind: 'work_fact', text: '新记忆正文' },
       [
         { id: 'nb-1', layer: 'L1', kind: 'work_fact', text: longText, distance: 0.01 },
-        { id: 'nb-2', layer: 'L1', kind: 'persona', text: '短文本', distance: 0.02 },
+        { id: 'nb-2', layer: 'L1', kind: 'user_portrait', text: '短文本', distance: 0.02 },
       ],
     )
     const text = String((messages[0]?.content?.[0] as { text?: string } | undefined)?.text ?? '')
@@ -203,7 +203,7 @@ describe('recallNeighbors（真 KNN）', () => {
     // 三个候选：与 e1 的 cosine 分别为 0.99 / 0.90 / 0.10。
     await seed('k-near', { embedding: vectorWithCosine(0.99), kind: 'work_fact' })
     await seed('k-mid', { embedding: vectorWithCosine(0.9), kind: 'work_fact' })
-    await seed('k-far', { embedding: vectorWithCosine(0.1), kind: 'persona' })
+    await seed('k-far', { embedding: vectorWithCosine(0.1), kind: 'user_portrait' })
     await seed('k-novector', { embedding: null })
     const selfId = await seed('k-self', { embedding: E1, kind: 'work_fact' })
 

@@ -109,7 +109,7 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
   it('omw_meta 写入了库级元数据（AC2）', async () => {
     const rows = await queryAll(store.connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
     const meta = new Map(rows.map((r) => [String(r.key), String(r.value)]))
-    expect(meta.get('schema_version')).toBe('9')
+    expect(meta.get('schema_version')).toBe('10')
     expect(meta.get('embedding_dim')).toBe('4')
     expect(meta.get('embedding_model_id')).toBe('test-embed-model')
     expect(meta.get('created_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/)
@@ -161,4 +161,5 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(rows.map((r) => String(r.name))).toContain('memory_embedding_hnsw')
   })
 })
+
 

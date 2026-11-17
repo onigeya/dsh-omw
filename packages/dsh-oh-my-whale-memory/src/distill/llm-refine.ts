@@ -9,7 +9,7 @@
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
-import { MEMORY_KINDS, MEMORY_PRIORITY_MAX, MEMORY_PRIORITY_MIN } from '../shared/memory-vocab.js'
+import { MEMORY_KINDS, LEGACY_USER_PORTRAIT_KIND, MEMORY_PRIORITY_MAX, MEMORY_PRIORITY_MIN, normalizeMemoryKind } from '../shared/memory-vocab.js'
 import { estimateTokens, splitToBudget as splitTextToBudget } from '../shared/text-budget.js'
 import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 
@@ -17,7 +17,7 @@ import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 export const REFINE_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
 
 /** prompt 版本；改 prompt 或 schema 必须同时递增，并同步本文的 REFINE_OUTPUT_SCHEMA。 */
-export const REFINE_PROMPT_VERSION = '2'
+export const REFINE_PROMPT_VERSION = '3'
 
 /**
  * 七类标识符的枚举串（单一来源 = src/shared/memory-vocab.ts 的 MEMORY_KINDS）。
@@ -96,6 +96,11 @@ export interface RefinedFact {
   readonly priority: number
   /** LLM 给的 kind/priority 缺失或非法、已收敛为缺省常量（N10：必须记审计）。 */
   readonly coerced: boolean
+  /**
+   * Story 11.4：模型给了 legacy 别名 `persona`，已在解析边界归一化为 `user_portrait`。
+   * 归一化不是「分类失败」，但必须留审计（矩阵行 5）；只在命中时出现，正常卡片不带该字段。
+   */
+  readonly legacyKindAlias?: true
 }
 
 /** 精炼失败：reason 是自由字符串（N5 要求 no-provider-route 逐字），retryable 决定退避还是死信。 */
@@ -264,12 +269,17 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
   // 空数组是合法的「原文无可记内容」，保持成功（T25）。
   if (facts.length === 0) return []
   const out: RefinedFact[] = []
-  const kinds: readonly string[] = MEMORY_KINDS
   for (const raw of facts) {
     const entry = raw as { readonly text?: unknown; readonly kind?: unknown; readonly priority?: unknown } | null
     const factText = typeof entry?.text === 'string' ? entry.text.trim() : ''
     if (factText.length === 0) continue
-    const kindOk = typeof entry?.kind === 'string' && kinds.includes(entry.kind)
+    // Story 11.4：输出 schema 只宣传规范值 `user_portrait`。模型若仍给 legacy 别名
+    // `persona`（旧 prompt 缓存 / 旧版本模型），在解析边界归一化为 `user_portrait` 并打标
+    // 记审计；其它非法值照旧收敛为空（coerced）。
+    const rawKind = typeof entry?.kind === 'string' ? entry.kind : null
+    const normalizedKind = normalizeMemoryKind(rawKind)
+    const legacyKindAlias = rawKind === LEGACY_USER_PORTRAIT_KIND
+    const kindOk = normalizedKind !== ''
     const rawPriority = typeof entry?.priority === 'number' && Number.isFinite(entry.priority) ? Math.trunc(entry.priority) : Number.NaN
     const priorityOk = Number.isFinite(rawPriority) && rawPriority >= MEMORY_PRIORITY_MIN && rawPriority <= MEMORY_PRIORITY_MAX
     const coerced = !kindOk || !priorityOk
@@ -278,9 +288,10 @@ export function parseRefineOutput(text: string): readonly RefinedFact[] | null {
       if (isUnusableFactText(piece)) continue
       out.push({
         text: piece,
-        kind: kindOk ? (entry?.kind as string) : DEFAULT_MEMORY_KIND,
+        kind: kindOk ? normalizedKind : DEFAULT_MEMORY_KIND,
         priority: priorityOk ? rawPriority : DEFAULT_MEMORY_PRIORITY,
         coerced,
+        ...(legacyKindAlias ? { legacyKindAlias: true as const } : {}),
       })
     }
   }

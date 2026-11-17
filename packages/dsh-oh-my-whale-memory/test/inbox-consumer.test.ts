@@ -247,7 +247,7 @@ describe('AC4：失败不阻塞后续；超 3 轮进死信', () => {
     const bad = nextId('bad')
     const good = nextId('good')
     await enqueueInboxItem(store.connection, { payload: '会炸的', kind: 'work_fact', now: at(20), id: bad })
-    await enqueueInboxItem(store.connection, { payload: '正常的', kind: 'persona', now: at(21), id: good })
+    await enqueueInboxItem(store.connection, { payload: '正常的', kind: 'user_portrait', now: at(21), id: good })
 
     const warning = vi.fn()
     const consumer = makeConsumer({
@@ -454,7 +454,7 @@ describe('P1：completeInboxItem 未落库 → 不计成功、不记提升信号
   it('promotion.recordL1 抛错 → 条目照常 done，只 warn（旁路记账失败不入死信）', async () => {
     const id = nextId('account-throw')
     await enqueueInboxItem(store.connection, {
-      payload: '记账抛错', kind: 'persona', sessionId: 'sess-account', now: at(72), id,
+      payload: '记账抛错', kind: 'user_portrait', sessionId: 'sess-account', now: at(72), id,
     })
     const warning = vi.fn()
     const promotion = createPromotionTracker({

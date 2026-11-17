@@ -239,6 +239,15 @@ export async function migrateDatabase(
     }
   }
 
+  // Story 11.4：需要「按表存在性分流」的迁移必须在事务外探测（事务内 binder error 会污染事务）。
+  const preparedByVersion = new Map<number, unknown>()
+  for (const migration of migrations) {
+    const runIt = bootstrap || migration.version > baseVersion
+    if (runIt && migration.prepare !== undefined) {
+      preparedByVersion.set(migration.version, await migration.prepare(connection))
+    }
+  }
+
   const applied: number[] = []
   try {
     await runInTransaction(connection, async () => {
@@ -253,7 +262,7 @@ export async function migrateDatabase(
             await runStatement(connection, statement.ddl)
           }
           // 数据改写（Story 5.4）：同一事务、statements 之后；幂等由迁移自己保证。
-          if (migration.run !== undefined) await migration.run(connection)
+          if (migration.run !== undefined) await migration.run(connection, preparedByVersion.get(migration.version))
           await recordMigration(connection, migration, now().toISOString())
           applied.push(migration.version)
         }
@@ -298,3 +307,5 @@ async function mergeMeta(connection: lbug.Connection, key: string, value: string
   )
   await runPrepared(connection, statement, { key, value })
 }
+
+

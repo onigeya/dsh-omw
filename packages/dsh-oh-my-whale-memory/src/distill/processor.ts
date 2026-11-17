@@ -60,6 +60,13 @@ export const EMBEDDING_FAILED_REASON = 'embedding-failed'
 export const COERCED_CLASSIFICATION_REASON = 'coerced-kind-or-priority'
 
 /**
+ * Story 11.4：模型输出用了 legacy 别名 `persona`，已在解析边界归一化为 `user_portrait`
+ * （矩阵行 5「归一化或拒绝（不写旧值），记审计」）。归一化不是分类失败，故独立于
+ * {@link COERCED_CLASSIFICATION_REASON} 记一行。
+ */
+export const LEGACY_KIND_ALIAS_REASON = 'legacy-kind-alias-normalized'
+
+/**
  * 语义去重扫描失败、本次改为「只走指纹路径」写入的降级理由（评审补钉 P20）。
  *
  * 背景：LadybugDB 0.22.3 里事务内任一语句报错即中止整个事务（后续语句被静默丢弃），
@@ -360,7 +367,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
           const vector = embedded.vectors[i] ?? null
           // 评审 T3：coerced 表示「模型没判定」，不是一次重新分类。
           // UPSERT_ON_MATCH 无条件以最新写入为准（Story 1.11 AC4），若直接把缺省值写下去，
-          // 会把先前 memory_remember 写在同指纹节点上的 kind（如 'persona'）静默清空。
+          // 会把先前 memory_remember 写在同指纹节点上的 kind（如 'user_portrait'）静默清空。
           // 故 coerced 时沿用既有节点的分类；同事务内读，节点不存在才用缺省。
           const existing = fact.coerced
             ? await getMemoryById(connection, memoryNodeId(MEMORY_REMEMBER_LAYER, fact.text))
@@ -422,6 +429,10 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         }
         if (facts.some((fact) => fact.coerced)) {
           await insertRefineAudit(connection, auditRefs, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
+        }
+        if (facts.some((fact) => fact.legacyKindAlias === true)) {
+          // 矩阵行 5：旧值被归一化过必须留痕（不写旧值，但要对旧模型输出可追溯）。
+          await insertRefineAudit(connection, auditRefs, 'uncertain', LEGACY_KIND_ALIAS_REASON, now)
         }
         if (scanDegraded !== null) {
           await insertRefineAudit(

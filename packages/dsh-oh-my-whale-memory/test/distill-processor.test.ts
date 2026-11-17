@@ -24,6 +24,7 @@ import type { PromotionTracker } from '../src/inbox/promotion-trigger'
 import {
   COERCED_CLASSIFICATION_REASON,
   EMBEDDING_FAILED_REASON,
+  LEGACY_KIND_ALIAS_REASON,
   NO_PROVIDER_ROUTE_REASON,
   createInboxProcessor,
   type InboxProcessorDeps,
@@ -155,17 +156,17 @@ describe('成功路径（AC:560、R1、R4①）', () => {
   it('单次 llm.stream → 每条 fact 一个 L1 节点 + refine success 记账 + 条目同事务标 done', async () => {
     const item = await claimFixture('ok', '用户: 我偏好中文回复')
     const { llm, calls } = scriptedLlm(okOutput([
-      { text: '用户偏好中文回复', kind: 'persona', priority: 3 },
+      { text: '用户偏好中文回复', kind: 'user_portrait', priority: 3 },
       { text: '项目使用 pnpm 管理依赖', kind: 'work_fact', priority: 1 },
     ]))
 
     const result = await makeProcessor(llm)(item)
 
     expect(calls).toHaveLength(1)
-    expect(result).toEqual({ completed: true, kinds: ['persona', 'work_fact'] })
+    expect(result).toEqual({ completed: true, kinds: ['user_portrait', 'work_fact'] })
     const nodes = await nodesFor(item.id)
     expect(nodes).toHaveLength(2)
-    expect(nodes.map((node) => String(node.kind)).sort()).toEqual(['persona', 'work_fact'])
+    expect(nodes.map((node) => String(node.kind)).sort()).toEqual(['user_portrait', 'work_fact'])
     expect(nodes.every((node) => String(node.layer) === 'L1')).toBe(true)
     expect(nodes.every((node) => refsOf(node, 'source_refs').includes(item.id))).toBe(true)
     // T24：未产向量时三列是 NULL（不是 0），后续重嵌入才识别得出来。
@@ -180,6 +181,22 @@ describe('成功路径（AC:560、R1、R4①）', () => {
     expect(await inboxStatus(item.id)).toBe('done')
   })
 
+  it('Story 11.4 / 矩阵行 5：模型输出 legacy 别名 persona ⇒ 归一化落库 + 审计留痕', async () => {
+    const item = await claimFixture('alias', '用户: 我偏好中文回复')
+    const { llm } = scriptedLlm(okOutput([{ text: '旧别名画像事实', kind: 'persona', priority: 2 }]))
+
+    const result = await makeProcessor(llm)(item)
+
+    expect(result).toEqual({ completed: true, kinds: ['user_portrait'] })
+    const nodes = await nodesFor(item.id)
+    expect(nodes).toHaveLength(1)
+    expect(String(nodes[0]!.kind)).toBe('user_portrait')
+    // 归一化不是分类失败（coerced=false），但旧值被改写必须留痕（不静默）。
+    const logs = refineLogsFor(await allLogs(), item.id)
+    const aliasAudit = logs.find((row) => String(row.reason ?? '') === LEGACY_KIND_ALIAS_REASON)
+    expect(aliasAudit).toMatchObject({ action: 'refine_inbox', outcome: 'uncertain' })
+  })
+
   it('② 同条目成功路径跑两次：节点与记账行数不增（R1 at-most-once）', async () => {
     const item = await claimFixture('replay', '原文')
     await makeProcessor(scriptedLlm(okOutput([{ text: '事实一', kind: 'work_fact', priority: 0 }])).llm)(item)
@@ -189,7 +206,7 @@ describe('成功路径（AC:560、R1、R4①）', () => {
 
     const second = await makeProcessor(scriptedLlm(okOutput([
       { text: '事实一', kind: 'work_fact', priority: 0 },
-      { text: '事实二', kind: 'persona', priority: 0 },
+      { text: '事实二', kind: 'user_portrait', priority: 0 },
     ])).llm)(item)
 
     expect(second).toEqual({ completed: true, kinds: [] })
@@ -200,7 +217,7 @@ describe('成功路径（AC:560、R1、R4①）', () => {
 
   it('embedding 成功：写时嵌入三列落库（AC:589）', async () => {
     const item = await claimFixture('embed-ok', '原文')
-    await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'persona', priority: 0 }])).llm, {
+    await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'user_portrait', priority: 0 }])).llm, {
       embedding: ACCEPTING_EMBED,
       embeddingModel: 'BAAI/bge-m3',
       embeddingModelId: 'BAAI/bge-m3',
@@ -258,13 +275,13 @@ describe('评审补钉（T3 / T7 / T20 / P4 追加项）', () => {
   it('评审 T3：coerced 不覆盖既有节点的分类与优先级（同指纹已有 persona/9）', async () => {
     const item = await claimFixture('keep-kind', '原文')
     await upsertMemory(store.connection, {
-      layer: MEMORY_REMEMBER_LAYER, text: '偏好中文', kind: 'persona', priority: 9,
+      layer: MEMORY_REMEMBER_LAYER, text: '偏好中文', kind: 'user_portrait', priority: 9,
     })
     await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'not-a-kind', priority: 0 }])).llm)(item)
 
     const nodes = await nodesFor(item.id)
     expect(nodes).toHaveLength(1)
-    expect(String(nodes[0]!.kind)).toBe('persona')
+    expect(String(nodes[0]!.kind)).toBe('user_portrait')
     expect(Number(nodes[0]!.priority)).toBe(9)
   })
 
@@ -354,7 +371,7 @@ describe('R1 + R4① 端到端：消费者 + 处理器', () => {
     await writeL0Raw(store.connection, { id, text: '用户: 我偏好中文', recordedAt: NOW, actor: 'sess-9' })
     await enqueueInboxItem(store.connection, { id, payload: '用户: 我偏好中文', kind: 'turn', sessionId: 'sess-9', now: NOW })
     const { llm, calls } = scriptedLlm(okOutput([
-      { text: '偏好中文', kind: 'persona', priority: 0 },
+      { text: '偏好中文', kind: 'user_portrait', priority: 0 },
       { text: '用 pnpm', kind: 'work_fact', priority: 0 },
     ]))
     const recorded: string[] = []
@@ -375,7 +392,7 @@ describe('R1 + R4① 端到端：消费者 + 处理器', () => {
     consumer.stop()
 
     // R4①：记的是精炼后的节点 kind（persona/work_fact），不是采集来源标签 turn。
-    expect(recorded).toEqual(['persona', 'work_fact'])
+    expect(recorded).toEqual(['user_portrait', 'work_fact'])
     expect(calls).toHaveLength(1)
     expect(await inboxStatus(id)).toBe('done')
     expect(await nodesFor(id)).toHaveLength(2)
@@ -404,7 +421,7 @@ describe('⑦ 路由闸门（AC:568 / N5）', () => {
 describe('⑧ 写时嵌入降级（N4 / AC:589）', () => {
   it('embedding 失败 ⇒ L1 照常写入、三列留空、另记 uncertain 审计', async () => {
     const item = await claimFixture('embed-fail', '原文')
-    const result = await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'persona', priority: 0 }])).llm, {
+    const result = await makeProcessor(scriptedLlm(okOutput([{ text: '偏好中文', kind: 'user_portrait', priority: 0 }])).llm, {
       embedding: failingEmbed('http-503'),
       embeddingModel: 'BAAI/bge-m3',
       embeddingModelId: 'BAAI/bge-m3',

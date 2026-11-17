@@ -10,7 +10,7 @@
  * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库此前由 database.ts 的幂等
  * `ALTER TABLE memory ADD parent_id STRING` 补列（Story 4.2 起新列一律只走迁移 0002）。
- * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '9'（迁移 0009）。
+ * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '10'（迁移 0010）。
  * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）；
  *   唯一例外是 Story 4.2 的 redact 墓碑（redacted_by/redacted_at 记录改写者与时刻）。
  *   Story 10.1 / AD-36 起该表分两型：inline（`raw_text` 非空）与 pointer
@@ -36,7 +36,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '9'
+export const SCHEMA_VERSION = '10'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {

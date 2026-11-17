@@ -1,24 +1,28 @@
 /**
- * Story 7.1：待裁决冲突（persona）与 `/memory resolve` 的裁决语义。
+ * Story 7.1：待裁决冲突（User Portrait）与 `/memory resolve` 的裁决语义。
  *
  * 覆盖 spec 矩阵行 1–5、7、9、12：
- * - 冲突：新 persona 与既有 persona 语义近邻 ⇒ 不写新节点、旧值仍有效、落 keyed(await-confirmation) + pending 行；
- * - 非 persona 的语义重复 ⇒ 行为不变（照旧 merge，不产生待裁决）；
+ * - 冲突：新 user_portrait 与既有 user_portrait 语义近邻 ⇒ 不写新节点、旧值仍有效、落 keyed(await-confirmation) + pending 行；
+ * - 非 user_portrait 的语义重复 ⇒ 行为不变（照旧 merge，不产生待裁决）；
  * - resolve `--accept`：旧节点 invalid_at、新节点写入、keyed(user, supersede)、pending 行删除；
  * - resolve `--keep`：旧节点不变、新节点写入、keyed(user, merge)；
  * - 不存在的 id ⇒ `pending_decision_not_found`，库不变；
  * - 重启（重新打开 facade）后待裁决仍在（证明落表不是内存态）。
  *
+ * Story 11.4 / 矩阵行 7：历史 `persona-conflict` policy 与新 `user-portrait-conflict`
+ * 视为同一逻辑冲突身份（回放/幂等/audit-gap 等价），历史 policy 与键原值保留。
+ *
  * 开库预算：本文件 2 个库（冲突/裁决用同一个 + 重启用同一个路径），≤14。
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
-import { buildJudgeKey, computeAuditGap } from '../src/db/audit'
+import { buildJudgeKey, computeAuditGap, insertKeyedDecision } from '../src/db/audit'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { writeDeduplicatedMemory } from '../src/db/dedup'
 import { memoryNodeId } from '../src/db/id'
 import { getMemoryById } from '../src/db/memory'
 import {
-  PERSONA_CONFLICT_POLICY,
+  LEGACY_PERSONA_CONFLICT_POLICY,
+  USER_PORTRAIT_CONFLICT_POLICY,
   countPendingDecisions,
   insertPendingDecision,
   listPendingDecisions,
@@ -77,7 +81,7 @@ describe('待裁决表原语（Story 7.1 / D-1）', () => {
       oldId: 'old-alpha',
       newId: 'new-alpha',
       payload: '我偏好先看证据',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       actor: 'agent',
       createdAt: T0,
@@ -118,7 +122,7 @@ describe('persona 冲突路由（矩阵行 1–3）', () => {
   it('命中 persona：不写新节点、旧值仍有效、落 keyed(await-confirmation) + pending 行', async () => {
     const old = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我偏好深色主题',
       embedding: vecY(1, 0),
@@ -128,7 +132,7 @@ describe('persona 冲突路由（矩阵行 1–3）', () => {
     const oldId = old.id
     const conflict = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我更喜欢浅色主题',
       embedding: vecY(1, 0.02),
@@ -153,7 +157,7 @@ describe('persona 冲突路由（矩阵行 1–3）', () => {
     const entry = pending.find((item) => item.oldId === oldId)
     expect(entry).toBeDefined()
     expect(entry?.payload).toBe('我更喜欢浅色主题')
-    expect(entry?.id).toBe(buildJudgeKey(PERSONA_CONFLICT_POLICY, 'await-confirmation', oldId, newNodeId))
+    expect(entry?.id).toBe(buildJudgeKey(USER_PORTRAIT_CONFLICT_POLICY, 'await-confirmation', oldId, newNodeId))
   })
 })
 
@@ -161,7 +165,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
   it('--keep：旧节点不变、新节点写入、keyed(user, merge)、pending 行删除', async () => {
     const old = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我禁止自动提交',
       embedding: vecZ(1, 0),
@@ -170,7 +174,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
     })
     const conflict = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我允许草稿提交',
       embedding: vecZ(1, 0.01),
@@ -199,7 +203,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
   it('--accept：旧节点 invalid_at、新节点写入（parent_id=old）、keyed(user, supersede)', async () => {
     const old = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我讨厌缩写',
       embedding: vec(1, 0.5),
@@ -208,7 +212,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
     })
     await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我不介意缩写',
       embedding: vec(1, 0.51),
@@ -259,7 +263,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
   it('同一 id 二次裁决 ⇒ not_found（幂等，不重复写节点）', async () => {
     const old = await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我只看结论',
       embedding: [0, 0, 0, 1],
@@ -268,7 +272,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
     })
     await writeDeduplicatedMemory(store.connection, {
       layer: 'L1',
-      kind: 'persona',
+      kind: 'user_portrait',
       priority: -1,
       text: '我看过程和结论',
       embedding: [0, 0, 0.01, 1],
@@ -309,7 +313,7 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
         oldId: `old-${String(index)}`,
         newId: `new-${String(index)}`,
         payload: `候选 ${String(index)}`,
-        kind: 'persona',
+        kind: 'user_portrait',
         priority: -1,
         actor: 'agent',
         createdAt: `2026-07-0${String(index + 1)}T00:00:00.000Z`,
@@ -321,5 +325,142 @@ describe('resolve 裁决（矩阵行 4、5、7）', () => {
     const mine = list.map((item) => item.id).filter((id) => id.startsWith('p-'))
     expect(mine[0]).toBe('p-6')
     expect(await countPendingDecisions(store.connection)).toBe(countBefore + 7)
+  })
+})
+
+/**
+ * Story 11.4 / 矩阵行 7：历史 `persona-conflict` 与新 `user-portrait-conflict` 是同一
+ * 逻辑冲突身份——回放/幂等/audit-gap 比较等价；历史 policy 与 judge key 原值保留；
+ * 认不出的旧 key 不得静默当成新决策。
+ */
+describe('Story 11.4：冲突 policy 新旧等价（矩阵行 7）', () => {
+  it('历史 policy 的待裁决行：正常裁决、落账保留历史 policy、audit_gap 不因这次作废上涨', async () => {
+    const old = await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'user_portrait',
+      priority: -1,
+      text: '历史 policy 的旧画像',
+      embedding: vecY(0.9, 1),
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    const newText = '历史 policy 的新画像'
+    const newId = memoryNodeId('L1', newText)
+    const legacyKey = buildJudgeKey(LEGACY_PERSONA_CONFLICT_POLICY, 'await-confirmation', old.id, newId)
+    // 历史行：pending.kind 仍是旧持久化值（迁移 0010 之前落库）。插入原语会归一化，故先插入
+    // 再用裸语句把列改回旧值，模拟真实历史行；读路径必须当只读别名。
+    await insertPendingDecision(store.connection, {
+      id: legacyKey,
+      oldId: old.id,
+      newId,
+      payload: newText,
+      kind: 'user_portrait',
+      priority: -1,
+      actor: 'agent',
+      createdAt: T0,
+    })
+    await runStatement(
+      store.connection,
+      `MATCH (p:pending_decision {id: '${legacyKey}'}) SET p.kind = 'persona'`,
+    )
+    await insertKeyedDecision(store.connection, {
+      judgeKey: legacyKey,
+      newId,
+      oldId: old.id,
+      action: 'await-confirmation',
+      policy: LEGACY_PERSONA_CONFLICT_POLICY,
+      l0Refs: [],
+      resolutionSource: 'auto',
+      ts: T0,
+    })
+    expect((await readPendingDecision(store.connection, legacyKey))?.kind).toBe('user_portrait')
+    const gapBefore = await computeAuditGap(store.connection)
+
+    const result = await resolvePendingDecision(store.connection, legacyKey, 'accept', { now: () => NOW })
+    expect(result.action).toBe('supersede')
+    // 新落账沿用历史 policy（身份是历史冲突），judge key 用当前含 action 的键式。
+    const rows = await queryAll(
+      store.connection,
+      `MATCH (k:keyed_decision) WHERE k.old_id = '${old.id}' AND k.action = 'supersede' ` +
+      'RETURN k.policy AS policy, k.judge_key AS judge_key',
+    )
+    expect(String(rows[0]?.policy)).toBe(LEGACY_PERSONA_CONFLICT_POLICY)
+    expect(String(rows[0]?.judge_key)).toBe(
+      buildJudgeKey(LEGACY_PERSONA_CONFLICT_POLICY, 'supersede', old.id, result.newMemoryId),
+    )
+    // audit-gap 的等价性：这次作废有裁决可重建（policy 名不参与判据）。
+    expect(await computeAuditGap(store.connection)).toBe(gapBefore)
+    expect(await readPendingDecision(store.connection, legacyKey)).toBeNull()
+  })
+
+  it('同一冲突重复观测 ⇒ 不重复创建待裁决（回放幂等，不把旧 key 翻新）', async () => {
+    const old = await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'user_portrait',
+      priority: -1,
+      text: '幂等旧画像',
+      embedding: vecY(0.4, 1),
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    const newText = '幂等新画像'
+    const pendingId = buildJudgeKey(
+      USER_PORTRAIT_CONFLICT_POLICY,
+      'await-confirmation',
+      old.id,
+      memoryNodeId('L1', newText),
+    )
+    await insertPendingDecision(store.connection, {
+      id: pendingId,
+      oldId: old.id,
+      newId: memoryNodeId('L1', newText),
+      payload: newText,
+      kind: 'user_portrait',
+      priority: -1,
+      actor: 'agent',
+      createdAt: T0,
+    })
+    const before = await countPendingDecisions(store.connection)
+
+    const replay = await writeDeduplicatedMemory(store.connection, {
+      layer: 'L1',
+      kind: 'user_portrait',
+      priority: -1,
+      text: newText,
+      embedding: vecY(0.4, 1),
+      embeddingModelId: MODEL,
+      actor: 'agent',
+    })
+    expect(replay.outcome).toBe('await-confirmation')
+    expect(await countPendingDecisions(store.connection)).toBe(before)
+    const rows = await queryAll(
+      store.connection,
+      `MATCH (p:pending_decision) WHERE p.old_id = '${old.id}' RETURN p.id AS id`,
+    )
+    expect(rows.map((row) => String(row.id))).toEqual([pendingId])
+  })
+
+  it('认不出的旧键 ⇒ 拒绝裁决、保留原行（歧义旧 key 不得静默当成新决策）', async () => {
+    await insertPendingDecision(store.connection, {
+      id: 'ambiguous-legacy-key',
+      oldId: 'old-ambiguous',
+      newId: 'new-ambiguous',
+      payload: '歧义候选',
+      kind: 'user_portrait',
+      priority: -1,
+      actor: 'agent',
+      createdAt: T0,
+    })
+    const before = await countPendingDecisions(store.connection)
+    await expect(resolvePendingDecision(store.connection, 'ambiguous-legacy-key', 'keep'))
+      .rejects.toMatchObject({ code: 'pending_decision_not_found' })
+    expect(await countPendingDecisions(store.connection)).toBe(before)
+    expect(await readPendingDecision(store.connection, 'ambiguous-legacy-key')).not.toBeNull()
+    // 没有落任何新 policy 的 keyed 行。
+    const keyed = await queryAll(
+      store.connection,
+      `MATCH (k:keyed_decision) WHERE k.old_id = 'old-ambiguous' RETURN k.judge_key AS judge_key`,
+    )
+    expect(keyed).toHaveLength(0)
   })
 })

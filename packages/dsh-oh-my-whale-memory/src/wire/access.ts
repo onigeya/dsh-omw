@@ -18,6 +18,8 @@ import { readCompactionStatus, type AttributionSnapshot } from '../context/statu
 import { compactionModeLabel, resolveCompactionMode } from '../context/compaction-delegate.js'
 import type { MemoryContextLedgerView, MemoryReflectionView } from '../command.js'
 import { countEvidenceDegraded } from '../db/redact.js'
+import { readDeclaredSchemaVersion } from '../db/migrate.js'
+import { TARGET_SCHEMA_VERSION } from '../db/migrations.js'
 import {
   countMemoriesByLayer,
   countUnembeddedMemories,
@@ -73,6 +75,27 @@ export interface MemoryAccess {
 /** 库未就绪的统一文案：写入与读取各一句，逐字保留命令层既有输出。 */
 const DB_NOT_READY_WRITE = '记忆库未就绪：无 profile 归属或建库未完成，当前无法写入 L1'
 const DB_NOT_READY_READ = '记忆库未就绪：无 profile 归属或建库未完成，当前无法读取记忆'
+
+/**
+ * Story 11.4 / T5：库声明版本与本插件目标版本不一致时的可见差异。
+ *
+ * 只读实例**不迁移**（AD-12），旧 schema 仍可打开并读；`schema_version_mismatch` 因此必须
+ * 在 status 里可见，而不是把旧库当成当前版本。版本一致 ⇒ 返回 undefined（不追加行）。
+ * 版本值非法（库损坏/跨版本写坏）按「未知」报出，不让 status 整体失败。
+ */
+async function readSchemaVersionMismatch(
+  database: MemoryDatabase,
+): Promise<{ readonly actual: string | null; readonly expected: string } | undefined> {
+  const expected = String(TARGET_SCHEMA_VERSION)
+  let actual: number | null
+  try {
+    actual = await readDeclaredSchemaVersion(database.connection, database.dbPath)
+  } catch {
+    return { actual: null, expected }
+  }
+  if (actual === TARGET_SCHEMA_VERSION) return undefined
+  return { actual: actual === null ? null : String(actual), expected }
+}
 
 export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
   const readConnection = (): MemoryDatabase => {
@@ -214,6 +237,10 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       })(),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
+      // Story 11.4 / T5：只读实例打开未迁移旧 schema 时，`schema_version_mismatch` 必须可见。
+      // 版本一致时不返回该字段（既有逐行输出逐字不变）；读取失败（版本值非法）也按「未知」报出，
+      // 不让 status 因一个元数据列整体失败。
+      schemaVersionMismatch: await readSchemaVersionMismatch(readConnection()),
       uncertain: await countUncertainAudits(connection),
     }
   }
@@ -244,8 +271,7 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
   }
 
   /** 把归因快照摊平成命令层的扁平视图（避开跨层类型依赖）。 */
-  const mapContextLedger = (snapshot: AttributionSnapshot | null): MemoryContextLedgerView | null => {
-    if (snapshot === null) return null
+  const mapContextLedger = (snapshot: AttributionSnapshot | null): MemoryContextLedgerView | null => {    if (snapshot === null) return null
     return {
       system: snapshot.ledger.bySource.system,
       user: snapshot.ledger.bySource.user,

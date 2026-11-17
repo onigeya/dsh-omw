@@ -33,6 +33,7 @@ import {
 import { runPrepared } from './backend.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
+import { canonicalizeMemoryKind } from '../shared/memory-vocab.js'
 import { collectRows, nullishString, queryAll, queryRows, toStringArray } from './rows.js'
 import { readCursor, writeCursor } from './meta.js'
 import { currentSnapshotPredicate } from './snapshot.js'
@@ -72,8 +73,11 @@ export interface UpsertMemoryInput {
   /** 该向量使用的模型 id（写入节点列）；无向量时必须一并缺省或为 null。 */
   embeddingModelId?: string | null
   /**
-   * 记忆类型，可选。FR-15 七类：`persona | episodic | instruction | work_fact |
+   * 记忆类型，可选。FR-15 七类：`user_portrait | episodic | instruction | work_fact |
    * work_task | work_method | work_artifact`；缺省落库空串。不参与指纹。
+   *
+   * Story 11.4：legacy 值 `persona` 在**落库前最后一道**（{@link writeMemoryVersion}）
+   * 被规范化为 `user_portrait`，任何调用方都不可能把旧值写回库；`handle` 等非七类值原样保留。
    */
   kind?: string
   /** 优先级，默认 0；FR-15 取值 `-1..100`（-1 = 全局强规则 / 恒置顶）。不参与指纹。 */
@@ -198,7 +202,7 @@ export async function writeMemoryVersion(
   const params: Record<string, lbug.LbugValue> = {
     id,
     layer: input.layer.trim(),
-    kind: input.kind ?? DEFAULT_MEMORY_KIND,
+    kind: canonicalizeMemoryKind(input.kind ?? DEFAULT_MEMORY_KIND),
     priority: Math.trunc(input.priority ?? DEFAULT_MEMORY_PRIORITY),
     text: input.text,
     valid_at: validAt,
@@ -335,7 +339,7 @@ export async function getMemoryById(connection: MemoryConnection, id: string): P
   return {
     id: String(row.id),
     layer: String(row.layer ?? ''),
-    kind: String(row.kind ?? ''),
+    kind: canonicalizeMemoryKind(String(row.kind ?? '')),
     priority: Number(row.priority ?? 0),
     text: String(row.text ?? ''),
     validAt: nullishString(row.valid_at),

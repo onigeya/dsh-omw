@@ -38,6 +38,7 @@ import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { GENERATION_LOG_TABLE, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import { foldStream } from '../shared/stream-fold.js'
+import { canonicalizeMemoryKind } from '../shared/memory-vocab.js'
 
 /** 邻接召回条数（AC:763 写死 top-K=8）。 */
 export const RELATION_RECALL_TOP_K = 8
@@ -139,7 +140,9 @@ export async function recallNeighbors(
   return rows.slice(0, k).map((row) => ({
     id: String(row.id),
     layer: String(row.layer),
-    kind: row.kind === null || row.kind === undefined ? '' : String(row.kind),
+    // Story 11.4：旧库只读时 `persona` 按别名读成 `user_portrait`，「同 kind 优先」的
+    // 排序判据才跨版本一致（与 dedup 的守卫同一逻辑身份）。
+    kind: row.kind === null || row.kind === undefined ? '' : canonicalizeMemoryKind(String(row.kind)),
     text: String(row.text ?? ''),
     distance: Number(row.distance ?? Number.POSITIVE_INFINITY),
   }))

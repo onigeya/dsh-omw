@@ -1,12 +1,13 @@
 /**
  * 待裁决冲突（Story 7.1 / FR-20、AD-18 的 `await-confirmation` 落地）。
  *
- * 一条 pending 记录 = 「有一条新的 persona 观测与既有人设冲突，等你裁决」。它同时有两条凭证：
+ * 一条 pending 记录 = 「有一条新的用户画像（User Portrait）观测与既有画像冲突，等你裁决」。
+ * 它同时有两条凭证：
  * - `keyed_decision` 的 `{judge_key, action='await-confirmation', resolution_source='auto'}`（AD-18 要求的裁决账）；
  * - 本表的一行（`id = judge_key`，带候选正文 `payload`）——因为 keyed 表按 AD-21 不存正文（NFR9）。
  *
  * 生命周期：
- * 1. `insertPendingDecision`（写路径检测到 persona 冲突时，与 keyed 行同事务）；
+ * 1. `insertPendingDecision`（写路径检测到 User Portrait 冲突时，与 keyed 行同事务）；
  * 2. `readPendingDecision` / `countPendingDecisions` / `listPendingDecisions`（`/memory status` 与 `/memory resolve`）；
  * 3. `resolvePendingDecision`（`--accept` / `--keep`：写新节点 + 写 supersede/merge 的 keyed 行 + 删本行，
  *    整个流程在**一个事务**里，中途失败全回滚）。
@@ -14,20 +15,33 @@
  * 事务契约：除 `resolvePendingDecision`（它自己开事务，因为它是完整的用户级动作）外，其余原语都
  * 「由调用方开事务」。`runInTransaction` 不可重入，所以 resolve 内部只用自开事务的原语
  * （`writeMemoryVersion` / `insertKeyedDecision` / 裸 `MATCH … SET`）。
+ *
+ * policy 兼容（Story 11.4 / AD-38、AC:2392-2393）：
+ * - 新写入用 {@link USER_PORTRAIT_CONFLICT_POLICY}；
+ * - 历史 `persona-conflict` 行**只读识别**：它与新 policy 是同一逻辑冲突身份（回放 / 幂等 /
+ *   audit-gap 比较等价），解析时保留历史 policy 原值，不把旧 key 静默当成新决策。
  */
 import type * as lbug from '@ladybugdb/core'
-import { buildJudgeKey, insertKeyedDecision } from './audit.js'
+import { AWAIT_CONFIRMATION_ACTION, buildJudgeKey, buildLegacyJudgeKey, insertKeyedDecision } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
 import { writeMemoryVersion } from './memory.js'
 import { runPrepared } from './backend.js'
 import { queryRows } from './rows.js'
 import { KEYED_DECISION_TABLE, MEMORY_TABLE, PENDING_DECISION_TABLE } from './schema.js'
-import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
+import { canonicalizeMemoryKind, MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
 import { runInTransaction } from './transaction.js'
 
-/** 冲突裁决的 policy 标识（`keyed_decision.policy` / `generation_log.policy` 共用）。 */
-export const PERSONA_CONFLICT_POLICY = 'persona-conflict'
+/** 新写入的用户画像冲突 policy（Story 11.4 / AD-38；`keyed_decision.policy` / `generation_log.policy` 共用）。 */
+export const USER_PORTRAIT_CONFLICT_POLICY = 'user-portrait-conflict'
+
+/**
+ * 历史 policy（Story 7.1 及以前落库的行）：**只读识别，绝不用于新写入**。
+ *
+ * 与新 policy 是同一逻辑冲突身份（AC:2393）：回放 / 幂等 / audit-gap 比较必须等价；
+ * 历史行的 policy 与 judge_key 原值保留（迁移 0010 不改 keyed_decision / generation_log）。
+ */
+export const LEGACY_PERSONA_CONFLICT_POLICY = 'persona-conflict'
 
 /** 一条待裁决记录（`/memory status` 的清单与 `/memory resolve` 的入参都用这个形状）。 */
 export interface PendingDecision {
@@ -96,11 +110,70 @@ function toPending(row: Record<string, unknown> | undefined): PendingDecision | 
     oldId: String(row.old_id ?? ''),
     newId: String(row.new_id ?? ''),
     payload: String(row.payload ?? ''),
-    kind: String(row.kind ?? ''),
+    // Story 11.4：旧库里持久化的 `persona` 按只读别名读成 `user_portrait`（不改行）。
+    kind: canonicalizeMemoryKind(String(row.kind ?? '')),
     priority: Number(row.priority ?? 0),
     actor: String(row.actor ?? ''),
     createdAt: String(row.created_at ?? ''),
   }
+}
+
+/**
+ * 一条待裁决记录在「同一逻辑冲突身份」下的候选 (policy, id)（Story 11.4 / AC:2393）。
+ *
+ * 顺序即优先级：新 policy 的当前键式 → 历史 policy 的当前键式 → 历史 policy 的
+ * 0003 之前旧键式（不含 action；pending 表本身晚于 0003，这里只是把已知旧形态也认下来，
+ * 避免它被误判成「新决策」）。
+ */
+export function conflictPendingIdentities(
+  oldId: string,
+  newId: string,
+): readonly { readonly policy: string; readonly id: string }[] {
+  return [
+    {
+      policy: USER_PORTRAIT_CONFLICT_POLICY,
+      id: buildJudgeKey(USER_PORTRAIT_CONFLICT_POLICY, AWAIT_CONFIRMATION_ACTION, oldId, newId),
+    },
+    {
+      policy: LEGACY_PERSONA_CONFLICT_POLICY,
+      id: buildJudgeKey(LEGACY_PERSONA_CONFLICT_POLICY, AWAIT_CONFIRMATION_ACTION, oldId, newId),
+    },
+    // 迁移 0003 之前的旧键式（不含 action）：与 audit.ts 的 buildLegacyJudgeKey 同形。
+    // 只在读侧认同，不用于新写入。
+    {
+      policy: LEGACY_PERSONA_CONFLICT_POLICY,
+      id: buildLegacyJudgeKey(LEGACY_PERSONA_CONFLICT_POLICY, oldId, newId),
+    },
+  ]
+}
+
+/**
+ * 同一逻辑冲突是否已在待裁决集里（含历史 policy 的行）。
+ *
+ * 回放 / 幂等判据：写路径再次检出同一 (old,new) 冲突时不再 `CREATE` 第二条 pending 行
+ * （原实现会撞主键），也不把历史 key 改写成新 policy 的行。
+ */
+export async function findEquivalentPendingDecision(
+  connection: lbug.Connection,
+  oldId: string,
+  newId: string,
+): Promise<string | null> {
+  const rows = await queryRows(
+    connection,
+    'MATCH (p:' + PENDING_DECISION_TABLE + ') WHERE p.id IN $ids RETURN p.id AS id LIMIT 1',
+    { ids: conflictPendingIdentities(oldId, newId).map((form) => form.id) },
+  )
+  return rows[0] === undefined ? null : String(rows[0].id)
+}
+
+/**
+ * 判定一条待裁决记录的逻辑冲突身份（policy）。
+ *
+ * 返回 null = id 不匹配任何已知键形态：**不得静默当成新决策**（调用方拒绝解析并保留原行，
+ * 而非用新 policy 覆盖历史身份）。
+ */
+export function resolveConflictPolicy(pendingId: string, oldId: string, newId: string): string | null {
+  return conflictPendingIdentities(oldId, newId).find((form) => form.id === pendingId)?.policy ?? null
 }
 
 /** 写一条待裁决记录（由调用方开事务；同一事务里还应写 `action='await-confirmation'` 的 keyed 行）。 */
@@ -114,7 +187,7 @@ export async function insertPendingDecision(
     old_id: input.oldId,
     new_id: input.newId,
     payload: input.payload,
-    kind: input.kind,
+    kind: canonicalizeMemoryKind(input.kind),
     priority: Math.trunc(input.priority),
     actor: input.actor,
     created_at: input.createdAt,
@@ -190,15 +263,25 @@ export async function resolvePendingDecision(
     if (pending === null) {
       throw new MemoryDbError('pending_decision_not_found', '未找到待裁决记录（id=' + id + '）')
     }
+    // Story 11.4 / AC:2393：先认领这条记录的逻辑冲突身份。历史 `persona-conflict` 行与新
+    // `user-portrait-conflict` 行是同一身份，但落账必须保留历史 policy 原值；认不出键形态时
+    // 拒绝解析——绝不把歧义的旧 key 静默当成新 policy 的决策。
+    const conflictPolicy = resolveConflictPolicy(pending.id, pending.oldId, pending.newId)
+    if (conflictPolicy === null) {
+      throw new MemoryDbError(
+        'pending_decision_not_found',
+        '待裁决记录 ' + id + ' 的键形态无法识别为 User Portrait 冲突身份：保留原行不做裁决（不静默当成新决策）',
+      )
+    }
     const action: 'supersede' | 'merge' = resolution === 'accept' ? 'supersede' : 'merge'
     // 新节点用候选正文：指纹 id 由 layer+归一化正文决定（AD-4），与写入路径同源。
     const newMemoryId = memoryNodeId(MEMORY_REMEMBER_LAYER, pending.payload)
     await insertKeyedDecision(connection, {
-      judgeKey: buildJudgeKey(PERSONA_CONFLICT_POLICY, action, pending.oldId, newMemoryId),
+      judgeKey: buildJudgeKey(conflictPolicy, action, pending.oldId, newMemoryId),
       newId: newMemoryId,
       oldId: pending.oldId,
       action,
-      policy: PERSONA_CONFLICT_POLICY,
+      policy: conflictPolicy,
       l0Refs: [],
       resolutionSource: 'user',
       ts: nowIso,

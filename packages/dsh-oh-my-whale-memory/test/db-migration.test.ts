@@ -33,9 +33,15 @@ import {
   createGenerationLogTableStatement,
   createKeyedDecisionTableStatement,
   createL0RawTableStatement,
+  createL1InboxTableStatement,
+  createL2InboxTableStatement,
+  createMemoryTableStatement,
   createMetaTableStatement,
+  createPendingDecisionTableStatement,
+  createSlowTaskTableStatement,
 } from '../src/db/schema'
 import type { Migration } from '../src/db/migrations'
+import { MIGRATION_0010 } from '../src/db/migrations/0010-user-portrait-kind'
 import { buildJudgeKey, buildLegacyJudgeKey } from '../src/db/audit'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -111,7 +117,7 @@ function v3Statements(): string[] {
     'CREATE NODE TABLE IF NOT EXISTS memory(id STRING, layer STRING, kind STRING, priority INT64, text STRING, embedding FLOAT[4], valid_at STRING, recorded_at STRING, invalid_at STRING, expired_at STRING, source_refs STRING[], embedding_model_id STRING, embedding_dim INT64, parent_id STRING, support INT64, evidence_degraded BOOL, PRIMARY KEY(id))',
     createL0RawTableStatement(),
     createGenerationLogTableStatement(),
-...metaStatements('10'),
+...metaStatements('11'),
   ]
 }
 
@@ -190,18 +196,18 @@ async function degradedFlag(connection: lbug.Connection, id: string): Promise<un
 afterAll(cleanupTempDirs)
 
 describe('矩阵行 1：全新空库 bootstrap', () => {
-  it('SCHEMA_VERSION=9；schema_migration 含 0002..0009 八行；三表新列齐；无备份文件', async () => {
+  it('SCHEMA_VERSION=10；schema_migration 含 0002..0010 九行；三表新列齐；无备份文件', async () => {
     const dir = await makeTempDir('omw-migr-fresh-')
     const dbPath = resolveMemoryDbPath(dir)
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
 
-    expect(SCHEMA_VERSION).toBe('9')
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
+    expect(SCHEMA_VERSION).toBe('10')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('10')
     const applied = await queryRows(
       store.connection,
       `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS version, s.checksum AS checksum`,
     )
-    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
     expect(String(applied[0]?.checksum)).toMatch(/^[0-9a-f]{64}$/)
 
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
@@ -220,21 +226,21 @@ describe('矩阵行 1：全新空库 bootstrap', () => {
 })
 
 describe('矩阵行 2：v1 旧库自动升级', () => {
-  it('三表新列出现、版本 9、schema_migration 八行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
+  it('三表新列出现、版本 10、schema_migration 九行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
     const dir = await makeTempDir('omw-migr-v1-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v1Statements())
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
     const meta = await readMeta(store.connection)
-    expect(meta.get(META_KEYS.schemaVersion)).toBe('9')
+    expect(meta.get(META_KEYS.schemaVersion)).toBe('10')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const l0Columns = await columnsOf(store.connection, 'l0_raw')
     expect(l0Columns.get(REDACTED_BY_COLUMN)).toBe('STRING')
     expect(l0Columns.get('redacted_at')).toBe('STRING')
     expect((await columnsOf(store.connection, 'generation_log')).get('detail')).toBe('STRING')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
     // 旧数据必须还在（迁移只加列）。
     const legacy = await queryRows(store.connection, "MATCH (m:memory {id: 'legacy-m1'}) RETURN m.text AS text")
     expect(legacy[0]?.text).toBe('旧数据')
@@ -273,13 +279,13 @@ describe('矩阵行 3：重复启动', () => {
     const appliedAfter = await queryRows(second.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`)
     expect(Number(appliedAfter[0]?.c)).toBe(Number(appliedBefore[0]?.c))
     expect(await backupFiles(dbPath)).toEqual(backupsBefore)
-    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('9')
+    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('10')
     await second.close()
   }, 60_000)
 })
 
 describe('矩阵行 4：版本高于插件', () => {
-  it('version=10 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
+  it('version=11 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
     const dir = await makeTempDir('omw-migr-v3-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v3Statements())
@@ -293,7 +299,7 @@ describe('矩阵行 4：版本高于插件', () => {
     // 先释放父进程持有的句柄（被拒绝的打开同样会缓存 Database，跨进程会挡住建库文件的锁）。
     await closeMemoryDatabase(dbPath)
     const dump = runChild('dump', dbPath)
-    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('10')
+    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('11')
     expect(dump.hasMigrationTable).toBe(false)
   }, 60_000)
 })
@@ -366,17 +372,17 @@ describe('矩阵行 6：备份创建失败', () => {
 })
 
 describe('FIX-3：bootstrap 判据（版本键缺失 ≠ 新库）', () => {
-  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 9', async () => {
+  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 10', async () => {
     const dir = await makeTempDir('omw-migr-noversion-')
     const dbPath = resolveMemoryDbPath(dir)
     // 冻结的 v1 表形态，但**不写** schema_version（旧库的极端形态）。
     runChild('create', dbPath, v1Statements(null))
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('10')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10])
     // 关键差异：走的是升级路径 ⇒ 备份文件名里的 fromVersion 是 0，而不是「不备份」。
     const backups = await backupFiles(dbPath)
     expect(backups).toHaveLength(1)
@@ -450,7 +456,7 @@ describe('迁移 0003：judge_key 加 action（Story 5.4 / AC:1299-1301）', () 
     expect(String(rows[0]?.policy)).toBe(policy)
     expect(String(rows[0]?.ts)).toBe('2026-01-01T00:00:00.000Z')
     const meta = await queryRows(store.connection, "MATCH (m:omw_meta {key: 'schema_version'}) RETURN m.value AS v")
-    expect(String(meta[0]?.v)).toBe('9')
+    expect(String(meta[0]?.v)).toBe('10')
     await store.close()
   }, 60_000)
 })
@@ -514,7 +520,7 @@ const V7_COMPACTION_RUN =
   'config_snapshot_json STRING, started_at STRING, shadowed_seqs_json STRING, shadowed_range_json STRING, PRIMARY KEY(id))'
 
 describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）', () => {
-  it('0007 旧库升级：0008+0009 列新增、旧行可读、版本 9、备份文件产生', async () => {
+  it('0007 旧库升级：0008–0010 列/数据变更、旧行可读、版本 10、备份文件产生', async () => {
     const dir = await makeTempDir('omw-migr-v7-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, [
@@ -530,9 +536,9 @@ describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）
     ])
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('10')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([8, 9])
+    expect(applied.map((row) => Number(row.v))).toEqual([8, 9, 10])
 
     // 六列都补出来了。
     const runColumns = await columnsOf(store.connection, COMPACTION_RUN_TABLE)
@@ -578,3 +584,152 @@ describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）
 
 
 
+
+
+
+/**
+ * 冻结的 v9 旧库：四张承载记忆分类的表各一条 `persona` 行 + 两条「不得改写」的 kind 行。
+ *
+ * memory 用当前列形态（v9 已含迁移 0002–0009 的全部列）；其余表直接取 schema.ts 的 DDL。
+ * generation_log.kind（审计动作语汇）与 slow_task.kind（任务类型）语义不同，迁移 0010
+ * 绝不改写它们（AC:2386）。
+ */
+function v9PortraitStatements(): string[] {
+  return [
+    createMemoryTableStatement(DIM),
+    createL0RawTableStatement(),
+    createGenerationLogTableStatement(),
+    createKeyedDecisionTableStatement(),
+    createL1InboxTableStatement(),
+    createL2InboxTableStatement(),
+    createPendingDecisionTableStatement(),
+    createSlowTaskTableStatement(),
+    ...metaStatements('9'),
+    `CREATE (:memory {id: 'portrait-v9', layer: 'L1', kind: 'persona', priority: -1, text: '旧画像正文', ` +
+      `embedding: [1.0, 0.0, 0.0, 0.0], valid_at: '${T0}', recorded_at: '${T0}', ` +
+      `source_refs: ['l0-portrait'], embedding_model_id: '${MODEL}', embedding_dim: ${DIM}, support: 3})`,
+    `CREATE (:memory {id: 'fact-v9', layer: 'L1', kind: 'work_fact', priority: 7, text: '普通事实', ` +
+      `valid_at: '${T0}', recorded_at: '${T0}', source_refs: []})`,
+    `CREATE (:l1_inbox {id: 'inbox-v9', session_id: 's-v9', kind: 'persona', payload: '队列正文', ` +
+      `status: 'pending', attempts: 2, lease_owner: 'owner-1', lease_until: '${T0}', ` +
+      `enqueued_at: '${T0}', updated_at: '${T0}', last_error: 'none'})`,
+    `CREATE (:l2_inbox {id: 'l2-v9', session_id: 's-v9', kind: 'persona', payload: 'L2 队列正文', ` +
+      `status: 'processing', attempts: 1, enqueued_at: '${T0}', updated_at: '${T0}'})`,
+    `CREATE (:pending_decision {id: 'pending-v9', old_id: 'portrait-old', new_id: 'portrait-new', ` +
+      `payload: '候选正文', kind: 'persona', priority: -1, actor: 'agent', created_at: '${T0}'})`,
+    `CREATE (:generation_log {id: 'audit-v9', recorded_at: '${T0}', actor: 'system', kind: 'persona', ` +
+      `action: 'refine_inbox', policy: 'capture', l0_refs: [], outcome: 'success'})`,
+    `CREATE (:slow_task {id: 'slow-v9', kind: 'persona', payload: '{}', state: 'pending', attempts: 0, ` +
+      `created_at: '${T0}', updated_at: '${T0}'})`,
+  ]
+}
+
+async function kindOfRow(connection: import('@ladybugdb/core').Connection, table: string, id: string): Promise<string> {
+  const rows = await queryRows(connection, `MATCH (n:${table} {id: '${id}'}) RETURN n.kind AS kind`)
+  return String(rows[0]?.kind)
+}
+
+describe('迁移 0010：persona → user_portrait（Story 11.4 / 矩阵行 1、6）', () => {
+  it('v9 旧库升级：四列改写、行数/字段保真、审计与任务 kind 不动、版本 10、bak-9 备份', async () => {
+    const dir = await makeTempDir('omw-migr-portrait-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v9PortraitStatements())
+
+    const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('10')
+    const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
+    expect(applied.map((row) => Number(row.v))).toEqual([10])
+
+    // 四列改写；行数与节点 id 不变。
+    expect(await kindOfRow(store.connection, 'memory', 'portrait-v9')).toBe('user_portrait')
+    expect(await kindOfRow(store.connection, 'l1_inbox', 'inbox-v9')).toBe('user_portrait')
+    expect(await kindOfRow(store.connection, 'l2_inbox', 'l2-v9')).toBe('user_portrait')
+    expect(await kindOfRow(store.connection, 'pending_decision', 'pending-v9')).toBe('user_portrait')
+    const counts = await queryRows(
+      store.connection,
+      'MATCH (m:memory) RETURN count(m) AS c',
+    )
+    expect(Number(counts[0]?.c)).toBe(2)
+
+    // 不得改写的两列：语义不同的 kind 原样保留。
+    expect(await kindOfRow(store.connection, 'generation_log', 'audit-v9')).toBe('persona')
+    expect(await kindOfRow(store.connection, 'slow_task', 'slow-v9')).toBe('persona')
+
+    // 字段保真：正文/优先级/时间戳/source_refs/向量列、队列状态与尝试次数、待裁决正文与 actor。
+    const memory = await queryRows(
+      store.connection,
+      "MATCH (m:memory {id: 'portrait-v9'}) RETURN m.text AS text, m.priority AS priority, " +
+      'm.valid_at AS valid_at, m.recorded_at AS recorded_at, m.source_refs AS source_refs, ' +
+      'm.support AS support',
+    )
+    expect(String(memory[0]?.text)).toBe('旧画像正文')
+    expect(Number(memory[0]?.priority)).toBe(-1)
+    expect(String(memory[0]?.valid_at)).toBe(T0)
+    expect(String(memory[0]?.recorded_at)).toBe(T0)
+    expect((memory[0]?.source_refs as unknown[]).map(String)).toEqual(['l0-portrait'])
+    expect(Number(memory[0]?.support)).toBe(3)
+    const fact = await queryRows(store.connection, "MATCH (m:memory {id: 'fact-v9'}) RETURN m.kind AS kind")
+    expect(String(fact[0]?.kind)).toBe('work_fact')
+
+    const inbox = await queryRows(
+      store.connection,
+      "MATCH (q:l1_inbox {id: 'inbox-v9'}) RETURN q.status AS status, q.attempts AS attempts, " +
+      'q.payload AS payload, q.lease_owner AS lease_owner, q.updated_at AS updated_at',
+    )
+    expect(String(inbox[0]?.status)).toBe('pending')
+    expect(Number(inbox[0]?.attempts)).toBe(2)
+    expect(String(inbox[0]?.payload)).toBe('队列正文')
+    expect(String(inbox[0]?.lease_owner)).toBe('owner-1')
+    expect(String(inbox[0]?.updated_at)).toBe(T0)
+
+    const pending = await queryRows(
+      store.connection,
+      "MATCH (p:pending_decision {id: 'pending-v9'}) RETURN p.payload AS payload, p.old_id AS old_id, " +
+      'p.new_id AS new_id, p.priority AS priority, p.actor AS actor, p.created_at AS created_at',
+    )
+    expect(String(pending[0]?.payload)).toBe('候选正文')
+    expect(String(pending[0]?.old_id)).toBe('portrait-old')
+    expect(String(pending[0]?.new_id)).toBe('portrait-new')
+    expect(Number(pending[0]?.priority)).toBe(-1)
+    expect(String(pending[0]?.actor)).toBe('agent')
+    expect(String(pending[0]?.created_at)).toBe(T0)
+
+    // 迁移前备份（唯一回滚点）：命名含 fromVersion=9。
+    const backups = await backupFiles(dbPath)
+    expect(backups).toHaveLength(1)
+    expect(backups[0]).toMatch(/^lbug\.db\.bak-9-\d+-\d+$/)
+    await store.close()
+  }, 60_000)
+
+  it('迁移中途失败 ⇒ 整体回滚：kind 仍是 persona、版本 9、备份保留（拒绝启动）', async () => {
+    const dir = await makeTempDir('omw-migr-portrait-fail-')
+    const dbPath = resolveMemoryDbPath(dir)
+    runChild('create', dbPath, v9PortraitStatements())
+
+    const backend = loadStorageBackend()
+    const database = backend.createDatabase(dbPath, false)
+    const connection = await backend.createConnection(database)
+    await backend.loadExtensions(connection)
+
+    const broken: Migration = {
+      version: 11,
+      name: 'broken-after-portrait',
+      statements: [{ table: 'no_such_table', column: 'x', ddl: 'ALTER TABLE no_such_table ADD x STRING' }],
+    }
+
+    // 同一事务里 0010 先跑（确实改写了四列），随后注入的迁移失败 ⇒ 整条事务回滚。
+    await expect(migrateDatabase(connection, { dbPath, migrations: [MIGRATION_0010, broken] }))
+      .rejects.toMatchObject({ code: 'schema_migration_failed' })
+
+    expect(await kindOfRow(connection, 'memory', 'portrait-v9')).toBe('persona')
+    expect(await kindOfRow(connection, 'l1_inbox', 'inbox-v9')).toBe('persona')
+    expect((await readMeta(connection)).get(META_KEYS.schemaVersion)).toBe('9')
+    await expect(queryRows(connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`))
+      .rejects.toThrow(/does not exist/i)
+    // 备份是唯一回滚点：失败后必须仍在。
+    const backups = await backupFiles(dbPath)
+    expect(backups).toHaveLength(1)
+    expect(backups[0]).toMatch(/^lbug\.db\.bak-9-\d+-\d+$/)
+    await backend.close(database, connection)
+  }, 60_000)
+})

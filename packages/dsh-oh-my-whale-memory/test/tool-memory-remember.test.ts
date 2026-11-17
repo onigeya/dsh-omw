@@ -120,7 +120,9 @@ describe('memory_remember 工具（Story 1.6）', () => {
     expect(tool.parameters.properties.context.type).toBe('string')
     expect(tool.parameters.properties.kind?.type).toBe('string')
     expect([...(tool.parameters.properties.kind?.enum ?? [])]).toEqual([
-      'persona', 'episodic', 'instruction', 'work_fact', 'work_task', 'work_method', 'work_artifact',
+      'user_portrait', 'episodic', 'instruction', 'work_fact', 'work_task', 'work_method', 'work_artifact',
+      // Story 11.4：enum 收 legacy 别名只为输入归一化；落库值仍只可能是规范值。
+      'persona',
     ])
     expect(tool.parameters.required ?? []).not.toContain('kind')
     expect(tool.parameters.properties.priority?.type).toBe('integer')
@@ -325,10 +327,10 @@ describe('memory_remember 工具（Story 1.6）', () => {
   })
 
   it('同文本不同分类：同一 id + 以最新写入为准（Story 1.11 / AC4：分类不进指纹）', async () => {
-    const first = await tool.execute({ content: '同文本换分类工具样例', kind: 'persona', priority: 10 })
+    const first = await tool.execute({ content: '同文本换分类工具样例', kind: 'user_portrait', priority: 10 })
     expect(first.action).toBe('stored')
     const rowsAfterFirst = await rowsFor(first.id!)
-    expect(rowsAfterFirst[0]['kind']).toBe('persona')
+    expect(rowsAfterFirst[0]['kind']).toBe('user_portrait')
 
     const second = await tool.execute({ content: '同文本换分类工具样例', kind: 'episodic', priority: -1 })
     expect(second.action).toBe('stored')
@@ -339,4 +341,26 @@ describe('memory_remember 工具（Story 1.6）', () => {
     expect(rowsAfterSecond[0]['kind']).toBe('episodic')
     expect(Number(rowsAfterSecond[0]['priority'])).toBe(-1)
   })
+
+  it('Story 11.4 / 矩阵行 4：legacy 输入 kind=persona 在边界归一化，落库不出现旧值', async () => {
+    // 宿主按 enum 只放行规范值；这里直接调 execute，覆盖「旧 API / 兼容期调用方」的输入边界。
+    const value = await tool.execute({ content: '旧别名归一化样例', kind: 'persona' })
+    expect(value.action).toBe('stored')
+    const rows = await rowsFor(value.id!)
+    expect(rows).toHaveLength(1)
+    expect(rows[0]['kind']).toBe('user_portrait')
+  })
+
+  it('Story 11.4：既非规范值也非别名的 kind ⇒ 宿主 enum 拒绝，不写库', async () => {
+    // 宿主按 `parameters.kind.enum` 在 execute 之前校验：未知值不会进入 handler。
+    // handler 的 `invalid_kind` 只对「绕过宿主 schema 的直接 API 调用」可达。
+    await expect(tool.execute({ content: '非法分类不应落库', kind: 'note' }))
+      .rejects.toThrow(/must be one of/)
+    const rows = await queryAll(
+      store.connection,
+      "MATCH (m:memory) WHERE m.text = '非法分类不应落库' RETURN count(m) AS total",
+    )
+    expect(Number(rows[0]?.total ?? -1)).toBe(0)
+  })
 })
+

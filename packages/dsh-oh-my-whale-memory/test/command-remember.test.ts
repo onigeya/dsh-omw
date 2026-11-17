@@ -85,6 +85,9 @@ describe('parseMemoryCommand（remember 分支）', () => {
   it('子命令常量与命令名符合契约', () => {
     expect(MEMORY_COMMAND_NAME).toBe('memory')
     expect(MEMORY_REMEMBER_SUBCOMMAND).toBe('remember')
+    // Story 11.4：usage 只宣传规范值 `user_portrait`，legacy `persona` 不作为合法值出现。
+    expect(MEMORY_REMEMBER_USAGE).toContain('user_portrait')
+    expect(MEMORY_REMEMBER_USAGE).not.toContain('persona')
     expect(MEMORY_REMEMBER_USAGE).toContain('/memory remember <内容>')
     // 总 usage 必须同时给出四个子命令（Story 1.9 起含 status）。
     expect(MEMORY_COMMAND_USAGE).toContain('/memory remember <内容>')
@@ -94,8 +97,12 @@ describe('parseMemoryCommand（remember 分支）', () => {
   })
 
   it('解析 --kind= / --priority= 旗标（Story 1.11 / AC2）', () => {
+    // Story 11.4：旧输入 `--kind=persona` 在输入边界归一化为规范值 `user_portrait`，
+    // usage 只宣传规范值（旧别名的兼容只体现在解析结果里）。
     expect(parseMemoryCommand(' remember --kind=persona --priority=-1 恒置顶偏好'))
-      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'persona', priority: -1 } })
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'user_portrait', priority: -1 } })
+    expect(parseMemoryCommand(' remember --kind=user_portrait --priority=-1 恒置顶偏好'))
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'user_portrait', priority: -1 } })
     // 顺序无关
     expect(parseMemoryCommand(' remember --priority=7 --kind=work_method 先 复现 再 修'))
       .toEqual({ kind: 'remember', text: '先 复现 再 修', classification: { priority: 7, kind: 'work_method' } })
@@ -124,9 +131,10 @@ describe('parseMemoryCommand（remember 分支）', () => {
     // 边界值仍是合法值
     expect(parseMemoryCommand(' remember --priority=100 文本'))
       .toEqual({ kind: 'remember', text: '文本', classification: { priority: 100 } })
-    // 旗标与正文之间用制表符等空白分隔时同样成立（与子命令切分的 \s+ 一致）
+    // 旗标与正文之间用制表符等空白分隔时同样成立（与子命令切分的 \s+ 一致）；
+    // 旧别名同样在边界归一化。
     expect(parseMemoryCommand(' remember --kind=persona\t恒置顶偏好'))
-      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'persona' } })
+      .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { kind: 'user_portrait' } })
     expect(parseMemoryCommand(' remember --priority=-1\t恒置顶偏好'))
       .toEqual({ kind: 'remember', text: '恒置顶偏好', classification: { priority: -1 } })
   })
@@ -166,7 +174,7 @@ describe('createMemoryCommandDefinition（remember 分支）', () => {
     const result = await definition.handler({
       rawInput: ' remember --kind=persona --priority=-1 恒置顶偏好',
     })
-    expect(writeInbox).toHaveBeenCalledExactlyOnceWith('恒置顶偏好', { kind: 'persona', priority: -1 })
+    expect(writeInbox).toHaveBeenCalledExactlyOnceWith('恒置顶偏好', { kind: 'user_portrait', priority: -1 })
     expect(result.kind).toBe('success')
   })
 

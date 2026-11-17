@@ -27,6 +27,7 @@ import { queryRows, toStringArray } from '../db/rows.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { FTS_INDEX_NAME, MEMORY_TABLE, VECTOR_INDEX_NAME } from '../db/schema.js'
 import { estimateTokens, splitToBudget } from '../shared/text-budget.js'
+import { canonicalizeMemoryKind } from '../shared/memory-vocab.js'
 
 /** BM25 查询期参数（FR-11：K=1.2 / B=0.75；建索引时用官方默认，见 schema.ts）。 */
 export const BM25_K = 1.2
@@ -221,7 +222,11 @@ function addRankedRows(
     candidates.set(id, {
       id,
       layer: String(row.layer ?? ''),
-      kind: row.kind === null || row.kind === undefined ? '' : String(row.kind),
+      kind: row.kind === null || row.kind === undefined
+        ? ''
+        // Story 11.4 / T5：未迁移旧库（只读）里的 `persona` 按只读别名读成 `user_portrait`，
+        // recall 结果与迁移前的行为一致（不改行、不迁移）。
+        : canonicalizeMemoryKind(String(row.kind)),
       priority: Number(row.priority ?? 0),
       text: String(row.text ?? ''),
       recordedAt: String(row.recorded_at ?? ''),

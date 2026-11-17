@@ -132,8 +132,8 @@ const factsJson = (facts: readonly unknown[]): string => JSON.stringify({ facts 
 describe('F3：精炼写 L1 同事务建 EVIDENCE 边（AC2）', () => {
   it('成功路径：l0_raw→L1 边与节点同事务落库，checkReachableToL0 判据②通过', async () => {
     const item = await claimWithL0('ok')
-    const result = await makeProcessor(scriptedLlm(factsJson([{ text: '用户偏好中文', kind: 'persona', priority: 1 }])))(item)
-    expect(result).toEqual({ completed: true, kinds: ['persona'] })
+    const result = await makeProcessor(scriptedLlm(factsJson([{ text: '用户偏好中文', kind: 'user_portrait', priority: 1 }])))(item)
+    expect(result).toEqual({ completed: true, kinds: ['user_portrait'] })
 
     const nodeId = memoryNodeId(MEMORY_REMEMBER_LAYER, '用户偏好中文')
     expect(await evidenceEdges()).toEqual([{ from: item.id, to: nodeId, reason: 'refine' }])
