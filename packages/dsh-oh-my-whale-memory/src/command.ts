@@ -417,6 +417,31 @@ export interface MemoryStatusSnapshot {
    * 算不出来（渲染成「未知」，与 auditGap / evidenceGap 同一约定，不静默报 0）。
    */
   readonly selfKnowledge?: MemorySelfKnowledgeCounts | null
+  /**
+   * Story 9.1 / T7、AD-31:443：本体闸门的 `ontology:` 行（level + 各维丢弃计数）。
+   * `undefined` = 调用方未提供（不渲染该行，既有逐行输出逐字不变）；`drops=null` = 算不出来
+   * （审计表缺失 / 只读实例降级），渲染成 `n/a`，不静默报 0。
+   */
+  readonly ontology?: MemoryOntologyView
+}
+
+/** Story 9.1：本体闸门的六维丢弃桶（与 `ontology/gate.ts` 的维度键逐字一致）。 */
+export interface MemoryOntologyDropCounts {
+  readonly nameNormalization: number
+  readonly duplicateTypeDiscard: number
+  readonly entityType: number
+  readonly relationType: number
+  readonly domainRange: number
+  readonly datatype: number
+}
+
+/** Story 9.1：`/memory status` 的 ontology 行数据（level + 逐维丢弃计数）。 */
+export interface MemoryOntologyView {
+  readonly level: 'off' | 'align' | 'strict'
+  /** null = 算不出来（审计表缺失 / 只读实例），渲染 n/a；不是「0 条」。 */
+  readonly drops: MemoryOntologyDropCounts | null
+  /** drops=null 时的可读原因（缺省按「审计表缺失」）。 */
+  readonly unavailableReason?: string
 }
 
 /**
@@ -983,6 +1008,8 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   lines.push(...renderPersonaStatusLines(snapshot))
   // Story 11.3 / T6：Self-Knowledge 计数行（紧随 persona；缺省不追加，既有钉死块逐字不变）。
   lines.push(...renderSelfKnowledgeStatusLines(snapshot))
+  // Story 9.1 / T7：本体闸门行（level + 逐维丢弃计数；缺省不追加，既有钉死块逐字不变）。
+  lines.push(...renderOntologyStatusLines(snapshot))
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
   lines.push(...renderHealthStatusLines(snapshot))
@@ -1284,6 +1311,31 @@ function renderSelfKnowledgeStatusLines(snapshot: MemoryStatusSnapshot): string[
   return [
     `self_knowledge: candidate=${counts.candidate} accepted=${counts.accepted} ` +
     `rejected=${counts.rejected} record-only=${counts.recordOnly}`,
+  ]
+}
+
+/**
+ * `ontology:` 行（Story 9.1 / T7、AD-31:443）。
+ *
+ * - `off`：闸门关闭，只打印 `ontology: off`（默认态，行为与未启用本体逐条一致）；
+ * - 非 off + 有计数：`ontology: align name-normalization=0 duplicate-type-discard=0 ...`；
+ * - 非 off + 算不出来（审计表缺失 / 只读实例）：`ontology: align n/a（原因）`。
+ *   缺省（undefined）不渲染该行，保持既有钉死块逐字不变。
+ */
+function renderOntologyStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.ontology
+  if (view === undefined) return []
+  if (view.level === 'off') return ['ontology: off']
+  if (view.drops === null) {
+    return [`ontology: ${view.level} n/a（${view.unavailableReason ?? '审计表缺失'}）`]
+  }
+  return [
+    `ontology: ${view.level} name-normalization=${view.drops.nameNormalization}` +
+    ` duplicate-type-discard=${view.drops.duplicateTypeDiscard}` +
+    ` entity-type=${view.drops.entityType}` +
+    ` relation-type=${view.drops.relationType}` +
+    ` domain-range=${view.drops.domainRange}` +
+    ` datatype=${view.drops.datatype}`,
   ]
 }
 

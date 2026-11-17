@@ -17,6 +17,7 @@ import { expireStrategyCandidates, strategyStats } from '../strategy/candidates.
 import { readCompactionStatus, type AttributionSnapshot } from '../context/status.js'
 import { compactionModeLabel, resolveCompactionMode } from '../context/compaction-delegate.js'
 import type { MemoryContextLedgerView, MemoryReflectionView } from '../command.js'
+import { countOntologyDrops } from '../ontology/ledger.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import { readDeclaredSchemaVersion } from '../db/migrate.js'
 import { TARGET_SCHEMA_VERSION } from '../db/migrations.js'
@@ -227,6 +228,14 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 11.3 / T6：Self-Knowledge 三态计数 + record-only（审计面，不含正文）。
       // 缺表（旧库只读、未迁移 0011）⇒ null = 渲染「未知」，与 auditGap / strategyGate 同一约定。
       selfKnowledge: await countsByState(connection).catch(() => null),
+      // Story 9.1 / T7：本体闸门行。off 恒打印 off；只读实例与缺表都渲染 n/a（不静默报 0）。
+      ontology: await (async () => {
+        const level = options.resolved.ontologyGate.level
+        if (level === 'off') return { level, drops: null }
+        if (readonlyState.readonly) return { level, drops: null, unavailableReason: '只读实例' }
+        const drops = await countOntologyDrops(connection)
+        return drops === null ? { level, drops: null } : { level, drops }
+      })(),
       // Story 8.1：上下文归因（进程内快照）与压缩运行（落库）。
       contextLedger: mapContextLedger(options.contextLedgerView?.() ?? null),
       compaction: await readCompactionStatus(connection)

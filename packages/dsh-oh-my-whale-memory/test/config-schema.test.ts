@@ -43,6 +43,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
       'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'injectionTokenCap',
       'layerWeights', 'llmModel', 'llmProvider',
+      // Story 9.1 / AD-31：本体闸门档位 + 逐维覆盖（默认 level=off）。
+      'ontologyGate',
       // Story 11.2 / AD-38：Persona Spec 静态 section 开关（默认 false，运行期可覆盖）。
       'personaSpecEnabled',
       'priorityWeight',
@@ -119,6 +121,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.personaSpecEnabled.get()).toBe(false)
     // Story 11.3 / T5：Self-Knowledge 采集开关默认**关**（关闭时反思零候选，fail-closed）。
     expect(resolved.selfKnowledgeCaptureEnabled.get()).toBe(false)
+    // Story 9.1 / AD-31：本体闸门默认 off（默认行为与未启用本体逐条一致）。
+    expect(resolved.ontologyGate.get()).toEqual({ level: 'off' })
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
