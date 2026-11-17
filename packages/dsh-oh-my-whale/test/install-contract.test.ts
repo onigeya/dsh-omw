@@ -129,8 +129,10 @@ describe('发布 files 契约', () => {
     expect(pkg.files).toEqual(expect.arrayContaining(['cordis.patch.yml', 'lib/index.js', 'lib/**/*.d.ts']))
   })
 
-  it('memory 包 files 恰含两个入口产物与 lib/types（AD-35 白名单）', () => {
-    // Story 8.3：多了压缩 provider 的子路径入口产物 lib/compaction.js。
-    expect(memoryPkg.files).toEqual(['lib/index.js', 'lib/compaction.js', 'lib/types'])
+  it('memory 包 files 含两个入口产物、共享 chunk 通配与 lib/types（AD-35 白名单）', () => {
+    // Story 8.3：多了压缩 provider 的子路径入口产物 lib/compaction.js；
+    // 多入口构建会被 rolldown 拆出共享 chunk（如 lib/fold-<hash>.js），所以必须允许 lib/*.js，
+    // 否则 tarball 缺 chunk、装完 import 即失败（Story 8.3 收口 P0）。
+    expect(memoryPkg.files).toEqual(['lib/index.js', 'lib/compaction.js', 'lib/*.js', 'lib/types'])
   })
 })

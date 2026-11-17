@@ -5,7 +5,9 @@
  * `package.json` 与包内**实际存在的** `README*` / `LICENSE*`，剩余集合必须恰好等于
  * 发布形态允许的集合。允许集合用 glob 表达（`.d.ts` 不写死文件名）：
  * - bundle（`dsh-oh-my-whale`）：`cordis.patch.yml` + `lib/index.js` + `lib/**\/*.d.ts`；
- * - memory（`dsh-oh-my-whale-memory`）：`lib/index.js` + `lib/types/**`。
+ * - memory（`dsh-oh-my-whale-memory`）：`lib/*.js`（入口 + rolldown 的共享 chunk）+
+ *   `lib/types/**`。多入口构建会把共享模块拆成 `lib/<name>-<hash>.js`，所以不能只允许
+ *   两个入口文件（Story 8.3 收口发现：只白名单两个入口 ⇒ tarball 缺 chunk ⇒ 装完即崩）。
  * 两边都显式拒绝 `src/`、`test/`、`node_modules/` 与非 `.d.ts` 的 `.ts`，失败时点名条目。
  *
  * 这是纯函数模块：不读文件、不 spawn，两个脚本各自负责 `pnpm pack` 与输出格式。
@@ -31,7 +33,7 @@ export const TARBALL_SPECS = {
     packageName: 'dsh-oh-my-whale-memory',
     dir: 'packages/dsh-oh-my-whale-memory',
     allowed: [
-      { pattern: /^lib\/index\.js$/, label: 'lib/index.js' },
+      { pattern: /^lib\/[^/]+\.js$/, label: 'lib/*.js（入口 + 共享 chunk）' },
       { pattern: /^lib\/types\/.+/, label: 'lib/types/**' },
     ],
     required: [

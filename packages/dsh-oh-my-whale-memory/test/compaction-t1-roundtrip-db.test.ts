@@ -7,7 +7,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
-import { buildT1Summary, fnv1aAnchor, renderRegionText } from '../src/context/compaction-t1'
+import { buildT1Summary, fnv1aAnchor, renderRegionText, summarizeWithT1 } from '../src/context/compaction-t1'
 import { readHandle, writeHandle } from '../src/context/handles'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -60,10 +60,35 @@ describe('T1 句柄往返（NFR18）', () => {
         return { id: record.id }
       },
     })
-        const block = summary.summary[0]?.text ?? ''
+    const block = summary.summary[0]?.text ?? ''
     expect(block).toMatch(/^\[omw:handle=.+ ~\d+ tokens\]$/)
     const rendered = renderRegionText(messages)
     expect(rendered).toBe('[user]\n原始需求')
   })
+
+  it('NFR18 闭环：摘要块 → handle id → 回读 === 渲染原文（不经 memory_expand 工具）', async () => {
+    const messages = [
+      { role: 'system', content: 'head' },
+      { role: 'user', content: '第一行\n第二行' },
+      { role: 'assistant', content: [{ type: 'text', text: '答复' }] },
+    ]
+    const outcome = await summarizeWithT1({
+      messages,
+      sessionId: 's-t1c',
+      readonly: false,
+      writeHandle: async (input) => {
+        const record = await writeHandle(store.connection, { ...input, recordedAt: ISO })
+        return { id: record.id }
+      },
+      fallback: () => Promise.reject(new Error('不应走到 stock 摘要')),
+    })
+    expect(outcome.route).toBe('t1')
+    const block = (outcome.result as { summary: Array<{ text?: string }> }).summary[0]?.text ?? ''
+    const id = /\[omw:handle=([^\s\]]+)/.exec(block)?.[1]
+    expect(id).toBeTruthy()
+    const restored = await readHandle(store.connection, String(id))
+    expect(restored?.text).toBe(renderRegionText(messages))
+  })
 })
+
 
