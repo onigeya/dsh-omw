@@ -141,6 +141,8 @@ function statusText(
   else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
   // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入，未知）。
   lines.push('injection: 未知（本实例尚未触发开局注入）')
+  // Story 11.2 / T5：Persona Spec 批准门默认关闭 ⇒ 恒打印 disabled(awaiting-approval)。
+  lines.push('persona: disabled(awaiting-approval)')
   // Story 4.3 / D-1：健康五行追加在末尾（只增不改）。本夹具的两个队列表都是空的
   //（SEEDS 里带 L1_INBOX 层名的是 memory 行，不是队列条目），故「无积压 / 从未精炼」。
   lines.push(
@@ -482,6 +484,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'uncertain: 未知（审计表缺失）',
         // Story 3.3 / B4：只读夹具未触发开局注入，末行「未知」（恒打印，便于断言三态）。
         'injection: 未知（本实例尚未触发开局注入）',
+        // Story 11.2 / T5：只读实例同样只读配置态；批准门关闭 ⇒ disabled(awaiting-approval)。
+        'persona: disabled(awaiting-approval)',
         // Story 4.3 / D-1：健康五行（只读实例同样读得到；队列表在但为空）。
         'inbox_backlog: n/a（无积压）',
         'last_refine_at: n/a（从未完成精炼）',

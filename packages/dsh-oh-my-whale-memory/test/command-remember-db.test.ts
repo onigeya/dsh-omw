@@ -123,6 +123,8 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'readonly: false',
       'evidence_gap: 1（EII 1 / 漂移 0）',
       'injection: 未知（本实例尚未触发开局注入）',
+      // Story 11.2 / T5：Persona Spec 批准门默认关闭 ⇒ disabled(awaiting-approval)。
+      'persona: disabled(awaiting-approval)',
       // Story 4.3 / D-1：健康五行追加在末尾（本文件只写 memory 行，两个队列都是空的）。
       'inbox_backlog: n/a（无积压）',
       'last_refine_at: n/a（从未完成精炼）',

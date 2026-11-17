@@ -71,6 +71,9 @@ export const MEMORY_CONFIG_DEFAULTS = {
   purifyR2: false,
   purifyR3: true,
   purifyMinRemainder: 24,
+  // Story 11.2 / AD-38：Persona Spec 静态 section 的开关。默认**关**——Spec 正文尚未经
+  // 产品负责人批准（ADR-11.1 决策 2），打开也只是 no-op（未批准/空正文仍不注册）。
+  personaSpecEnabled: false,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -197,6 +200,12 @@ export const Config = Schema.object({
   purifyR2: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.purifyR2).volatile(),
   purifyR3: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.purifyR3).volatile(),
   purifyMinRemainder: Schema.number().default(MEMORY_CONFIG_DEFAULTS.purifyMinRemainder).volatile(),
+  /**
+   * Story 11.2 / AD-38：Persona Spec 静态 section 的总开关（默认 false）。
+   * 打开不等于注入：正文还必须经产品负责人批准（`PERSONA_SPEC_APPROVED`）且非空，
+   * 三者同时成立才注册 `omw-persona`；批准前的默认语义是「没有静态人设承诺」。
+   */
+  personaSpecEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.personaSpecEnabled).volatile(),
 })
 
 /**
@@ -257,6 +266,11 @@ export interface RuntimeConfig {
    * `PurifyOptions`；**本文件不 import 它**，kernel 不得依赖 domain 层）。
    */
   purify: { r1: boolean; r2: boolean; r3: boolean; minRemainder: number }
+  /**
+   * Story 11.2 / AD-38：Persona Spec 静态 section 开关（默认 false）。
+   * 打开后仍需 `PERSONA_SPEC_APPROVED` 为真且正文非空才注册（批准门在 `persona/spec.ts`）。
+   */
+  personaSpecEnabled: boolean
   warnings: string[]
 }
 
@@ -348,6 +362,7 @@ export function resolveRuntimeConfig(config: {
     purifyR2?: Getter<boolean>
     purifyR3?: Getter<boolean>
     purifyMinRemainder?: Getter<number>
+    personaSpecEnabled?: Getter<boolean>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -477,6 +492,9 @@ export function resolveRuntimeConfig(config: {
     'purifyMinRemainder',
     read(config.purifyMinRemainder ?? MEMORY_CONFIG_DEFAULTS.purifyMinRemainder),
   )
+  // Story 11.2 / AD-38：Persona Spec 开关。布尔保持原样（缺省取 schema 同源默认值 = false）；
+  // 打开也不代表会注入——批准门与空正文判据在 persona/spec.ts。
+  const personaSpecEnabled = read(config.personaSpecEnabled ?? MEMORY_CONFIG_DEFAULTS.personaSpecEnabled) === true
   // ratio 的负数/非有限值不抛错：语义是「预算 0 + 可见告警」（AC:1832，由 T1 产出 warning）。
   const injectionRatio = Number(read(config.injectionRatio ?? MEMORY_CONFIG_DEFAULTS.injectionRatio))
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
@@ -561,6 +579,7 @@ export function resolveRuntimeConfig(config: {
     alwaysOnTokenCap,
     // Story 8.6 / AC:1868：净化选项与 schema 的 `default(...)` 同源（MEMORY_CONFIG_DEFAULTS）。
     purify: { r1: purifyR1, r2: purifyR2, r3: purifyR3, minRemainder: purifyMinRemainder },
+    personaSpecEnabled,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -605,4 +624,5 @@ export interface ConfigShape {
   purifyR2: Volatile<boolean>
   purifyR3: Volatile<boolean>
   purifyMinRemainder: Volatile<number>
+  personaSpecEnabled: Volatile<boolean>
 }

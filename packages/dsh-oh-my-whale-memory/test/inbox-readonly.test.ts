@@ -108,6 +108,7 @@ function makeCtx(
   onEvents: string[],
   warnLog: string[],
   infoLog: string[],
+  sections: string[] = [],
 ): Parameters<typeof plugin.apply>[0] {
   return {
     logger: {
@@ -131,6 +132,11 @@ function makeCtx(
     on: (event: string) => {
       onEvents.push(event)
       return () => {}
+    },
+    // Story 11.2：捕获静态 section 注册（只读实例不得出现 omw-persona）。
+    systemPrompt: {
+      section: (entry: { name: string }) => { sections.push(entry.name); return () => {} },
+      context: () => () => {},
     },
   } as unknown as Parameters<typeof plugin.apply>[0]
 }
@@ -189,6 +195,40 @@ describe('AC4 相邻：status 读队列表缺表时照抛（不静默报 0）', 
       expect(result.kind).toBe('error')
       expect(result.text).toMatch(/l1_inbox/)
       expect(result.text).not.toContain('failed: 0')
+    } finally {
+      await writer.stop()
+    }
+  }, 30_000)
+})
+
+/**
+ * Story 11.2 / 矩阵行 7：只读实例不注册 `omw-persona`。
+ *
+ * 这里是唯一能真实构造「第二实例降级只读」的装配面（AD-12 的跨进程语义）。即使 Config 把
+ * persona 开关打开（`personaSpecEnabled=true`），只读实例也只注册既有 `omw-memory`；
+ * 批准门是另一道闸（正文未批准 ⇒ 写者实例同样不注册，见 persona-spec.test.ts）。
+ * status 行不在这里断言：本夹具刻意只建部分表（status 读全量表会照抛），awaiting-approval
+ * 的渲染由 persona-spec / command-status-db 的真实 apply 夹具覆盖。
+ */
+describe('Story 11.2：只读实例不注册 omw-persona（矩阵行 7）', () => {
+  it('personaSpecEnabled=true 的只读实例只注册 omw-memory', async () => {
+    const dir = await makeTempDir('omw-persona-readonly-')
+    const dbPath = resolveMemoryDbPath(dir)
+    const writer = await startWriterInstance(dbPath, buildReadonlyStatements(DIM))
+    try {
+      const registeredDefs: MemoryCommandDefinition[] = []
+      const onEvents: string[] = []
+      const warnLog: string[] = []
+      const infoLog: string[] = []
+      const sections: string[] = []
+      await plugin.apply(
+        makeCtx(dir, registeredDefs, onEvents, warnLog, infoLog, sections),
+        { ...EMBEDDING_CONFIG, personaSpecEnabled: true },
+      )
+
+      expect(plugin.memoryRuntimeState().readonly).toBe(true)
+      // 注入面照常（写者与只读都要有 omw-memory）；persona section 只属写者路径。
+      expect(sections).toEqual(['omw-memory'])
     } finally {
       await writer.stop()
     }
