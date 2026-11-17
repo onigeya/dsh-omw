@@ -265,6 +265,33 @@ describe('renderMemoryStatus：开局注入两行（Story 3.3 / B4）', () => {
   })
 })
 
+describe('renderMemoryStatus：persona 行（Story 11.2 / T5）', () => {
+  it('缺省（调用方未提供）⇒ 不渲染该行，既有钉死输出逐字不变', () => {
+    expect(renderMemoryStatus(STATUS_BASE)).not.toContain('persona:')
+  })
+
+  it('未启用 / 未批准 / 空正文（null）⇒ disabled(awaiting-approval)', () => {
+    expect(renderMemoryStatus({ ...STATUS_BASE, persona: null }))
+      .toContain('persona: disabled(awaiting-approval)')
+  })
+
+  it('已批准 ⇒ `<version> hash=<前 12 位>`，且不再出现 disabled 文案', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      persona: { version: 'draft-0', hash: '0123456789abcdef0123456789abcdef' },
+    })
+    expect(text).toContain('persona: draft-0 hash=0123456789ab')
+    expect(text).not.toContain('disabled(awaiting-approval)')
+  })
+
+  it('行位置紧随 injection 行（同一注入面可见性块）', () => {
+    const lines = renderMemoryStatus({ ...STATUS_BASE, persona: null }).split('\n')
+    const injectionIndex = lines.indexOf('injection: 未知（本实例尚未触发开局注入）')
+    expect(injectionIndex).toBeGreaterThan(-1)
+    expect(lines[injectionIndex + 1]).toBe('persona: disabled(awaiting-approval)')
+  })
+})
+
 describe('createMemoryCommandDefinition（status 分支）', () => {
   it('description / hint 必须同时反映四个子命令，否则文案回归无人发现', () => {
     const definition = createMemoryCommandDefinition(makeDeps())

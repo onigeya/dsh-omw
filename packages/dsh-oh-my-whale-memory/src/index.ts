@@ -48,6 +48,8 @@ import { wireInjection } from './wire/injection.js'
 import { createInjectionStore } from './injection/state.js'
 import { readSkeletonFacts } from './injection/skeleton.js'
 import { wireMemoryLifecycle } from './wire/lifecycle.js'
+import { wirePersonaSection } from './wire/persona.js'
+import { PERSONA_SPEC, PERSONA_SPEC_APPROVED } from './persona/spec.js'
 import { wireCapture } from './wire/capture.js'
 import { createDistillWiring } from './wire/distill.js'
 import { createPromotionWiring, reclaimInboxOnStartup, startInboxConsumers } from './wire/inbox.js'
@@ -452,6 +454,16 @@ export async function apply(
   }
 
   ctx.logger.info(`记忆库就绪：${dbPath}（dim=${embedding.dim}，model=${embedding.modelId}）`)
+
+  // Story 11.2 / AD-38：Persona Spec 静态 section（`omw-persona`，与 `omw-memory` 独立）。
+  // 只读实例在上面已早退 ⇒ 不注册（矩阵行 7）；默认关闭 + 正文未批准 + 空正文 ⇒
+  // `renderPersonaSection` 返回 null，连 `systemPrompt.section` 都不调用（矩阵行 1–2）。
+  // 注册失败只 warn（`wirePersonaSection` 内部收敛；`wireStep` 再兜一层单元隔离）。
+  await wireStep('persona', () => wirePersonaSection(ctx, {
+    enabled: resolved.personaSpecEnabled,
+    approved: PERSONA_SPEC_APPROVED,
+    spec: PERSONA_SPEC,
+  }))
 
   // Story 2.2：写者实例的最后一段接线（只读实例在上面已 return，不回收 lease、不启动消费者，AC7）。
   // 空闲闸门由 session/event 的 turn/start~turn/end 驱动（AD-6），消费者与监听器必须共享同一实例。

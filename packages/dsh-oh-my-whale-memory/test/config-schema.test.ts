@@ -42,7 +42,10 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       'compactionOrphanTimeoutMs', 'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding',
       'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
       'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'injectionTokenCap',
-      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight',
+      'layerWeights', 'llmModel', 'llmProvider',
+      // Story 11.2 / AD-38：Persona Spec 静态 section 开关（默认 false，运行期可覆盖）。
+      'personaSpecEnabled',
+      'priorityWeight',
       // Story 8.6 / AC:1868：确定性净化 pass 的四个开关。
       'purifyMinRemainder', 'purifyR1', 'purifyR2', 'purifyR3',
       'reflection', 'rerank',
@@ -109,6 +112,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.purifyR2.get()).toBe(false)
     expect(resolved.purifyR3.get()).toBe(true)
     expect(resolved.purifyMinRemainder.get()).toBe(24)
+    // Story 11.2 / T2：Persona Spec 开关默认**关**（正文未获产品负责人批准）。
+    expect(resolved.personaSpecEnabled.get()).toBe(false)
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
@@ -462,5 +467,27 @@ describe('Story 8.5：注入预算字段（tokens）', () => {
     for (const field of ['injectionTokenCap', 'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'alwaysOnTokenCap']) {
       expect(dict[field]?.meta?.volatile, field).toBe(true)
     }
+  })
+})
+
+/**
+ * Story 11.2 / T2：Persona Spec 开关（AD-38）。
+ * 默认关（Spec 正文未经产品负责人批准）、运行期可覆盖（INV-12）、schema 默认与 resolved 兜底同源。
+ */
+describe('Story 11.2：Persona Spec 开关', () => {
+  it('默认关闭，且 schema 默认值与 resolved 兜底同源', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    expect(schemaResolved.personaSpecEnabled.get()).toBe(false)
+    // 降级 warn 与本字段无关：用全合法配置只钉该字段。
+    expect(resolveRuntimeConfig(validConfig()).personaSpecEnabled).toBe(false)
+  })
+
+  it('运行期可覆盖（volatile，INV-12）：true 生效', () => {
+    expect(resolveRuntimeConfig({ ...validConfig(), personaSpecEnabled: true }).personaSpecEnabled).toBe(true)
+  })
+
+  it('volatile 标记存在（否则不进 /settings 表单，AD-11）', () => {
+    const dict = Config.dict as Record<string, any>
+    expect(dict.personaSpecEnabled?.meta?.volatile).toBe(true)
   })
 })

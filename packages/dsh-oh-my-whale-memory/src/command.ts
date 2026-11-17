@@ -30,6 +30,7 @@ import {
 } from './shared/memory-vocab.js'
 import { summarizeMemoryText } from './shared/summarize.js'
 import type { LastInjectionSummary } from './injection/state.js'
+import type { PersonaStatus } from './persona/spec.js'
 import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 
 /** 宿主命令名（小写、无前导斜杠）。 */
@@ -353,6 +354,12 @@ export interface MemoryStatusSnapshot {
    * 缺省按 true 处理（既有夹具无需改动即向后兼容）。
    */
   readonly injectionEnabled?: boolean
+  /**
+   * Story 11.2 / T5：Persona Spec 静态 section 的三态。`undefined` = 调用方未提供（不渲染该行，
+   * 既有逐行输出逐字不变）；`null` = 未启用 / 未批准 / 空正文 ⇒ `disabled(awaiting-approval)`；
+   * 非 null ⇒ `<version> hash=<前 12 位>`（hash 由正文的 sha256 决定，跨会话稳定）。
+   */
+  readonly persona?: PersonaStatus | null
   /**
    * 健康指标（Story 4.3）：积压时长 / 最近精炼完成时刻。**缺省 ⇒ 不追加任何行**，
    * 既有钉死输出逐字不变（矩阵行 11）；只有真实读路径（`src/wire/access.ts`）会填。
@@ -954,6 +961,8 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   // Story 3.3 / B4：开局注入的可见性（末尾追加，既有行逐字不动）。恒打印一行，
   // 让「Config 关闭」「从未注入」「已注入」三态都可断言；预算超限再追加一行（INV-2 提示）。
   lines.push(...renderInjectionStatusLines(snapshot))
+  // Story 11.2 / T5：Persona Spec 的可见性（紧随注入面；缺省不追加，既有钉死块逐字不变）。
+  lines.push(...renderPersonaStatusLines(snapshot))
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
   lines.push(...renderHealthStatusLines(snapshot))
@@ -1224,6 +1233,20 @@ function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
     lines.push('injection: 预算超限（不可删集合先保留）')
   }
   return lines
+}
+
+/**
+ * Persona Spec 行（Story 11.2 / T5）：
+ * - 缺省（undefined）= 调用方没有这项数据 ⇒ 不渲染该行（既有逐行输出不变）；
+ * - null = 未启用 / 未批准 / 空正文 ⇒ `disabled(awaiting-approval)`（批准门 fail-closed 的
+ *   可见解释，不打印占位文本或推断人设）；
+ * - 非 null ⇒ `<version> hash=<前 12 位>`（版本与正文摘要并列，便于跨会话核对同一版本）。
+ */
+function renderPersonaStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  const persona = snapshot.persona
+  if (persona === undefined) return []
+  if (persona === null) return ['persona: disabled(awaiting-approval)']
+  return [`persona: ${persona.version} hash=${persona.hash.slice(0, 12)}`]
 }
 
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
