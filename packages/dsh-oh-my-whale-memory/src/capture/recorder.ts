@@ -19,6 +19,13 @@ import { runInTransaction } from '../db/transaction.js'
 import { trackInboxBackgroundTask } from '../inbox/consumer.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import { writeInboxItem } from '../inbox/queue.js'
+import { recordPurifyRun } from '../context/purify-ledger.js'
+import {
+  purifyMessages,
+  type PurifyMessageLike,
+  type PurifyOptions,
+  type PurifyRule,
+} from '../context/purify.js'
 import { createStepCounter, type StepCounter } from './step-counter.js'
 import { cleanStaleSnapshotTemps, listSnapshots, removeSnapshot, writeSnapshot } from './snapshot-store.js'
 import { renderTranscript, sessionMessages } from './transcript.js'
@@ -57,6 +64,11 @@ export interface CaptureRecorderOptions {
    * 只接收已落库的正文与时刻，不传 session（避免回调方持有宿主对象）。
    */
   readonly onTurnCaptured?: (input: { readonly text: string; readonly recordedAt: Date }) => void
+  /**
+   * Story 8.6 / T4、AC:1896：L1_INBOX 入队前的确定性净化（非 user 段；user 原话不净化）。
+   * 缺省 = 模块默认（R1 + R3 开、R2 关）。L0 始终写**原文**（append-only，NFR10）。
+   */
+  readonly purify?: PurifyOptions
 }
 
 export interface CaptureRecorder {
@@ -73,7 +85,17 @@ interface CaptureEntry {
   readonly kind: string
   readonly sessionId: string
   readonly ref: string
+  /** L0 原文（append-only，永不被净化改写）。 */
   readonly text: string
+  /** L1_INBOX 入队正文（= 净化后的非 user 段；无改动时与 `text` 相同）。 */
+  readonly inboxText: string
+  /** 净化账本数据（无改动时 null）。 */
+  readonly purify: {
+    readonly ruleHits: readonly PurifyRule[]
+    readonly removedChars: number
+    readonly removedTokens: number
+    readonly sourceChars: number
+  } | null
   readonly actor: string
   readonly recordedAt: Date
 }
@@ -99,20 +121,36 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     if (!connection) throw new Error('记忆库未就绪：采集写入放弃')
     const stableKey = captureStableKey(entry.kind, entry.sessionId, entry.ref)
     await runInTransaction(connection, async () => {
+      // L0 原文：append-only，净化**不**写回这里（INV-1 / NFR10）。
       await writeL0Raw(connection, {
         id: l0RawId(stableKey),
         text: entry.text,
         recordedAt: entry.recordedAt,
         actor: entry.actor,
       })
+      // L1_INBOX：入队前已净化（Story 8.6 / AC:1896）。
       await writeInboxItem(connection, {
         id: l0RawId(stableKey),
-        payload: entry.text,
+        payload: entry.inboxText,
         sessionId: entry.sessionId,
         kind: entry.kind,
         now: entry.recordedAt,
       })
     })
+    // Story 8.6 / T5：落库成功后记一行净化账本（写失败只 warn，不影响采集）。
+    if (entry.purify !== null && entry.inboxText !== entry.text) {
+      await recordPurifyRun(
+        {
+          sessionId: entry.sessionId,
+          rangeStart: 0,
+          rangeEnd: entry.purify.sourceChars,
+          ruleHits: entry.purify.ruleHits,
+          removedChars: entry.purify.removedChars,
+          removedTokens: entry.purify.removedTokens,
+        },
+        { logger: options.logger },
+      )
+    }
   }
 
   /** 登记后台落库：异常只记 warn，不逃逸到 session/event 发射方。 */
@@ -124,11 +162,25 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
 
   function entryFor(kind: string, session: unknown, ref: string): CaptureEntry {
     const sessionId = inboxSessionKey(session)
+    const messages = sessionMessages(session)
+    const text = renderTranscript(messages)
+    // Story 8.6 / T4：只净化非 user 段（assistant.text / assistant.reasoning），
+    // 且只作用于 INBOX 副本；L0 与快照仍用原文（INV-1）。
+    const purified = purifyMessages(messages as readonly PurifyMessageLike[], options.purify ?? null)
     return {
       kind,
       sessionId,
       ref,
-      text: renderTranscript(sessionMessages(session)),
+      text,
+      inboxText: purified.changed ? renderTranscript(purified.messages) : text,
+      purify: purified.changed
+        ? {
+          ruleHits: purified.ruleHits,
+          removedChars: purified.removedChars,
+          removedTokens: purified.removedTokens,
+          sourceChars: purified.sourceChars,
+        }
+        : null,
       actor: sessionId,
       recordedAt: now(),
     }
@@ -170,6 +222,8 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
           sessionId: entry.sessionId,
           ref: entry.ref,
           text: entry.text,
+          // Story 8.6：快照同时存净化后的 INBOX 正文，崩溃重放不必依赖结构化消息。
+          inboxText: entry.inboxText,
           actor: entry.actor,
           recordedAt: entry.recordedAt.toISOString(),
         })
@@ -245,6 +299,10 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
             sessionId: record.sessionId,
             ref: record.ref,
             text: record.text,
+            // 旧快照（净化前的版本）没有 inboxText：回落原文，重放不因缺字段失败。
+            inboxText: record.inboxText ?? record.text,
+            // 崩溃重放不再记净化账本（同一段已入队过，重复记账只增噪声）。
+            purify: null,
             actor: record.actor,
             recordedAt: new Date(record.recordedAt),
           })

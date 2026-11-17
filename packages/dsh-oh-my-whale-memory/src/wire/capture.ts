@@ -40,6 +40,8 @@ export async function wireCapture(options: CaptureWiringOptions): Promise<Captur
     },
     // Story 7.2：把已落库的 turn 正文交给反思计分（AC:1406）。
     onTurnCaptured: options.onTurnCaptured,
+    // Story 8.6 / T4：L1_INBOX 入队前净化非 user 段（L0 仍写原文）。
+    purify: resolved.purify,
   })
   // AC5：启动扫描孤儿快照（有 .snap 文件 = 上一次进程在事务提交前崩溃）并重放入 INBOX。
   const replayedSnapshots = await recorder.replayOrphanSnapshots()

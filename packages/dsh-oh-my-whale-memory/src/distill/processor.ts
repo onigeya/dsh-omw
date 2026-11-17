@@ -32,6 +32,8 @@ import {
   type InboxStatus,
 } from '../inbox/queue.js'
 import { MEMORY_REMEMBER_LAYER } from '../shared/memory-vocab.js'
+import { purifyText, type PurifyOptions, type PurifyRule } from '../context/purify.js'
+import { recordPurifyRun } from '../context/purify-ledger.js'
 import { refineTranscript, type LlmPort, type RefineFailure, type RefineRoute } from './llm-refine.js'
 import type { RelationRunner } from '../wiki/relations.js'
 
@@ -88,6 +90,11 @@ export interface InboxProcessorDeps {
    * embedding 缺失都只跳过关系写入，记忆照常进库（AC:779-782）。不传即完全不跑关系。
    */
   readonly relations?: RelationRunner | null
+  /**
+   * Story 8.6 / T4、AC:1896：节点 `text` **落库前**的确定性净化（精炼口）。
+   * 净化同时作用于写库文本与写时嵌入（两者必须同一份文本，否则向量与正文对不上）。
+   */
+  readonly purify?: PurifyOptions
 }
 
 export interface EmbedFactsResult {
@@ -214,11 +221,27 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       )
     }
 
+    // ②′ Story 8.6 / T4：节点 text 落库前净化（精炼口）。必须发生在**写时嵌入之前**：
+    // 向量与正文是同一份文本，否则召回按旧文本算、节点显示新文本。
+    const purifyHits = new Set<PurifyRule>()
+    let purifyRemovedChars = 0
+    let purifyRemovedTokens = 0
+    let purifySourceChars = 0
+    const facts = refined.facts.map((fact) => {
+      const result = purifyText(fact.text, deps.purify ?? null)
+      purifySourceChars += fact.text.length
+      if (!result.changed) return fact
+      for (const rule of result.ruleHits) purifyHits.add(rule)
+      purifyRemovedChars += result.removedChars
+      purifyRemovedTokens += result.removedTokens
+      return { ...fact, text: result.text }
+    })
+
     // ③ 写时嵌入：在写库事务之前（AC:589）。
     const embedded = await embedTexts(
       deps.embedding,
       deps.embeddingModel,
-      refined.facts.map((fact) => fact.text),
+      facts.map((fact) => fact.text),
       signal,
     )
     if (embedded.failure) {
@@ -260,8 +283,8 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
       await runInTransaction(connection, async () => {
         marked = await markInboxItemDone(connection, item.id, { now: now() })
         if (!marked) return
-        for (let i = 0; i < refined.facts.length; i += 1) {
-          const fact = refined.facts[i]!
+        for (let i = 0; i < facts.length; i += 1) {
+          const fact = facts[i]!
           const vector = embedded.vectors[i] ?? null
           // 评审 T3：coerced 表示「模型没判定」，不是一次重新分类。
           // UPSERT_ON_MATCH 无条件以最新写入为准（Story 1.11 AC4），若直接把缺省值写下去，
@@ -323,7 +346,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
             now,
           )
         }
-        if (refined.facts.some((fact) => fact.coerced)) {
+        if (facts.some((fact) => fact.coerced)) {
           await insertRefineAudit(connection, item.id, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
         }
         if (scanDegraded !== null) {
@@ -353,6 +376,21 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     // marked=false：条目已被处理过（R1 的 at-most-once 命中），本次不写任何产出。
     if (!marked) return { completed: true, kinds: [] }
 
+    // ④′ Story 8.6 / T5：落库成功后记一行净化账本（写失败只 warn，不影响记忆写入）。
+    if (purifyHits.size > 0) {
+      await recordPurifyRun(
+        {
+          sessionId: item.sessionId,
+          rangeStart: 0,
+          rangeEnd: purifySourceChars,
+          ruleHits: [...purifyHits],
+          removedChars: purifyRemovedChars,
+          removedTokens: purifyRemovedTokens,
+        },
+        { logger: deps.logger },
+      )
+    }
+
     // ⑤ 关系识别（Story 2.6 / FR-17）：在 L1 事务之外 best-effort 执行，AC:779-782 明确
     // 「LLM 不可用或关系识别超时 ⇒ 跳过关系写入、记忆仍进库」。复用写时已算的 embedding，
     // 不重算、不新增 ctx.effect；跟随精炼任务的总预算 signal。
@@ -376,6 +414,6 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         deps.logger?.warn('关系识别跑者异常（id=' + item.id + '）：' + message + '——记忆已入库，关系跳过')
       }
     }
-    return { completed: true, kinds: refined.facts.map((fact) => fact.kind) }
+    return { completed: true, kinds: facts.map((fact) => fact.kind) }
   }
 }

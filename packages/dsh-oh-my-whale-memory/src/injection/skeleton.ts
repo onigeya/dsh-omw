@@ -24,6 +24,8 @@ import { MEMORY_TABLE } from '../db/schema.js'
 import { currentSnapshotPredicate } from '../db/snapshot.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import { truncateToTokenCap } from '../recall/injection-budget.js'
+import { purifyText, type PurifyOptions, type PurifyRule } from '../context/purify.js'
+import { recordPurifyRun } from '../context/purify-ledger.js'
 import { SKELETON_CONTEXT_NAME } from '../shared/injection-vocab.js'
 import { estimateTokens } from '../shared/text-budget.js'
 
@@ -180,6 +182,43 @@ export interface SkeletonRefresherOptions {
   /** 绝对上限（Config `alwaysOnTokenCap`；惰性读取以支持运行期覆盖）。 */
   readonly capTokens: () => number
   readonly logger?: { warn(message: string): void }
+  /**
+   * Story 8.6 / T4、AC:1896：**注入口**（FR-25 回注前）的确定性净化。骨架是「逐字回注」
+   * 的不可删事实，净化只作用于渲染副本（库里节点不动）；缺省 = 模块默认开关。
+   */
+  readonly purifyOptions?: () => PurifyOptions
+}
+
+/** 骨架净化：只改渲染用的副本；返回账本聚合（无改动时 `ledger: null`）。 */
+function purifySkeletonFacts(
+  facts: readonly SkeletonFact[],
+  options: PurifyOptions | undefined,
+): {
+  readonly facts: readonly SkeletonFact[]
+  readonly ledger: {
+    readonly ruleHits: readonly PurifyRule[]
+    readonly removedChars: number
+    readonly removedTokens: number
+    readonly sourceChars: number
+  } | null
+} {
+  const hits = new Set<PurifyRule>()
+  let removedChars = 0
+  let removedTokens = 0
+  let sourceChars = 0
+  let changed = false
+  const purified = facts.map((fact) => {
+    const result = purifyText(fact.text, options ?? null)
+    sourceChars += fact.text.length
+    if (!result.changed) return fact
+    changed = true
+    for (const rule of result.ruleHits) hits.add(rule)
+    removedChars += result.removedChars
+    removedTokens += result.removedTokens
+    return { ...fact, text: result.text }
+  })
+  if (!changed) return { facts, ledger: null }
+  return { facts: purified, ledger: { ruleHits: [...hits], removedChars, removedTokens, sourceChars } }
 }
 
 /**
@@ -193,8 +232,23 @@ export function createSkeletonRefresher(
   return async (sessionKey) => {
     try {
       const facts = await options.readFacts()
-      const rendered = renderSkeleton(facts, options.capTokens())
+      // Story 8.6 / T4：回注前净化（只改渲染副本）。
+      const purified = purifySkeletonFacts(facts, options.purifyOptions?.())
+      const rendered = renderSkeleton(purified.facts, options.capTokens())
       options.store.set(sessionKey, rendered.text)
+      if (purified.ledger !== null) {
+        void recordPurifyRun(
+          {
+            sessionId: sessionKey,
+            rangeStart: 0,
+            rangeEnd: purified.ledger.sourceChars,
+            ruleHits: purified.ledger.ruleHits,
+            removedChars: purified.ledger.removedChars,
+            removedTokens: purified.ledger.removedTokens,
+          },
+          { logger: options.logger },
+        )
+      }
       warned.delete(sessionKey)
     } catch (error) {
       options.store.set(sessionKey, '')

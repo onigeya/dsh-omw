@@ -104,6 +104,8 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       store: skeletonStore,
       readFacts: options.skeleton.readFacts,
       capTokens: options.skeleton.capTokens,
+      // Story 8.6 / T4：注入口（FR-25 回注前）净化开关。
+      purifyOptions: () => options.resolved.purify,
       logger: ctx.logger,
     })
 
@@ -125,6 +127,8 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       : routeFromSession(session)),
     logger: ctx.logger,
     budgetMs,
+    // Story 8.6 / T4：注入口净化开关（注入副本，不留痕到库）。
+    purify: options.resolved.purify,
     // Story 8.5 / T2：注入预算改读 T1 的 tokens 公式（窗口/压力缺席即退回绝对上限）。
     resolveBudget: (session) => {
       const pressure = options.contextPressure?.(session)

@@ -31,6 +31,8 @@ import {
 import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../src/embedding/client'
 import { MAX_REFINE_FACT_TOKENS, type LlmPort } from '../src/distill/llm-refine'
 import { MEMORY_REMEMBER_LAYER } from '../src/tools/memory-remember'
+import { DEFAULT_PURIFY_OPTIONS } from '../src/context/purify'
+import { createPurifyLedgerWriter, registerPurifyLedgerWriter, resetPurifyLedgerWriter } from '../src/context/purify-ledger'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
 const DIM = 4
@@ -461,4 +463,52 @@ describe('失败分类与记账（AC:575-581 / N9 / N10）', () => {
     expect(logs).toHaveLength(1)
     expect(logs[0]).toMatchObject({ outcome: 'uncertain', reason: 'provider_error' })
   })
+})
+
+describe('Story 8.6 / T4：精炼口净化（矩阵行 10 / AC:1896）', () => {
+  afterEach(() => {
+    resetPurifyLedgerWriter()
+  })
+
+  it('fact.text 的填充行在落库前被删；写时嵌入用净化后文本；账本一行', async () => {
+    // 账本写入方在生产由 apply 注册；这里用同一实现（真库）验证落库形状。
+    registerPurifyLedgerWriter(createPurifyLedgerWriter({ connection: () => store.connection, now: () => NOW }))
+    const item = await claimFixture('purify', '原文')
+    const dirty = ['Let me…', 'Go.', 'The migration ordering is documented in AD-34 and it matters for replay.'].join('\n')
+    const embeddedTexts: string[][] = []
+    const client: EmbedClient = {
+      embed: async (_model, input) => {
+        embeddedTexts.push([...input])
+        return { ok: true, vectors: input.map(() => [1, 0, 0, 0]) }
+      },
+    }
+    const processor = makeProcessor(scriptedLlm(okOutput([{ text: dirty, kind: 'work_fact', priority: 0 }])).llm, {
+      embedding: client,
+      embeddingModel: MODEL_ID,
+      embeddingModelId: MODEL_ID,
+      purify: DEFAULT_PURIFY_OPTIONS,
+    })
+
+    await processor(item)
+
+    const nodes = await nodesFor(item.id)
+    expect(nodes).toHaveLength(1)
+    const stored = String(nodes[0]!.text)
+    expect(stored).not.toContain('Let me…')
+    expect(stored).toContain('The migration ordering is documented in AD-34')
+    // 写时嵌入与落库正文是同一份文本（否则向量与正文对不上）
+    expect(embeddedTexts[0]?.[0]).toBe(stored)
+    // 账本：一行 purify_text，detail 六字段（矩阵行 12）
+    const logs = await queryAll(
+      store.connection,
+      "MATCH (g:generation_log) WHERE g.kind = 'purify' RETURN g.action AS action, g.detail AS detail",
+    )
+    expect(logs).toHaveLength(1)
+    expect(logs[0]!.action).toBe('purify_text')
+    const detail = JSON.parse(String(logs[0]!.detail)) as Record<string, unknown>
+    expect(detail).toMatchObject({ sessionId: 'sess-1', rangeStart: 0 })
+    expect(Number(detail.removedChars)).toBeGreaterThan(0)
+    expect(Array.isArray(detail.ruleHits)).toBe(true)
+  })
+
 })

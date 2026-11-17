@@ -20,6 +20,11 @@ export interface SnapshotRecord {
   readonly text: string
   readonly actor: string
   readonly recordedAt: string
+  /**
+   * Story 8.6：L1_INBOX 入队正文（已净化的非 user 段）。可选：旧快照没有该字段时
+   * 重放回落 `text`（原文），不因缺字段丢采集。
+   */
+  readonly inboxText?: string
   /** 文件名（listSnapshots 填充；writeSnapshot 入参不需要）。 */
   readonly file?: string
 }
@@ -62,6 +67,10 @@ function snapshotInvalidReason(record: SnapshotRecord): string | null {
   }
   if (typeof record.recordedAt !== 'string' || !Number.isFinite(Date.parse(record.recordedAt))) {
     return 'recordedAt 不是可解析的时间'
+  }
+  // Story 8.6：新字段可选；写了就必须是字符串（空串合法 —— 净化结果为空时 fail-open 回原文）。
+  if (record.inboxText !== undefined && typeof record.inboxText !== 'string') {
+    return 'inboxText 不是字符串'
   }
   if (record.file !== snapshotFileName(record.stableKey)) return 'stableKey 与文件名 sha1 不一致'
   return null
