@@ -153,6 +153,9 @@ function statusText(
     // Story 8.1：上下文归因（本夹具未采集 ⇒ n/a）与压缩运行（0 次）。
     'context_ledger: n/a（本实例尚未采集）',
     'compaction: runs=0',
+    // Story 10.1：本夹具无 tokenMeter/sessionPersistence ⇒ 两条降级行（真实 apply 装配）。
+    'capture_trigger: steps(degraded)',
+    'pointer_persistence: unavailable（sessionPersistence 缺失，L0 走 inline 快照）',
     'backend: native',
   )
   return lines.join('\n')
@@ -496,3 +499,4 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
     }
   }, 30_000)
 })
+

@@ -25,15 +25,14 @@ import type * as lbug from '@ladybugdb/core'
 import { MemoryDbError, isMissingTableError } from './errors.js'
 import { nullishString, queryRows, toStringArray } from './rows.js'
 import { currentSnapshotPredicate } from './snapshot.js'
-import { schemaColumnPresence, type SchemaColumnPresence } from './column-presence.js'
+import { schemaColumnPresence, l0LivePredicate, type SchemaColumnPresence } from './column-presence.js'
 import {
   EVIDENCE_CLOSURE_DEPTH,
   EVIDENCE_TABLE,
   L0_RAW_TABLE,
   MEMORY_TABLE,
   REDACTED_AT_COLUMN,
-  l0EvidencePredicate,
-  l0RawTextPredicate,
+  SEQ_COLUMN,
   notEvidenceDegradedPredicate,
 } from './schema.js'
 
@@ -72,7 +71,9 @@ function readL0Statement(presence: SchemaColumnPresence): string {
   return [
     'MATCH (l:' + L0_RAW_TABLE + ' {id: $id})',
     'RETURN l.raw_text AS raw_text' +
-      (presence.redactedAt ? ', l.' + REDACTED_AT_COLUMN + ' AS ' + REDACTED_AT_COLUMN : ''),
+      (presence.redactedAt ? ', l.' + REDACTED_AT_COLUMN + ' AS ' + REDACTED_AT_COLUMN : '') +
+      // Story 10.1：pointer 行的存活判据需要 seq（缺列的旧库不读这一列，0.22.3 会对未定义属性抛错）。
+      (presence.l0Seq ? ', l.' + SEQ_COLUMN + ' AS ' + SEQ_COLUMN : ''),
   ].join('\n')
 }
 
@@ -143,8 +144,7 @@ function sqlInstant(now: string): string {
  */
 function pathPredicate(nowLiteral: string, presence: SchemaColumnPresence): string {
   return [
-    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND ' +
-      (presence.redactedAt ? l0EvidencePredicate('x') : l0RawTextPredicate('x')) + ')',
+    '  (label(x) = ' + "'" + L0_RAW_TABLE + "'" + ' AND ' + l0LivePredicate('x', presence) + ')',
     '  OR (label(x) = ' + "'" + MEMORY_TABLE + "'" + ' AND ' + currentSnapshotPredicate('x', nowLiteral) + ')',
   ].join('\n')
 }
@@ -202,10 +202,13 @@ export async function checkReachableToL0(
 
 /**
  * 单引用可达性（2.5 判据①，裁决 U1 的口径）：
- * - ref 命中 l0_raw → 直查该行；`raw_text IS NULL` 即 redact 墓碑 ⇒ 'l0-tombstone'；
+ * - ref 命中 l0_raw → 直查该行；墓碑 ⇒ 'l0-tombstone'；
  * - ref 命中 memory → 委托 {@link checkReachableToL0}（沿反向证据闭包验证可达 L0）；
  * - 都不命中 ⇒ 'not-found'。
  * 只读、异常冒泡（同上）。
+ *
+ * Story 10.1：墓碑判据 = `raw_text` 与 `seq` 两者皆空（或 inline 行被 redact 过）。
+ * pointer 行 `raw_text` 为 NULL 但 `seq` 非空 ⇒ 仍是可达 L0（它只是不复制正文）。
  */
 export async function checkRefReachableToL0(
   connection: lbug.Connection,
@@ -215,11 +218,15 @@ export async function checkRefReachableToL0(
   const presence = await schemaColumnPresence(connection)
   const l0Rows = await queryRows(connection, readL0Statement(presence), { id: refId })
   if (l0Rows.length > 0) {
-    const raw = l0Rows[0]?.raw_text
-    const redactedAt = l0Rows[0]?.redacted_at
-    // Story 4.2：墓碑有两种形态——指针行（raw_text NULL，Story 10.1）与 redact 过的 inline 行
-    // （raw_text 仍是墓碑文本，redacted_at 非空）。两者都不再是「可达 L0」。
-    return raw === null || raw === undefined || (redactedAt !== null && redactedAt !== undefined)
+    const row = l0Rows[0]
+    const raw = row?.raw_text
+    const redactedAt = row?.redacted_at
+    const seq = row?.seq
+    const hasRaw = raw !== null && raw !== undefined
+    const hasSeq = seq !== null && seq !== undefined
+    // Story 4.2：redact 过的 inline 行（raw_text 仍是墓碑文本、redacted_at 非空）不是可达 L0。
+    const tombstone = (!hasRaw && !hasSeq) || (redactedAt !== null && redactedAt !== undefined)
+    return tombstone
       ? { id: refId, pass: false, failingReasons: ['l0-tombstone'] }
       : { id: refId, pass: true, failingReasons: [] }
   }

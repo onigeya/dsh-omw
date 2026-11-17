@@ -203,11 +203,15 @@ export async function apply(
 
   // Story 7.2：反思窗口分与熔断状态只在内存里（重启即冷静），由 status 读取。
   const reflectionState = createReflectionState()
+  // Story 10.1：capture 装配在 access 之后；用闭包持「最近一次装配结果」给 status 读。
+  let captureModeView: (() => { readonly trigger: string, readonly persistence: string }) | null = null
   const access = createMemoryAccess({
     getDb,
     resolved,
     readonlyState: () => instance,
     getSystemOneClient: () => slots.systemOneClient,
+    // Story 10.1：采集模式（tokens / steps(degraded)；指针持久化是否可用）。
+    captureModeView: () => captureModeView?.() ?? null,
     // Story 3.3：status 读注入观测摘要（进程内，null=本实例尚未触发注入）。
     injectionStore,
     // Story 8.1：status 的 context_ledger 行读同一个 tap 快照（null ⇒ n/a）。
@@ -540,6 +544,10 @@ export async function apply(
       reflectionExecutor.scheduleAfterIdle()
     },
   }))
+  if (capture !== undefined) {
+    // Story 10.1：status 的 capture_trigger / pointer_persistence 来自真实装配结果。
+    captureModeView = () => capture.captureMode()
+  }
   // Story 2.3–2.6：精炼处理器、关系跑者、向量/EVIDENCE 回填（不注册 effect/定时器）。
   const distill = await wireStep('distill', () => createDistillWiring({
     ctx,
