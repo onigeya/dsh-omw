@@ -16,6 +16,7 @@ import { runPrepared } from '../db/backend.js'
 import { queryRows } from '../db/rows.js'
 import { COMPACTION_RUN_TABLE } from '../db/schema.js'
 import { writeInboxItem } from '../inbox/queue.js'
+import type { CompactionPlanRecord } from './compaction-plan-registry.js'
 import {
   buildCompactionSummaryEntry,
   type CompactionSummaryPayload,
@@ -37,7 +38,8 @@ const INSERT_RUN = [
   'CREATE (:' + COMPACTION_RUN_TABLE + ' {',
   '  id: $id, compaction_id: $compaction_id, session_id: $session_id,',
   '  config_snapshot_json: $config_snapshot_json, started_at: $started_at,',
-  '  shadowed_seqs_json: $shadowed_seqs_json, shadowed_range_json: $shadowed_range_json',
+  '  shadowed_seqs_json: $shadowed_seqs_json, shadowed_range_json: $shadowed_range_json,',
+  '  plan_json: $plan_json, tier: $tier, delegate: $delegate',
   '})',
 ].join('\n')
 
@@ -64,11 +66,17 @@ export async function recordCompactionRun(
     /** 被折叠的 seq 列表（AC:1535 的可回溯证据）。 */
     readonly shadowedSeqs?: readonly number[]
     readonly shadowedRange?: { readonly start: number, readonly end: number } | null
+    /**
+     * Story 8.4：这次压缩的档位计划（`summarize()` 写进注册表）。
+     * 缺省 / null ⇒ tier、plan_json、delegate 三列都写 NULL（矩阵行 6：不编造）。
+     */
+    readonly plan?: CompactionPlanRecord | null
   },
 ): Promise<boolean> {
   const id = compactionRunId(input.sessionId, input.compactionId)
   const existing = await queryRows(connection, READ_RUN, { id }).catch(() => [])
   if (existing.length > 0) return false
+  const plan = input.plan ?? null
   const statement = await connection.prepare(INSERT_RUN)
   await runPrepared(connection, statement, {
     id,
@@ -78,6 +86,9 @@ export async function recordCompactionRun(
     started_at: input.startedAt,
     shadowed_seqs_json: JSON.stringify(input.shadowedSeqs ?? []),
     shadowed_range_json: JSON.stringify(input.shadowedRange ?? null),
+    plan_json: plan === null ? null : JSON.stringify(plan),
+    tier: plan === null ? null : plan.tier,
+    delegate: plan === null ? null : plan.delegate,
   })
   return true
 }
@@ -95,6 +106,8 @@ export async function ingestCompactionSummary(
     readonly configSnapshot: unknown
     readonly startedAt: string
     readonly nowIso: string
+    /** Story 8.4：档位计划（缺省 = 没有 plan，三列写 NULL）。 */
+    readonly plan?: CompactionPlanRecord | null
   },
 ): Promise<CompactionIngestResult> {
   const entry = buildCompactionSummaryEntry(input.payload)
@@ -113,7 +126,9 @@ export async function ingestCompactionSummary(
     startedAt: input.startedAt,
     shadowedSeqs: entry.shadowedSeqs,
     shadowedRange: entry.shadowedRange,
+    plan: input.plan ?? null,
   })
+  const plan = input.plan ?? null
   await auditWriter(connection, {
     recordedAt: input.nowIso,
     actor: 'system',
@@ -126,6 +141,7 @@ export async function ingestCompactionSummary(
     reason:
       'compaction=' + entry.compactionId +
       ' shadowed=' + String(entry.shadowedSeqs.length) +
+      (plan === null ? '' : ' tier=' + plan.tier + ' delegate=' + plan.delegate) +
       (entry.shadowedRange === null ? '' : ' range=' + String(entry.shadowedRange.start) + '..' + String(entry.shadowedRange.end)) +
       (entry.notes.length === 0 ? '' : ' notes=' + entry.notes.join(',')),
   })

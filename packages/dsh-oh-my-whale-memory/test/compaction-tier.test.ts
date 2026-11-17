@@ -18,7 +18,9 @@ import {
   checkLengthMinFloor,
   decideTier,
   isCriteriaUsable,
+  planRegionTier,
 } from '../src/context/compaction-tier'
+import type { T1MessageLike } from '../src/context/compaction-t1'
 
 const CRITERIA = { lengthMin: 1200, t3Threshold: 8000 }
 
@@ -128,8 +130,7 @@ describe('矩阵行 5：同一 (sessionId, compactionId) 重放 ⇒ 档位逐位
   })
 })
 
-describe('lengthMin 硬下界（AC:1798-1801：不用分位数、不静默夹紧）', () => {
-  it('= 最大值 + 余量 ⇒ 通过；差 1 ⇒ 拒绝并报出 requiredMin', () => {
+describe('lengthMin 硬下界（AC:1798-1801：不用分位数、不静默夹紧）', () => {  it('= 最大值 + 余量 ⇒ 通过；差 1 ⇒ 拒绝并报出 requiredMin', () => {
     const maxUserOriginalTokens = 1000
     const required = maxUserOriginalTokens + LENGTH_MIN_SAFETY_MARGIN_TOKENS
     expect(checkLengthMinFloor({ lengthMin: required, maxUserOriginalTokens })).toEqual({ ok: true, requiredMin: required })
@@ -153,5 +154,57 @@ describe('lengthMin 硬下界（AC:1798-1801：不用分位数、不静默夹紧
     const rejected = checkLengthMinFloor({ lengthMin: Number.NaN, maxUserOriginalTokens: 0 })
     expect(rejected.ok).toBe(false)
     if (!rejected.ok) expect(rejected.reason).toBe(TIER_REASON_LENGTH_MIN_FLOOR)
+  })
+})
+
+describe('planRegionTier：区间定档（长度三带 + 硬下界的组合入口）', () => {
+  const assistantText = (size: number): T1MessageLike => ({ role: 'assistant', content: [{ type: 'text', text: 'a'.repeat(size) }] })
+  const userText = (text: string): T1MessageLike => ({ role: 'user', content: [{ type: 'text', text }] })
+
+  it('短区间即使没有 user 原话也归 T1（长度三带优先于 role 分类）', () => {
+    const plan = planRegionTier({ messages: [assistantText(10)], criteria: CRITERIA })
+    expect(plan.tier).toBe('T1')
+    expect(plan.reason).toBe(TIER_REASON_BELOW_LENGTH_MIN)
+    expect(plan.protectedContent).toBe(false)
+    expect(plan.tokens).toBeGreaterThan(0)
+    // 下界总是可观测：无 user 原话时它等于安全余量本身。
+    expect(plan.requiredMin).toBe(LENGTH_MIN_SAFETY_MARGIN_TOKENS)
+  })
+
+  it('长区间（无 user 原话）按 t3Threshold 进 T2 / T3', () => {
+    // estimateTokens：非 CJK 按 4 字符 1 token 折算。
+    expect(planRegionTier({ messages: [assistantText(6000)], criteria: CRITERIA }).tier).toBe('T2')
+    expect(planRegionTier({ messages: [assistantText(40_000)], criteria: CRITERIA }).tier).toBe('T3')
+  })
+
+  it('user 原话 ⇒ T1 且 protectedContent=true（不论长度）', () => {
+    const plan = planRegionTier({ messages: [assistantText(40_000), userText('别忘这件事')], criteria: CRITERIA })
+    expect(plan.tier).toBe('T1')
+    expect(plan.reason).toBe(TIER_REASON_PROTECTED)
+    expect(plan.protectedContent).toBe(true)
+  })
+
+  it('user 原话超过 lengthMin - 余量 ⇒ 下界越界可见；受保护内容仍短路成 T1', () => {
+    // 一条约 1500 token 的 user 原话 + 余量 200 > lengthMin 1200 ⇒ 越界。
+    const longUser = 'u'.repeat(6000)
+    const plan = planRegionTier({ messages: [assistantText(40_000), userText(longUser)], criteria: CRITERIA })
+    expect(plan.tier).toBe('T1')
+    expect(plan.reason).toBe(TIER_REASON_PROTECTED)
+    // 下界是可观测证据：requiredMin 超过配置的 lengthMin，说明这份 lengthMin 撑不住真实语料。
+    expect(plan.requiredMin).toBeGreaterThan(CRITERIA.lengthMin)
+
+    // 没有 user 原话时，下界本身就能把判据否成 T1（不静默夹紧 lengthMin）。
+    const floorOnly = planRegionTier({ messages: [assistantText(40_000)], criteria: { lengthMin: 100, t3Threshold: 8000 } })
+    expect(floorOnly.tier).toBe('T1')
+    expect(floorOnly.reason).toBe(TIER_REASON_LENGTH_MIN_FLOOR)
+    expect(floorOnly.requiredMin).toBe(LENGTH_MIN_SAFETY_MARGIN_TOKENS)
+  })
+
+  it('判据缺失 ⇒ T1 且不做硬下界计算（不抛）', () => {
+    expect(planRegionTier({ messages: [assistantText(40_000)], criteria: null })).toMatchObject({
+      tier: 'T1',
+      reason: TIER_REASON_CRITERIA_UNAVAILABLE,
+      requiredMin: 0,
+    })
   })
 })

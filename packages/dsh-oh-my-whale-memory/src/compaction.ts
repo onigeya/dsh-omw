@@ -13,7 +13,13 @@
  * 这两个包会带来嵌套的 `dsh-llm` 副本，导致与本仓已 pin 的 `dsh-llm` 出现类型双身份。
  */
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import {
+  getCompactionCriteria,
+  registerCompactionPlan,
+  type CompactionPlanRecord,
+} from './context/compaction-plan-registry.js'
 import { summarizeWithT1 } from './context/compaction-t1.js'
+import { planRegionTier } from './context/compaction-tier.js'
 import { getHandleWriter, isCompactionReadonly } from './context/handle-writer.js'
 
 type SummarizeArgs = Parameters<BasicCompactionEngine['summarize']>
@@ -40,19 +46,49 @@ export class OmwCompactionEngine extends BasicCompactionEngine {
   /**
    * 摘要一段被压缩的会话区间（stock 的唯一公开子类定制点）。
    *
-   * 只读实例 / 非 T1 / writer 缺失 / 写失败都由 `summarizeWithT1` 收敛为「委托 stock」，
-   * 这里不再重复判一次（避免两份裁决漂移）。
+   * Story 8.4：先由**代码侧确定性判据**定档（`planRegionTier`，零 LLM），按档位路由：
+   * - T1（受保护内容 / 长度不足 / 判据算不出 / 硬下界越界）⇒ 无损折叠（`summarizeWithT1`）；
+   * - T2/T3 ⇒ 委托 stock 的 LLM 摘要（`super.summarize`），且**不二次派发** `compaction/start`（INV-10）。
+   *
+   * 档位与理由写进模块级注册表，由 `compaction/summary` 的入图侧落 `compaction_run`
+   * （tier / plan_json / delegate）。只读实例 / writer 缺失 / 写失败都由 `summarizeWithT1`
+   * 收敛为「委托 stock」，这里不再重复判一次（避免两份裁决漂移）。
    */
   protected override async summarize(...args: SummarizeArgs): Promise<SummarizeResult> {
-    const outcome = await summarizeWithT1({
-      messages: args[0].messages,
-      sessionId: sessionIdOf(args[1]),
-      readonly: isCompactionReadonly(),
-      writeHandle: getHandleWriter(),
-      fallback: async () => super.summarize(...args),
-      logger: { warn: (message) => this.warn(message) },
-    })
-    return outcome.result
+    const messages = args[0].messages
+    const sessionId = sessionIdOf(args[1])
+    // 判据来自 Config 的运行期注册（`apply` 写入）；没注册 ⇒ planRegionTier 归 T1（fail-closed）。
+    const planned = planRegionTier({ messages, criteria: getCompactionCriteria() })
+    const readonly = isCompactionReadonly()
+
+    if (planned.tier === 'T1') {
+      const outcome = await summarizeWithT1({
+        messages,
+        sessionId,
+        readonly,
+        writeHandle: getHandleWriter(),
+        // 长度三带已判 T1：不得再被 role 分类否掉（`< lengthMin` 的区间没有 user 原话也要折）。
+        forceFold: true,
+        fallback: async () => super.summarize(...args),
+        logger: { warn: (message) => this.warn(message) },
+      })
+      this.recordPlan(sessionId, planned, outcome.route === 't1' ? 'omw-t1-fold' : 'stock')
+      return outcome.result
+    }
+
+    // T2/T3：stock 摘要（LLM 只在这里出现；同步压缩路径本身零 LLM，NFR17 / AD-7）。
+    this.recordPlan(sessionId, planned, 'stock')
+    return super.summarize(...args)
+  }
+
+  /** 档位落账（模块级注册表；空会话 id 不可归属，跳过）。 */
+  private recordPlan(
+    sessionId: string,
+    planned: { readonly tier: CompactionPlanRecord['tier'], readonly reason: string, readonly tokens: number },
+    delegate: CompactionPlanRecord['delegate'],
+  ): void {
+    if (sessionId === '') return
+    registerCompactionPlan(sessionId, { tier: planned.tier, reason: planned.reason, tokens: planned.tokens, delegate })
   }
 
   /** 日志不可用（如单测的裸原型实例）不影响委托语义。 */

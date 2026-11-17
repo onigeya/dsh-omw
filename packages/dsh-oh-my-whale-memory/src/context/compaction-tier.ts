@@ -15,6 +15,8 @@
  * 由调用方用 {@link checkLengthMinFloor} 校验——越界即拒绝该判据，不静默夹紧。
  */
 import type { CompactionTier } from './compaction-plan.js'
+import { classifyT1, regionMessages, renderRegionText, type T1MessageLike } from './compaction-t1.js'
+import { estimateTokens } from './fold.js'
 
 /** 判据：两条长度阈值（tokens）。字段可缺省，缺省即「算不出」⇒ T1。 */
 export interface CompactionCriteria {
@@ -118,4 +120,58 @@ export function checkLengthMinFloor(input: LengthMinFloorInput): LengthMinFloorC
     return { ok: false, reason: TIER_REASON_LENGTH_MIN_FLOOR, requiredMin }
   }
   return { ok: true, requiredMin }
+}
+
+/**
+ * 滚动窗口（本区间）内 `user.original` 的最大长度（tokens）。
+ *
+ * 只算 role === 'user' 的消息（system head 已由 `renderRegionText` 去掉）；渲染口径与
+ * 句柄正文一致，避免「判据用一套、折叠用另一套」。没有任何 user 消息时返回 0。
+ */
+export function maxUserOriginalTokens(messages: readonly T1MessageLike[]): number {
+  let max = 0
+  for (const message of regionMessages(messages)) {
+    if (message.role !== 'user') continue
+    const tokens = estimateTokens(renderRegionText([message]))
+    if (tokens > max) max = tokens
+  }
+  return max
+}
+
+/** 一个区间的定档结果（含可观测证据）。 */
+export interface RegionTierPlan {
+  readonly tier: CompactionTier
+  readonly reason: string
+  /** 区间 token 数（T1 折叠正文的估算口径）。 */
+  readonly tokens: number
+  readonly protectedContent: boolean
+  /** 硬下界：`lengthMin` 至少应为多少（未触发校验时为 0）。 */
+  readonly requiredMin: number
+}
+
+/**
+ * 把一个区间定档（`decideTier` + `lengthMin` 硬下界的组合，供压缩引擎一次调用）。
+ *
+ * 硬下界越界**不夹紧阈值**：把该区间降成 T1（不压）并把理由记成 `length-min-below-floor`，
+ * 让越界在账本上可见（AC:1798-1801）。
+ */
+export function planRegionTier(input: {
+  readonly messages: readonly T1MessageLike[]
+  readonly criteria: CompactionCriteria | null | undefined
+}): RegionTierPlan {
+  const tokens = estimateTokens(renderRegionText(input.messages))
+  const protectedContent = classifyT1(input.messages)
+  let decision = decideTier({ tokens, protectedContent }, input.criteria)
+  let requiredMin = 0
+  if (isCriteriaUsable(input.criteria)) {
+    // 硬下界总是算（即使本区间已因受保护内容短路成 T1）：`requiredMin` 是可观测证据，
+    // 用于回答「这份 lengthMin 相对真实语料够不够」，不能只在会改判的分支里算。
+    const floor = checkLengthMinFloor({
+      lengthMin: (input.criteria as CompactionCriteria).lengthMin as number,
+      maxUserOriginalTokens: maxUserOriginalTokens(input.messages),
+    })
+    requiredMin = floor.requiredMin
+    if (!floor.ok && decision.tier !== 'T1') decision = { tier: 'T1', reason: floor.reason }
+  }
+  return { ...decision, tokens, protectedContent, requiredMin }
 }

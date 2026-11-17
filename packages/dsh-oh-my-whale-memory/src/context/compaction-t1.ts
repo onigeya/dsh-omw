@@ -111,6 +111,11 @@ export interface SummarizeRouteInput<T> {
   /** 非 T1 / 降级时交给 stock 的 `summarize()`。 */
   readonly fallback: () => Promise<T>
   readonly logger?: { warn(message: string): void }
+  /**
+   * Story 8.4：长度三带已判定 T1（`< lengthMin` / 硬下界越界）时**强制**折叠——
+   * 这类区间可能没有 user 原话，`classifyT1` 会否掉它，但档位裁决优先于 role 分类。
+   */
+  readonly forceFold?: boolean
 }
 
 export interface SummarizeRouteResult<T> {
@@ -124,7 +129,7 @@ export interface SummarizeRouteResult<T> {
  */
 export async function summarizeWithT1<T>(input: SummarizeRouteInput<T>): Promise<SummarizeRouteResult<T>> {
   if (input.readonly) return { result: await input.fallback(), route: 'delegate' }
-  if (!classifyT1(input.messages)) return { result: await input.fallback(), route: 'delegate' }
+  if (input.forceFold !== true && !classifyT1(input.messages)) return { result: await input.fallback(), route: 'delegate' }
   if (input.writeHandle === null) {
     input.logger?.warn('T1 折叠跳过：句柄写者未注册（库未就绪 / 只读实例），fail-open 委托 stock 摘要')
     return { result: await input.fallback(), route: 'delegate' }

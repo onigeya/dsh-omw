@@ -16,6 +16,7 @@
 import type * as lbug from '@ladybugdb/core'
 import { ingestCompactionSummary } from './compaction-ingest.js'
 import { createOrphanTracker, parseCompactionStart } from './compaction-orphan.js'
+import { clearCompactionPlan, readCompactionPlan } from './compaction-plan-registry.js'
 
 export const COMPACTION_EVENT_SUMMARY = 'compaction/summary'
 export const COMPACTION_EVENT_START = 'compaction/start'
@@ -85,6 +86,8 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
           return
         }
         tracker.noteStart(sessionId, { turn: parsed.turn })
+        // Story 8.4：新一轮压缩不得复用上一轮的档位（档位由本轮 `summarize()` 重新登记）。
+        clearCompactionPlan(sessionId)
         return
       }
       if (type === COMPACTION_EVENT_END) {
@@ -106,6 +109,8 @@ export function createCompactionWiring(options: CompactionWiringOptions): Compac
           configSnapshot: options.configSnapshot(),
           startedAt: now().toISOString(),
           nowIso: now().toISOString(),
+          // Story 8.4：档位来自本轮 `summarize()` 的登记；读不到就是 null（矩阵行 6：不编造）。
+          plan: readCompactionPlan(sessionId),
         })
       } catch (error) {
         // AC:1536-1538：监听器抛错不影响已提交的 append（post-commit fire-and-forget）。
