@@ -43,6 +43,7 @@ import { wireMemoryCommand } from './wire/commands.js'
 import { wireMemoryTools } from './wire/tools.js'
 import { wireInjection } from './wire/injection.js'
 import { createInjectionStore } from './injection/state.js'
+import { readSkeletonFacts } from './injection/skeleton.js'
 import { wireMemoryLifecycle } from './wire/lifecycle.js'
 import { wireCapture } from './wire/capture.js'
 import { createDistillWiring } from './wire/distill.js'
@@ -302,6 +303,16 @@ export async function apply(
       } catch {
         return undefined
       }
+    },
+    // Story 8.5 / T3：动态骨架（纯读；只读实例同样可读，INV-7 零写库）。
+    // 绝对上限 `alwaysOnTokenCap` 不套窗口公式（AC:1827）。
+    skeleton: {
+      readFacts: async () => {
+        const database = getDb()
+        if (database === undefined) throw new Error('记忆库未就绪')
+        return readSkeletonFacts(database.connection)
+      },
+      capTokens: () => resolved.alwaysOnTokenCap,
     },
   }))
 

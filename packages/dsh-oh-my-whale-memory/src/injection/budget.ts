@@ -157,6 +157,11 @@ export function applyInjectionBudget(
     // ① 摘要 / 单条各自的绝对上限先裁
     const perItem = truncateToTokenCap(candidate.text, candidate.cap)
     if (perItem.truncated) truncated = true
+    // 额度为 0（或上限小于一个字）⇒ 本条没有可读正文，不产出空行条目，直接停止。
+    if (perItem.text === '') {
+      truncated = true
+      break
+    }
     // ③ 总预算：剩余额度内再裁；剩余 < 最小值时不产生碎片行（停止追加未入列条目）
     const remaining = availableTokens - tokens
     const itemTokens = estimateTokens(perItem.text)

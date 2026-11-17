@@ -172,6 +172,14 @@ describe('applyInjectionBudget：三限制边界（tokens）', () => {
     expect(estimateTokens(result.items[0]?.text ?? '')).toBeLessThanOrEqual(512)
   })
 
+  it('预算为 0 ⇒ 零注入（不产出空正文条目）', () => {
+    const result = applyInjectionBudget({ ...EMPTY, l1: [item('a', '证据原文')] }, caps({ budget: 0 }))
+    expect(result.text).toBe('')
+    expect(result.items).toHaveLength(0)
+    expect(result.tokens).toBe(0)
+    expect(result.truncated).toBe(true)
+  })
+
   it('① 单条超过 singleCap 先裁：正文含 `…`、truncated=true、总长不超上限', () => {
     const result = applyInjectionBudget({ ...EMPTY, l1: [item('long', 'x'.repeat(2000))] }, caps({ singleCap: 100 }))
     expect(result.truncated).toBe(true)

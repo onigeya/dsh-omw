@@ -11,6 +11,8 @@
  * B1 只做骨架：section/context 注册 + 文本读取端口；生成与三限制在 B2/B3。
  */
 import { inboxSessionKey } from '../inbox/idle-gate.js'
+import { SKELETON_CONTEXT_NAME, SKELETON_CONTEXT_ORDER, skeletonSessionKeyOf } from './skeleton.js'
+import type { SkeletonStore } from './skeleton.js'
 import type { InjectionStore } from './state.js'
 
 /** systemPrompt section 名（AD-2；层内唯一，重复注册宿主直接抛错）。 */
@@ -60,14 +62,19 @@ export function injectionSessionKeyOf(context: unknown): string {
 }
 
 /**
- * 注册注入面（section + context）。返回宿主给的 effect disposer（由调用方 ctx 作用域管理；
+ * 注册注入面（section + 两个 context）。返回宿主给的 effect disposer（由调用方 ctx 作用域管理；
  * 注册本身就是 effect，不再套 `ctx.effect`：避免 entry-exports 的 closer 数漂移）。
+ *
+ * Story 8.5 / T3：第三个注册项是**动态骨架** context（`omw-memory-dynamic`），与静态 section
+ * `omw-memory` 分离（AD-2/AD-23：静态 text 必须仍是常量）。骨架空 ⇒ provider 返回空串
+ * （宿主对空文本不产消息、不占预算）。
  */
 export function registerInjectionPrompt(
   host: InjectionPromptHost,
   store: InjectionStore,
+  skeleton?: SkeletonStore,
 ): Array<() => void> {
-  return [
+  const disposers = [
     host.section({
       name: INJECTION_SECTION_NAME,
       order: INJECTION_SECTION_ORDER,
@@ -83,4 +90,14 @@ export function registerInjectionPrompt(
       text: (context) => store.textFor(injectionSessionKeyOf(context)),
     }),
   ]
+  if (skeleton !== undefined) {
+    disposers.push(host.context({
+      name: SKELETON_CONTEXT_NAME,
+      order: SKELETON_CONTEXT_ORDER,
+      interpolate: false,
+      // 骨架每次请求重新解析：压缩移除后由宿主在下一请求自动补回（AC:1823）。
+      text: (context) => skeleton.textFor(skeletonSessionKeyOf(context)),
+    }))
+  }
+  return disposers
 }
