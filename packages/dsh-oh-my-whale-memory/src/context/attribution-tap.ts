@@ -76,7 +76,7 @@ export function seqSourceIndex(session: unknown): SeqSourceIndex {
     if (typeof seq !== 'number' || !Number.isFinite(seq)) continue
     const type = candidate?.type
     if (typeof type !== 'string') continue
-    const source = SOURCE_BY_EVENT_TYPE[type]
+    const source = Object.hasOwn(SOURCE_BY_EVENT_TYPE, type) ? SOURCE_BY_EVENT_TYPE[type] : undefined
     if (source !== undefined) index.set(seq, source)
   }
   return index
