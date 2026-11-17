@@ -4,10 +4,11 @@
  * 单独测这层的原因：apply 里只断言得到注册了哪个事件，映射写反（turn/start 与 turn/end 互换）
  * 在宿主级测试里不会变红，而后果是消费者在 turn 里抢库、turn 外空转。
  */
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { createIdleGate, inboxSessionKey } from '../src/inbox/idle-gate'
 import { createPromotionTracker, type PromotionTrigger } from '../src/inbox/promotion-trigger'
 import { createSessionEventHandler } from '../src/inbox/session-events'
+import { wireTurnEndCapture } from '../src/wire/events'
 
 function makeHandler() {
   const gate = createIdleGate()
@@ -161,5 +162,76 @@ describe('Story 2.1：三钩子采集分派', () => {
     const plain = createSessionEventHandler({ gate, promotion })
     expect(() => plain({ id: 's2' }, { type: 'step/end', seq: 4, time: 0, data: { turn: 1, step: 1 } })).not.toThrow()
     expect(() => plain({ id: 's2' }, { type: 'compaction/start', seq: 5, time: 0, data: { turn: null } })).not.toThrow()
+  })
+})
+
+describe('Story 8.1：turn/end 的归因采集（矩阵行 20）', () => {
+  function makeDeps() {
+    const gate = createIdleGate()
+    const promotion = createPromotionTracker({ onTrigger: () => {} })
+    const calls: string[] = []
+    const sessions: unknown[] = []
+    const handle = createSessionEventHandler({
+      gate,
+      promotion,
+      capture: {
+        recordStepEnd: () => { calls.push('step') },
+        recordCompactionStart: () => { calls.push('compaction') },
+        recordTurnEnd: () => { calls.push('turn') },
+      },
+      onTurnEnd: (session) => {
+        calls.push('ledger')
+        sessions.push(session)
+      },
+    })
+    return { handle, calls, sessions }
+  }
+
+  it('turn/end ⇒ onTurnEnd 恰好一次，且排在 recordTurnEnd 之后', () => {
+    const { handle, calls, sessions } = makeDeps()
+    const session = { id: 's-ledger' }
+    handle(session, { type: 'turn/end', seq: 3, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+
+    expect(calls).toEqual(['turn', 'ledger'])
+    expect(sessions).toEqual([session])
+  })
+
+  it('turn/start / step/end / compaction/* 都不调用 onTurnEnd', () => {
+    const { handle, calls } = makeDeps()
+    for (const event of [
+      { type: 'turn/start', turn: 1 },
+      { type: 'step/end', seq: 1, time: 0, data: { turn: 1, step: 1 } },
+      { type: 'compaction/start', seq: 2, time: 0, data: { turn: null } },
+      { type: 'compaction/summary', seq: 3, time: 0, data: {} },
+      { type: 'compaction/end', seq: 4, time: 0, data: {} },
+      { type: 'session/disposed' },
+      { type: 'assistant/message' },
+      undefined,
+    ]) {
+      handle({ id: 's-ledger' }, event)
+    }
+    expect(calls).toEqual(['step', 'compaction'])
+  })
+
+  it('只读形态 wireTurnEndCapture：只把 turn/end 交给 tap（INV-7 的只读采集路径）', () => {
+    const listeners: Array<(session: unknown, event: unknown) => void> = []
+    const ctx = {
+      on: (event: string, listener: (session: unknown, event: unknown) => void) => {
+        if (event === 'session/event') listeners.push(listener)
+        return () => {}
+      },
+    }
+    const captured = vi.fn()
+    wireTurnEndCapture(ctx as unknown as Parameters<typeof wireTurnEndCapture>[0], captured)
+    expect(listeners).toHaveLength(1)
+
+    listeners[0]!({ id: 's-ro' }, { type: 'turn/start', turn: 1 })
+    listeners[0]!({ id: 's-ro' }, { type: 'step/end', seq: 1, time: 0, data: { turn: 1, step: 1 } })
+    expect(captured).not.toHaveBeenCalled()
+
+    listeners[0]!({ id: 's-ro' }, { type: 'turn/end', seq: 2, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    expect(captured).toHaveBeenCalledTimes(1)
+    expect(captured.mock.calls[0]?.[0]).toEqual({ id: 's-ro' })
+    expect(listeners[0]!({ id: 's-ro' }, undefined)).toBeUndefined()
   })
 })

@@ -153,7 +153,8 @@ describe('AC7：只读实例不启动消费者、不回收 lease', () => {
       // 仍注册召回配额重置监听（memory_recall 在只读模式也可用，turn/start 恢复配额）。
       // Story 3.3 起只读实例同样注册开局注入的 `agent/pre-step` 监听（注入是纯读 + LLM）。
       // Story 3.3 / F-05：注入面的 `session/disposed` 清理监听（同一次 wireInjection 注册）。
-      expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event'])
+      // Story 8.1：末尾那条是归因采集（只写进程内存，零写库；INV-7 / AC:1581）。
+      expect(onEvents).toEqual(['session/event', 'agent/pre-step', 'session/event', 'session/event'])
       expect(warnLog.join('\n')).toContain(READONLY_REASON)
       expect(infoLog.join('\n')).not.toContain('记忆库就绪')
 
