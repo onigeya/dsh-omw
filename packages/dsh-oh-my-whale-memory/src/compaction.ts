@@ -1,59 +1,67 @@
 /**
- * 压缩引擎 provider（Story 8.3 / AC:1660、AC:1703、AC:1707、AD-27）。
+ * 压缩引擎 provider（Story 8.3 / AC:1660、AC:1679、AC:1703、AC:1707、AC:1683、AD-27）。
  *
  * **这是子路径入口，不是 function 插件本体**：AC:1707 要求 provider 的 default export
  * 放在另一入口文件的子路径 export（`dsh-oh-my-whale-memory/compaction`），而功能插件本体
  * （`src/index.ts`）仍然只允许命名导出 `name` / `inject` / `Config` / `apply`（AD-2、PRD §14）。
  *
- * **本轮是骨架**：按 spec-8-3 §2 的 D-B′ 方案，`OmwCompactionEngine` 只**覆写公开方法**并在
- * 内部先算分档计划、再把真正的压缩委托给**继承来的** `super.compactRegion` ——
- * 这样事务时序、`compaction/start`+`end` 配对、失败处理全部留在 stock 手里。
+ * 设计（D-B′）：区间选择、`compaction/start`/`end` 配对、事务与失败处理全部留在 stock 的
+ * `compactRegion`；我们只覆写 stock 文档声明为**唯一子类定制点**的 `summarize()`。
+ * T1 的判定/渲染/编排在 `context/compaction-t1.ts`（纯函数，可全测）。
  *
- * 参数与返回类型用 `Parameters<>` / `ReturnType<>` 从基类推导（**不**显式 import
- * `@deepseek-ai/dsh-agent` / `dsh-session`）：这两个包会带来嵌套的 `dsh-llm` 副本，
- * 导致与本仓已 pin 的 `dsh-llm` 出现「同一个类型两份身份」的编译错误。
+ * 参数与返回类型用 `Parameters<>` 从基类推导（**不**显式 import `dsh-agent` / `dsh-session`）：
+ * 这两个包会带来嵌套的 `dsh-llm` 副本，导致与本仓已 pin 的 `dsh-llm` 出现类型双身份。
  */
 import { BasicCompactionEngine } from '@deepseek-ai/dsh-compaction-basic'
+import { summarizeWithT1 } from './context/compaction-t1.js'
+import { getHandleWriter, isCompactionReadonly } from './context/handle-writer.js'
 
-type CompactRegionArgs = Parameters<BasicCompactionEngine['compactRegion']>
-// 基类方法是 async ⇒ ReturnType 已是 Promise<CompactionResult>，不能再包一层 Promise。
+type SummarizeArgs = Parameters<BasicCompactionEngine['summarize']>
+type SummarizeResult = Awaited<ReturnType<BasicCompactionEngine['summarize']>>
 
+/** T1 折叠结果的 provider/model 标记（进 `compaction/summary` 事件，可据此区分是否调过 LLM）。 */
+export const T1_FOLD_PROVIDER = 'omw-t1-fold'
+export const T1_FOLD_MODEL = 'handle'
+
+/** 从 agent 上取会话 id（结构访问，不 import `Agent` 类型）。取不到 ⇒ ''（调用方 fail-open）。 */
+function sessionIdOf(agent: unknown): string {
+  const session = (agent as { readonly session?: { readonly id?: unknown } } | null)?.session
+  const id = session?.id
+  return typeof id === 'string' ? id : ''
+}
 
 /**
  * 我们的压缩引擎。
  *
  * 继承而不重写：`BasicCompactionEngine` 的阈值 / 保留尾部 / 溢出上限 / 失败处理与事务时序
- * 一律复用；本类只增加「压缩哪一段」的判定挂点（D-B′），并通过 `super.compactRegion`
- * 完成真正的持久化变更。
+ * 一律复用；本类只覆写 `summarize()`，把「T1 段怎么摘要」换成无损折叠。
  */
 export class OmwCompactionEngine extends BasicCompactionEngine {
   /**
-   * 当前是否处于「只读委托」模式（Story 8.3 / AC:1683）。
+   * 摘要一段被压缩的会话区间（stock 的唯一公开子类定制点）。
    *
-   * 由装配层在 `apply` 时按运行态设置；`true` 时所有覆写方法必须原样委托、零写入。
-   * 缺省 `false`（写者实例）。
+   * 只读实例 / 非 T1 / writer 缺失 / 写失败都由 `summarizeWithT1` 收敛为「委托 stock」，
+   * 这里不再重复判一次（避免两份裁决漂移）。
    */
-  protected omwReadonlyDelegate = false
-
-  /** 供装配层设置只读委托（`/memory status` 读同一个裁决，见 `context/compaction-delegate.ts`）。 */
-  setReadonlyDelegate(readonly: boolean): void {
-    this.omwReadonlyDelegate = readonly
+  protected override async summarize(...args: SummarizeArgs): Promise<SummarizeResult> {
+    const outcome = await summarizeWithT1({
+      messages: args[0].messages,
+      sessionId: sessionIdOf(args[1]),
+      readonly: isCompactionReadonly(),
+      writeHandle: getHandleWriter(),
+      fallback: async () => super.summarize(...args),
+      logger: { warn: (message) => this.warn(message) },
+    })
+    return outcome.result
   }
 
-  /** 只读实例不参与任何分档判定，直接走 stock 行为（零折叠 / 零入图 / 零账本）。 */
-  get readonlyDelegate(): boolean {
-    return this.omwReadonlyDelegate
-  }
-
-  /**
-   * 压缩一个闭区间（`compactRegion(start, end, agent, signal?)`）。
-   *
-   * 骨架阶段：判定挂点先留空、**直接委托**。这样即使分档逻辑还没接上，行为也与 stock 完全一致
-   * （可安全装配）；下一轮把 `planCompaction` 接进来后，这里才可能选择「不压这一段」。
-   */
-  override compactRegion(...args: CompactRegionArgs): ReturnType<BasicCompactionEngine['compactRegion']> {
-    // 只读委托：不做任何判定，原样交给 stock（AC:1683）。
-    return super.compactRegion(...args)
+  /** 日志不可用（如单测的裸原型实例）不影响委托语义。 */
+  private warn(message: string): void {
+    try {
+      this.ctx?.logger?.warn?.(message)
+    } catch {
+      // 日志通道异常不得改变压缩行为。
+    }
   }
 }
 

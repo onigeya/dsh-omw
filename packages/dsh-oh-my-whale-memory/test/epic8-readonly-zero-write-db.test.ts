@@ -237,9 +237,8 @@ describe('只读实例：压缩事件零写入（INV-7 / AC:1581）', () => {
     expect(result.kind).toBe('success')
     // 只读降级必须可见（AC2），不能静默当一个普通写者实例。
     expect(result.text).toContain('readonly: true')
-    expect(result.text).toMatch(/^compaction: runs=0$/m)
-    // 注：`mode=readOnly-delegate` 标签属 Story 8.3（引擎运行态裁决），在
-    // `story-8-3-compaction-engine` 分支的 `command-status-db` 钉死行里断言；
-    // 主线此刻尚未装配引擎，这里刻意不断言它。
+    // Story 8.3：只读实例的压缩引擎必须委托 stock，status 行因此带 `readOnly-delegate`。
+    // 合并 8.1 后两边的期望在此合流（此前主线还没装配引擎，只能断言 runs=0）。
+    expect(result.text).toMatch(/^compaction: runs=0 mode=readOnly-delegate$/m)
   })
 })

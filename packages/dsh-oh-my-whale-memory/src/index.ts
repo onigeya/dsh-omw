@@ -30,6 +30,8 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
+import { detectCompactionOverlayGap, compactionOverlayGapWarning } from './context/compaction-gap.js'
+import { registerHandleWriter, setCompactionReadonly } from './context/handle-writer.js'
 import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
 import { writeHandle } from './context/handles.js'
 import { foldStream } from './shared/stream-fold.js'
@@ -305,6 +307,9 @@ export async function apply(
   await ensureMemoryDbDirectory(dbPath)
   const lock = await acquireWriterLock(dbPath)
   const readonlyMode = lock.mode === 'readonly'
+  // Story 8.3 / AC:1683：压缩引擎是另一个入口（provider），通过这个按 ctx 分槽的标记知道
+  // 当前实例是否只读；只读实例的 summarize 一律委托 stock（零折叠 / 零入图 / 零账本）。
+  setCompactionReadonly(readonlyMode)
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
     // 工具与命令经闭包读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
@@ -328,6 +333,29 @@ export async function apply(
   instance.readonly = readonlyMode
   instance.reason = lock.reason
 
+  // Story 8.3 / AC:1709-1711：写者实例把「写句柄」端口交给压缩 provider（子路径入口拿不到这里的
+  // 闭包）。只读实例不注册 ⇒ provider 的 T1 分支 fail-open 委托 stock（零写库，INV-7）。
+  if (!readonlyMode) {
+    registerHandleWriter(async ({ sessionId, seq, text, tokens }) => {
+      const db = getDb()
+      if (db === undefined) throw new Error('记忆库未就绪，无法写折叠句柄')
+      const record = await writeHandle(db.connection, {
+        sessionId,
+        seq,
+        text,
+        recordedAt: new Date().toISOString(),
+        ...(tokens === undefined ? {} : { tokens }),
+      })
+      return { id: record.id }
+    })
+  }
+
+  // Story 8.3 / AC:1675、NFR19：覆盖缺口检测延到微任务，避开「apply 时压缩服务尚未激活」的误报。
+  queueMicrotask(() => {
+    const warning = compactionOverlayGapWarning(detectCompactionOverlayGap(ctx))
+    if (warning !== null) ctx.logger.warn(warning)
+  })
+
   // Story 7.3：反思定时器在 lifecycle 的既有 teardown 里释放（不新增 closer）。
   await wireStep('lifecycle', () => wireMemoryLifecycle({
     ctx,
@@ -337,6 +365,9 @@ export async function apply(
     onTeardown: () => {
       cancelReflectionTimer?.()
       cancelCompactionTimers?.()
+      // Story 8.3：实例销毁后 provider 不能再写句柄（同 ctx 槽位清空，回到 fail-open）。
+      registerHandleWriter(null)
+      setCompactionReadonly(true)
     },
   }))
 
@@ -522,3 +553,4 @@ export async function apply(
   }))
   }
 }
+
