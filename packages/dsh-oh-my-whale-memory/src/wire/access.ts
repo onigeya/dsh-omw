@@ -42,6 +42,8 @@ export interface MemoryAccessOptions {
   readonly reflectionView?: () => MemoryReflectionView
   /** Story 8.1：归因账本快照提供者（缺省 ⇒ 渲染 `n/a（本实例尚未采集）`）。 */
   readonly contextLedgerView?: () => AttributionSnapshot | null
+  /** Story 10.1：采集模式提供者（缺省 ⇒ 不渲染 capture_trigger 行）。 */
+  readonly captureModeView?: () => { readonly trigger: string, readonly persistence: string } | null
   /** 惰性取库句柄（建库之前为 undefined）。 */
   readonly getDb: () => MemoryDatabase | undefined
   /** apply 时 resolve 的配置（status 的 embeddingMode 与 System One 开关）。 */
@@ -202,6 +204,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
             : {}),
         }))
         .catch(() => null),
+      // Story 10.1：采集模式（tokens / steps(degraded)；指针持久化不可用时显式可见）。
+      capture: options.captureModeView?.() ?? null,
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),

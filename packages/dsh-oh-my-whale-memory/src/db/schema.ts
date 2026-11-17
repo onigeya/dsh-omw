@@ -10,9 +10,11 @@
  * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库此前由 database.ts 的幂等
  * `ALTER TABLE memory ADD parent_id STRING` 补列（Story 4.2 起新列一律只走迁移 0002）。
- * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '8'（迁移 0008）。
+ * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '9'（迁移 0009）。
  * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）；
  *   唯一例外是 Story 4.2 的 redact 墓碑（redacted_by/redacted_at 记录改写者与时刻）。
+ *   Story 10.1 / AD-36 起该表分两型：inline（`raw_text` 非空）与 pointer
+ *   （`raw_text` NULL、`seq` 非空、`event_type` 记事件类型）；墓碑 = 两者皆空。
  * - generation_log：detail（Story 4.2 只加列，写入方留给后续 story）
  * - omw_meta：库级元数据（embedding_dim、embedding_model_id、schema_version、created_at）
  *
@@ -34,7 +36,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '8'
+export const SCHEMA_VERSION = '9'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -46,6 +48,12 @@ export const META_KEYS = {
   evidenceBackfillCursor: 'evidence_backfill_cursor',
   /** Story 2.5 / 评审 P1（T1）：L1→L2 提升候选的断点游标，形态 `"<recorded_at>|<id>"`。 */
   l2PromotionCursor: 'l2_promotion_cursor',
+  /**
+   * Story 10.1：token 触发账本的每会话游标前缀（key = `${prefix}<sessionId>`，
+   * value = `{"lastSeq":n,"accumTokens":m}`）。会话数上限由宿主会话数决定，不做清理：
+   * 游标是幂等重放的唯一水位，删它会把已采集区间重新算一遍。
+   */
+  captureLedgerPrefix: 'capture_ledger:',
 } as const
 
 /** 维度必须是 ≥1 的整数，直接拼进 DDL，越界即拒绝（不信任外部配置）。 */
@@ -136,6 +144,31 @@ export function l0RawTextPredicate(alias: string): string {
 }
 
 /**
+ * Story 10.1 / AD-36：`l0_raw` 分两型的列契约。
+ *
+ * - inline 行：`raw_text` 非空、`seq` NULL（Epic 2 起的整段快照，迁移 0009 只加列不改行）；
+ * - pointer 行：`raw_text` NULL、`seq` + `event_type` 非空（每消息事件一行，正文按需解析）。
+ *
+ * 墓碑判据因此从「`raw_text IS NULL`」改成「两者皆空」——redact 仍然只改 `raw_text`
+ * （把 inline 行替换成墓碑文本），所以指针行永远不会被 redact 选中（见 `db/redact.ts`）。
+ */
+export const SEQ_COLUMN = 'seq'
+export const EVENT_TYPE_COLUMN = 'event_type'
+
+/**
+ * 「这一行仍是可达 L0」谓词（Story 10.1 的单一实现，EII / 存活计数共用）：
+ * `(raw_text IS NOT NULL OR seq IS NOT NULL) AND redacted_at IS NULL`。
+ *
+ * ⚠️ 同 {@link l0EvidencePredicate}：0.22.3 对未定义属性直接抛 binder 异常，所以只在
+ * **确认 `seq` 与 `redacted_at` 两列都存在**的连接上使用；选择逻辑在
+ * `db/column-presence.ts` 的 `l0LivePredicate()`（禁止调用方各写一份三元表达式）。
+ */
+export function l0PointerAwarePredicate(alias: string): string {
+  return `(${alias}.raw_text IS NOT NULL OR ${alias}.${SEQ_COLUMN} IS NOT NULL) ` +
+    `AND ${alias}.${REDACTED_AT_COLUMN} IS NULL`
+}
+
+/**
  * 墓碑文本（D-4 逐字可断言）：`[REDACTED <l0id> @<ISO8601>]`。
  *
  * 不含任何原文片段，也不含记忆 id 以外的语义；`id`/`recorded_at`/`actor` 保持原值，
@@ -213,7 +246,9 @@ export function alterMemoryAddSupportStatement(): string {
 export function createL0RawTableStatement(): string {
   return (
     'CREATE NODE TABLE IF NOT EXISTS l0_raw(id STRING, raw_text STRING, recorded_at STRING, actor STRING, ' +
-    REDACTED_BY_COLUMN + ' STRING, ' + REDACTED_AT_COLUMN + ' STRING, PRIMARY KEY(id))'
+    REDACTED_BY_COLUMN + ' STRING, ' + REDACTED_AT_COLUMN + ' STRING, ' +
+    // Story 10.1 / AD-36：pointer 行的两列（迁移 0009 给旧库补列；旧 inline 行读 null）。
+    SEQ_COLUMN + ' INT64, ' + EVENT_TYPE_COLUMN + ' STRING, PRIMARY KEY(id))'
   )
 }
 

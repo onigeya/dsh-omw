@@ -16,13 +16,34 @@
  */
 import type * as lbug from '@ladybugdb/core'
 import { queryRows } from './rows.js'
-import { L0_RAW_TABLE, MEMORY_TABLE } from './schema.js'
+import {
+  L0_RAW_TABLE,
+  MEMORY_TABLE,
+  l0EvidencePredicate,
+  l0PointerAwarePredicate,
+  l0RawTextPredicate,
+} from './schema.js'
 
 export interface SchemaColumnPresence {
   /** `memory.evidence_degraded`（Story 4.2 迁移 0002）。 */
   readonly evidenceDegraded: boolean
   /** `l0_raw.redacted_at`（Story 4.2 迁移 0002）。 */
   readonly redactedAt: boolean
+  /** `l0_raw.seq`（Story 10.1 迁移 0009；有它才可能存在 pointer 行）。 */
+  readonly l0Seq: boolean
+}
+
+/**
+ * L0 存活谓词的选择（Story 10.1 的**唯一**选择点；EII 与存活计数都调它，禁止各写一份）。
+ *
+ * 三种形态按列存在性挑：
+ * - 无 `redacted_at`（v1 旧库）：`raw_text IS NOT NULL`（Story 4.2 之前的口径）；
+ * - 有 `redacted_at`、无 `seq`（v2..v8 旧库被只读实例打开）：`raw_text IS NOT NULL AND redacted_at IS NULL`；
+ * - 两列都有（迁移 0009 之后）：`(raw_text IS NOT NULL OR seq IS NOT NULL) AND redacted_at IS NULL`。
+ */
+export function l0LivePredicate(alias: string, presence: SchemaColumnPresence): string {
+  if (!presence.redactedAt) return l0RawTextPredicate(alias)
+  return presence.l0Seq ? l0PointerAwarePredicate(alias) : l0EvidencePredicate(alias)
 }
 
 /** 每连接一份（WeakMap：连接被回收时缓存随之消失；不引入生命周期管理）。 */
@@ -46,6 +67,7 @@ async function probe(connection: lbug.Connection): Promise<SchemaColumnPresence>
   return {
     evidenceDegraded: memory.has('evidence_degraded'),
     redactedAt: l0.has('redacted_at'),
+    l0Seq: l0.has('seq'),
   }
 }
 

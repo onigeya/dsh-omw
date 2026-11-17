@@ -15,7 +15,7 @@ import type * as lbug from '@ladybugdb/core'
 import { runPrepared } from './backend.js'
 import { isMissingTableError } from './errors.js'
 import { collectRows, queryRows } from './rows.js'
-import { META_TABLE } from './schema.js'
+import { META_KEYS, META_TABLE } from './schema.js'
 
 const READ_META_VALUE = 'MATCH (m:' + META_TABLE + ' {key: $key}) RETURN m.value AS value'
 const READ_META_ALL = 'MATCH (m:' + META_TABLE + ') RETURN m.key AS key, m.value AS value'
@@ -66,6 +66,16 @@ export async function readCursor(connection: lbug.Connection, key: string): Prom
 /** 写游标水位（与 `readCursor` 成对；不自开事务）。 */
 export async function writeCursor(connection: lbug.Connection, key: string, value: string): Promise<void> {
   await writeMetaValue(connection, key, value)
+}
+
+/**
+ * Story 10.1：token 触发账本的每会话游标键（`capture_ledger:<sessionId>`）。
+ *
+ * 键格式只在这里定义（schema 的 `META_KEYS.captureLedgerPrefix` 是前缀常量）：
+ * 会话 id 由宿主给出、不来自用户输入，且带固定前缀，不会与库级元数据键冲突。
+ */
+export function captureLedgerKey(sessionId: string): string {
+  return META_KEYS.captureLedgerPrefix + sessionId
 }
 
 /** 保留给 `runPrepared` 的导入面（本模块只用它做平铺写入；导出以免 tree-shake 误删依赖）。 */

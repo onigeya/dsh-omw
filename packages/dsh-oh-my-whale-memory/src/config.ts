@@ -22,6 +22,12 @@ import type { Volatile } from '@deepseek-ai/cordis'
  */
 export const MEMORY_CONFIG_DEFAULTS = {
   captureSteps: 50,
+  // Story 10.1 / AD-36：token 触发账本的三个阈值（tokens）。8K 软阈值 / 500 最小累计 /
+  // 32K 硬上限——数值由 epics.md:2070 逐字钉死，不是实测标定。`captureSteps` 只在
+  // `ctx.tokenMeter` 不可用时作为降级触发（NFR12）。
+  captureTokens: 8000,
+  captureMinTokens: 500,
+  captureMaxTokens: 32000,
   inboxRefineConcurrency: 4,
   injectOnNewSession: true,
   rrfK: 60,
@@ -131,6 +137,16 @@ export const Config = Schema.object({
   embedding: EmbeddingSchema,
   rerank: RerankSchema,
   captureSteps: Schema.number().default(MEMORY_CONFIG_DEFAULTS.captureSteps).volatile(),
+  /**
+   * Story 10.1 / AC:2070：token 触发账本的三项阈值（全部 `.volatile()`，INV-12 运行期可覆盖）。
+   * - `captureTokens`（8000）：`seq > lastSeq` 的 tokens 累计到它即触发一次 INBOX；
+   * - `captureMinTokens`（500）：切片时尾部不足它的碎片并入上一片（不切碎记录）；
+   * - `captureMaxTokens`（32000）：超过它按事件边界切多单，单事件不切（超限独立成单标 `oversize`）。
+   * 三者不满足 `min ≤ tokens ≤ max` 时 fail-loud（否则阈值语义自相矛盾）。
+   */
+  captureTokens: Schema.number().default(MEMORY_CONFIG_DEFAULTS.captureTokens).volatile(),
+  captureMinTokens: Schema.number().default(MEMORY_CONFIG_DEFAULTS.captureMinTokens).volatile(),
+  captureMaxTokens: Schema.number().default(MEMORY_CONFIG_DEFAULTS.captureMaxTokens).volatile(),
   inboxRefineConcurrency: Schema.number().default(MEMORY_CONFIG_DEFAULTS.inboxRefineConcurrency).volatile(),
   injectOnNewSession: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.injectOnNewSession).volatile(),
   rrfK: Schema.number().default(MEMORY_CONFIG_DEFAULTS.rrfK).volatile(),
@@ -192,6 +208,10 @@ export interface RuntimeConfig {
   embedding: { endpoint?: string; token?: string; model?: string; dim?: number }
   embeddingMode: 'enabled' | 'disabled'
   captureSteps: number
+  /** Story 10.1：token 触发账本的三个阈值（tokens，已过合法性校验）。 */
+  captureTokens: number
+  captureMinTokens: number
+  captureMaxTokens: number
   inboxRefineConcurrency: number
   injectOnNewSession: boolean
   rrfK: number
@@ -298,6 +318,9 @@ function requireNonNegativeWeight(field: string, value: number): number {
 export function resolveRuntimeConfig(config: {
   embedding?: Getter<{ endpoint?: string; token?: string; model?: string; dim?: number }>
   captureSteps?: Getter<number>
+  captureTokens?: Getter<number>
+  captureMinTokens?: Getter<number>
+  captureMaxTokens?: Getter<number>
   inboxRefineConcurrency?: Getter<number>
   injectOnNewSession?: Getter<boolean>
   rrfK?: Getter<number>
@@ -351,6 +374,26 @@ export function resolveRuntimeConfig(config: {
   }
 
   const captureSteps = requirePositiveInt('captureSteps', read(config.captureSteps ?? MEMORY_CONFIG_DEFAULTS.captureSteps))
+  // Story 10.1 / AC:2070：三阈值各 ≥1，且必须构成 min ≤ tokens ≤ max（否则「累计到下次」
+  // 与「按上限切片」互相矛盾，配置错误会静默变成永不触发或每轮触发）。
+  const captureTokens = requirePositiveInt(
+    'captureTokens',
+    read(config.captureTokens ?? MEMORY_CONFIG_DEFAULTS.captureTokens),
+  )
+  const captureMinTokens = requirePositiveInt(
+    'captureMinTokens',
+    read(config.captureMinTokens ?? MEMORY_CONFIG_DEFAULTS.captureMinTokens),
+  )
+  const captureMaxTokens = requirePositiveInt(
+    'captureMaxTokens',
+    read(config.captureMaxTokens ?? MEMORY_CONFIG_DEFAULTS.captureMaxTokens),
+  )
+  if (captureMinTokens > captureTokens || captureTokens > captureMaxTokens) {
+    throw new Error(
+      `captureMinTokens / captureTokens / captureMaxTokens（期望 min ≤ tokens ≤ max，实际 ` +
+      `${captureMinTokens} / ${captureTokens} / ${captureMaxTokens}）`,
+    )
+  }
   const inboxRefineConcurrency = requirePositiveInt('inboxRefineConcurrency', read(config.inboxRefineConcurrency ?? MEMORY_CONFIG_DEFAULTS.inboxRefineConcurrency))
   const rrfK = read(config.rrfK ?? MEMORY_CONFIG_DEFAULTS.rrfK)
   if (!Number.isFinite(rrfK) || rrfK <= 0) {
@@ -481,6 +524,9 @@ export function resolveRuntimeConfig(config: {
     },
     embeddingMode,
     captureSteps,
+    captureTokens,
+    captureMinTokens,
+    captureMaxTokens,
     inboxRefineConcurrency,
     injectOnNewSession,
     rrfK,

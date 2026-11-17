@@ -133,6 +133,9 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       'slow_queue: depth=0 retry=0 exhausted=0 windowRound=0 shortCircuit=no',
       'context_ledger: n/a（本实例尚未采集）',
       'compaction: runs=0',
+      // Story 10.1：本夹具无 tokenMeter/sessionPersistence ⇒ 两条降级行（真实 apply 装配）。
+      'capture_trigger: steps(degraded)',
+      'pointer_persistence: unavailable（sessionPersistence 缺失，L0 走 inline 快照）',
       // Story 5.1 / AC:1171：存储后端行追加在末尾。
       'backend: native',
     ].join('\n'))
@@ -249,3 +252,4 @@ describe('库未就绪：无 profileContext 时命令仍可用且明确报错（
     expect(result.text).toContain('记忆库未就绪')
   })
 })
+

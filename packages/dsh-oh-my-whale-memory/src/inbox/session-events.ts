@@ -14,6 +14,8 @@ export interface CaptureHooks {
   recordStepEnd(session: unknown, event: unknown): void
   recordCompactionStart(session: unknown, event: unknown): void
   recordTurnEnd(session: unknown, event: unknown): void
+  /** Story 10.1：三类消息事件进「下一边界批量写 pointer 行」的缓冲（text part 非空）。 */
+  recordMessage?(session: unknown, event: unknown): void
   /** 会话销毁时清掉采集器的每会话内存（旧实现没有该钩子时跳过）。 */
   resetSession?(sessionId: string): void
 }
@@ -58,6 +60,9 @@ export function createSessionEventHandler(
       deps.onTurnEnd?.(session)
     } else if (type === 'step/end') {
       deps.capture?.recordStepEnd(session, event)
+    } else if (type === 'user/message' || type === 'assistant/message' || type === 'tool/result') {
+      // Story 10.1：消息事件只进缓冲，不立即写库；真正的 pointer 行在下一个边界批量落库。
+      deps.capture?.recordMessage?.(session, event)
     } else if (type === 'compaction/start') {
       deps.capture?.recordCompactionStart(session, event)
       // Story 8.1：登记待配对（孤儿检测起点）；失败只吞掉，不阻塞采集。

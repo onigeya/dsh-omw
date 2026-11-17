@@ -42,8 +42,8 @@ import { checkReachableToL0, checkRefReachableToL0 } from '../db/eii.js'
 import { memoryNodeId, uuid5 } from '../db/id.js'
 import { getMemoryById, type MemoryDetail } from '../db/memory.js'
 import { queryRows } from '../db/rows.js'
-import { schemaColumnPresence, type SchemaColumnPresence } from '../db/column-presence.js'
-import { GENERATION_LOG_TABLE, L0_RAW_TABLE, l0EvidencePredicate, l0RawTextPredicate } from '../db/schema.js'
+import { l0LivePredicate, schemaColumnPresence, type SchemaColumnPresence } from '../db/column-presence.js'
+import { GENERATION_LOG_TABLE, L0_RAW_TABLE } from '../db/schema.js'
 import { runInTransaction } from '../db/transaction.js'
 import type { EmbedClient } from '../embedding/client.js'
 import { InboxRefineError, type InboxProcessResult } from '../inbox/consumer.js'
@@ -161,7 +161,7 @@ function liveL0CountStatement(presence: SchemaColumnPresence): string {
   return [
     'UNWIND $refs AS ref',
     'MATCH (l:' + L0_RAW_TABLE + ' {id: ref})',
-    'WHERE ' + (presence.redactedAt ? l0EvidencePredicate('l') : l0RawTextPredicate('l')),
+    'WHERE ' + l0LivePredicate('l', presence),
     'RETURN count(DISTINCT l.id) AS live',
   ].join('\n')
 }

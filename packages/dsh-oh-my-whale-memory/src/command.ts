@@ -375,6 +375,12 @@ export interface MemoryStatusSnapshot {
   /** Story 8.1：压缩运行账本（缺省 = 不渲染）。 */
   readonly compaction?: MemoryCompactionView | null
   /**
+   * Story 10.1：采集模式（缺省 = 不渲染，保既有逐行输出不变）。
+   * `trigger` = `tokens`（token 增量）或 `steps(degraded)`（tokenMeter 缺失的降级）；
+   * `persistence` = `available` / `unavailable`（sessionPersistence 缺失 ⇒ 指针采集降级）。
+   */
+  readonly capture?: { readonly trigger: string; readonly persistence: string } | null
+  /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
    *（既有逐行输出逐字不变）。数据来源是 `db/database.ts` 的 `memoryDatabaseBackendKind`。
@@ -1021,6 +1027,15 @@ function renderCompactionLines(snapshot: MemoryStatusSnapshot): string[] {
   ]
 }
 
+/** `capture_trigger:` / `pointer_persistence:` 行（Story 10.1 / NFR12：降级必须可见）。 */
+function renderCaptureLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.capture
+  if (view === undefined || view === null) return []
+  const lines = [`capture_trigger: ${view.trigger}`]
+  if (view.persistence === 'unavailable') lines.push('pointer_persistence: unavailable（sessionPersistence 缺失，L0 走 inline 快照）')
+  return lines
+}
+
 /** 反思触发状态（命令层镜像 `reflection/state.ts` 的视图）。 */
 export interface MemoryReflectionView {
   readonly windowScore: number
@@ -1144,6 +1159,8 @@ function renderHealthStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   // Story 8.1：上下文归因与压缩运行（追加在最后，保持既有行序不变）。
   lines.push(...renderContextLedgerLines(snapshot))
   lines.push(...renderCompactionLines(snapshot))
+  // Story 10.1：采集模式（token 触发 / 指针持久化降级可见），追加在所有既有行之后。
+  lines.push(...renderCaptureLines(snapshot))
   return lines
 }
 

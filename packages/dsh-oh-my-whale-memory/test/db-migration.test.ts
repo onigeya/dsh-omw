@@ -111,7 +111,7 @@ function v3Statements(): string[] {
     'CREATE NODE TABLE IF NOT EXISTS memory(id STRING, layer STRING, kind STRING, priority INT64, text STRING, embedding FLOAT[4], valid_at STRING, recorded_at STRING, invalid_at STRING, expired_at STRING, source_refs STRING[], embedding_model_id STRING, embedding_dim INT64, parent_id STRING, support INT64, evidence_degraded BOOL, PRIMARY KEY(id))',
     createL0RawTableStatement(),
     createGenerationLogTableStatement(),
-...metaStatements('9'),
+...metaStatements('10'),
   ]
 }
 
@@ -190,18 +190,18 @@ async function degradedFlag(connection: lbug.Connection, id: string): Promise<un
 afterAll(cleanupTempDirs)
 
 describe('矩阵行 1：全新空库 bootstrap', () => {
-  it('SCHEMA_VERSION=8；schema_migration 含 0002..0008 七行；三表新列齐；无备份文件', async () => {
+  it('SCHEMA_VERSION=9；schema_migration 含 0002..0009 八行；三表新列齐；无备份文件', async () => {
     const dir = await makeTempDir('omw-migr-fresh-')
     const dbPath = resolveMemoryDbPath(dir)
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
 
-    expect(SCHEMA_VERSION).toBe('8')
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('8')
+    expect(SCHEMA_VERSION).toBe('9')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
     const applied = await queryRows(
       store.connection,
       `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS version, s.checksum AS checksum`,
     )
-    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4, 5, 6, 7, 8])
+    expect(applied.map((row) => Number(row.version))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     expect(String(applied[0]?.checksum)).toMatch(/^[0-9a-f]{64}$/)
 
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
@@ -220,21 +220,21 @@ describe('矩阵行 1：全新空库 bootstrap', () => {
 })
 
 describe('矩阵行 2：v1 旧库自动升级', () => {
-  it('三表新列出现、版本 8、schema_migration 七行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
+  it('三表新列出现、版本 9、schema_migration 八行、lbug.db.bak-1-* 产生且内容可独立打开', async () => {
     const dir = await makeTempDir('omw-migr-v1-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v1Statements())
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
     const meta = await readMeta(store.connection)
-    expect(meta.get(META_KEYS.schemaVersion)).toBe('8')
+    expect(meta.get(META_KEYS.schemaVersion)).toBe('9')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const l0Columns = await columnsOf(store.connection, 'l0_raw')
     expect(l0Columns.get(REDACTED_BY_COLUMN)).toBe('STRING')
     expect(l0Columns.get('redacted_at')).toBe('STRING')
     expect((await columnsOf(store.connection, 'generation_log')).get('detail')).toBe('STRING')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     // 旧数据必须还在（迁移只加列）。
     const legacy = await queryRows(store.connection, "MATCH (m:memory {id: 'legacy-m1'}) RETURN m.text AS text")
     expect(legacy[0]?.text).toBe('旧数据')
@@ -273,13 +273,13 @@ describe('矩阵行 3：重复启动', () => {
     const appliedAfter = await queryRows(second.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN count(s) AS c`)
     expect(Number(appliedAfter[0]?.c)).toBe(Number(appliedBefore[0]?.c))
     expect(await backupFiles(dbPath)).toEqual(backupsBefore)
-    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('8')
+    expect((await readMeta(second.connection)).get(META_KEYS.schemaVersion)).toBe('9')
     await second.close()
   }, 60_000)
 })
 
 describe('矩阵行 4：版本高于插件', () => {
-  it('version=9 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
+  it('version=10 ⇒ fail-loud schema_mismatch，且库内列与版本都不变（无 schema_migration 表）', async () => {
     const dir = await makeTempDir('omw-migr-v3-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, v3Statements())
@@ -293,7 +293,7 @@ describe('矩阵行 4：版本高于插件', () => {
     // 先释放父进程持有的句柄（被拒绝的打开同样会缓存 Database，跨进程会挡住建库文件的锁）。
     await closeMemoryDatabase(dbPath)
     const dump = runChild('dump', dbPath)
-    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('9')
+    expect((dump.meta as Record<string, string>)[META_KEYS.schemaVersion]).toBe('10')
     expect(dump.hasMigrationTable).toBe(false)
   }, 60_000)
 })
@@ -366,17 +366,17 @@ describe('矩阵行 6：备份创建失败', () => {
 })
 
 describe('FIX-3：bootstrap 判据（版本键缺失 ≠ 新库）', () => {
-  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 8', async () => {
+  it('版本键缺失但 memory 表已存在 ⇒ 不是 bootstrap：先备份、再迁移到 9', async () => {
     const dir = await makeTempDir('omw-migr-noversion-')
     const dbPath = resolveMemoryDbPath(dir)
     // 冻结的 v1 表形态，但**不写** schema_version（旧库的极端形态）。
     runChild('create', dbPath, v1Statements(null))
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('8')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
     expect((await columnsOf(store.connection, 'memory')).get(EVIDENCE_DEGRADED_COLUMN)).toBe('BOOL')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8])
+    expect(applied.map((row) => Number(row.v))).toEqual([2, 3, 4, 5, 6, 7, 8, 9])
     // 关键差异：走的是升级路径 ⇒ 备份文件名里的 fromVersion 是 0，而不是「不备份」。
     const backups = await backupFiles(dbPath)
     expect(backups).toHaveLength(1)
@@ -450,7 +450,7 @@ describe('迁移 0003：judge_key 加 action（Story 5.4 / AC:1299-1301）', () 
     expect(String(rows[0]?.policy)).toBe(policy)
     expect(String(rows[0]?.ts)).toBe('2026-01-01T00:00:00.000Z')
     const meta = await queryRows(store.connection, "MATCH (m:omw_meta {key: 'schema_version'}) RETURN m.value AS v")
-    expect(String(meta[0]?.v)).toBe('8')
+    expect(String(meta[0]?.v)).toBe('9')
     await store.close()
   }, 60_000)
 })
@@ -514,7 +514,7 @@ const V7_COMPACTION_RUN =
   'config_snapshot_json STRING, started_at STRING, shadowed_seqs_json STRING, shadowed_range_json STRING, PRIMARY KEY(id))'
 
 describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）', () => {
-  it('0007 旧库升级：六列新增、旧行可读、版本 8、备份文件产生', async () => {
+  it('0007 旧库升级：0008+0009 列新增、旧行可读、版本 9、备份文件产生', async () => {
     const dir = await makeTempDir('omw-migr-v7-')
     const dbPath = resolveMemoryDbPath(dir)
     runChild('create', dbPath, [
@@ -530,9 +530,9 @@ describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）
     ])
 
     const store = await openMemoryDatabase({ dbPath, dim: DIM, modelId: MODEL })
-    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('8')
+    expect((await readMeta(store.connection)).get(META_KEYS.schemaVersion)).toBe('9')
     const applied = await queryRows(store.connection, `MATCH (s:${SCHEMA_MIGRATION_TABLE}) RETURN s.version AS v`)
-    expect(applied.map((row) => Number(row.v))).toEqual([8])
+    expect(applied.map((row) => Number(row.v))).toEqual([8, 9])
 
     // 六列都补出来了。
     const runColumns = await columnsOf(store.connection, COMPACTION_RUN_TABLE)
@@ -575,3 +575,6 @@ describe('迁移 0008：档位落账 + 句柄统计（Story 8.4 / 矩阵行 7）
     await store.close()
   }, 60_000)
 })
+
+
+

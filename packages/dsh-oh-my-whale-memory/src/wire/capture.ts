@@ -7,7 +7,7 @@
  */
 import type { Context } from '@deepseek-ai/cordis'
 import { dirname, join } from 'node:path'
-import { createCaptureRecorder, type CaptureRecorder } from '../capture/recorder.js'
+import { createCaptureRecorder, type CaptureRecorder, type TokenMeterLike } from '../capture/recorder.js'
 import type { RuntimeConfig } from '../config.js'
 import type { MemoryDatabase } from '../db/database.js'
 
@@ -23,11 +23,27 @@ export interface CaptureWiringOptions {
 /** 返回采集器（供 session/event 监听器共享），并在 apply 期间重放孤儿快照。 */
 export async function wireCapture(options: CaptureWiringOptions): Promise<CaptureRecorder> {
   const { ctx, dbPath, getDb, resolved } = options
+  // Story 10.1 / AD-36：两个宿主服务都是**可选**的（裸 ctx / 精简宿主没有）。
+  // 用 ctx.get 探测而不是写进 inject：缺服务不该让插件不激活（NFR12）。
+  const host = ctx as unknown as { get?: (name: string) => unknown }
+  const persistence = host.get?.('sessionPersistence')
+  const tokenMeter = (host.get?.('tokenMeter') ?? undefined) as TokenMeterLike | undefined
+  const pointerAvailable = persistence !== undefined && persistence !== null
   const recorder = createCaptureRecorder({
     connection: () => getDb()?.connection ?? null,
     captureSteps: resolved.captureSteps,
     snapshotDir: join(dirname(dbPath), 'capture'),
     logger: ctx.logger,
+    // Story 10.1：指针化 + token 触发。available=false 时 recorder 内部走旧 inline 路径。
+    pointer: {
+      available: pointerAvailable,
+      tokenMeter: tokenMeter ?? null,
+      thresholds: {
+        captureTokens: resolved.captureTokens,
+        captureMinTokens: resolved.captureMinTokens,
+        captureMaxTokens: resolved.captureMaxTokens,
+      },
+    },
     // AC③：turn/end 采集前显式 await flush（宿主不在 turn 边界 flush；session.md:741）。
     // 裸 ctx（单测）没有 sessions 服务时缺省 no-op。
     flush: (session) => {
@@ -50,3 +66,4 @@ export async function wireCapture(options: CaptureWiringOptions): Promise<Captur
   }
   return recorder
 }
+

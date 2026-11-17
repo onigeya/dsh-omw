@@ -62,14 +62,17 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(columns.size).toBe(19)
   })
 
-  it('l0_raw 表含 AC2 四列 + Story 4.2 墓碑两列', async () => {
+  it('l0_raw 表含 AC2 四列 + Story 4.2 墓碑两列 + Story 10.1 pointer 两列', async () => {
     const rows = await queryAll(store.connection, `CALL table_info('l0_raw') RETURN name, type`)
     const columns = new Map(rows.map((r) => [String(r.name), String(r.type)]))
     expect([...columns.keys()]).toEqual(expect.arrayContaining(['id', 'raw_text', 'recorded_at', 'actor']))
     // Story 4.2 / AD-4：墓碑只允许一次改写，靠这两列记录改写者与时刻。
     expect(columns.get('redacted_by')).toBe('STRING')
     expect(columns.get('redacted_at')).toBe('STRING')
-    expect(columns.size).toBe(6)
+    // Story 10.1 / AD-36：pointer 行两列（inline 行读回 NULL）。
+    expect(columns.get('seq')).toBe('INT64')
+    expect(columns.get('event_type')).toBe('STRING')
+    expect(columns.size).toBe(8)
   })
 
   it('generation_log 表 16 列、类型逐字（Story 1.10 / AD-21；4.2 加 detail）', async () => {
@@ -106,7 +109,7 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
   it('omw_meta 写入了库级元数据（AC2）', async () => {
     const rows = await queryAll(store.connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
     const meta = new Map(rows.map((r) => [String(r.key), String(r.value)]))
-    expect(meta.get('schema_version')).toBe('8')
+    expect(meta.get('schema_version')).toBe('9')
     expect(meta.get('embedding_dim')).toBe('4')
     expect(meta.get('embedding_model_id')).toBe('test-embed-model')
     expect(meta.get('created_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/)
@@ -158,3 +161,4 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(rows.map((r) => String(r.name))).toContain('memory_embedding_hnsw')
   })
 })
+

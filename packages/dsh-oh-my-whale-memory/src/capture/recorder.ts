@@ -14,11 +14,21 @@
  *    落库转后台，快照文件是崩溃标记，未删即孤儿，启动时重放（AC5）。
  */
 import type * as lbug from '@ladybugdb/core'
-import { captureStableKey, l0RawId, writeL0Raw } from '../db/l0.js'
+import { captureStableKey, l0PointerId, l0RawId, writeL0Pointer, writeL0Raw } from '../db/l0.js'
+import { readMetaValue, writeMetaValue } from '../db/meta.js'
 import { runInTransaction } from '../db/transaction.js'
 import { trackInboxBackgroundTask } from '../inbox/consumer.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import { writeInboxItem } from '../inbox/queue.js'
+import {
+  EMPTY_TOKEN_LEDGER,
+  formatTokenLedgerState,
+  parseTokenLedgerState,
+  planTrigger,
+  tokenLedgerMetaKey,
+  type TokenLedgerThresholds,
+  type TokenNodeLike,
+} from './token-ledger.js'
 import { recordPurifyRun } from '../context/purify-ledger.js'
 import {
   purifyMessages,
@@ -48,6 +58,49 @@ function hasText(text: string): boolean {
   return text.trim().length > 0
 }
 
+/** Story 10.1：进入 L0 的三类宿主事件（非 text part 一律不进）。 */
+const POINTER_EVENT_TYPES = ['user/message', 'assistant/message', 'tool/result'] as const
+
+/**
+ * Story 10.1：事件是否携带非空 text part。
+ *
+ * 宿主把消息放在 `data.message`（部分路径直接放 `data`）；两种形态都认，
+ * 非 text 块（image / reasoning / tool-call arguments）不算。
+ */
+function eventHasText(event: unknown): boolean {
+  const payload = eventPayload(event)
+  const message = (payload.message ?? payload) as { readonly content?: unknown } | null | undefined
+  const content = message?.content
+  if (typeof content === 'string') return content.trim().length > 0
+  if (!Array.isArray(content)) return false
+  return content.some((block) => {
+    const candidate = block as { readonly type?: unknown, readonly text?: unknown } | null | undefined
+    return candidate?.type === 'text' && typeof candidate.text === 'string' && candidate.text.trim().length > 0
+  })
+}
+
+/** Story 10.1：token 触发器（宿主可选服务）。 */
+export interface TokenMeterLike {
+  measure(session: unknown): { readonly nodes?: readonly TokenNodeLike[] } | undefined
+}
+
+/** Story 10.1：指针化采集的运行时开关与依赖（缺省 = 旧 inline 快照路径）。 */
+export interface PointerCaptureOptions {
+  /** `ctx.sessionPersistence` 在场 = 可写指针行（否则保留 inline 快照并 warn）。 */
+  readonly available: boolean
+  /** `ctx.tokenMeter`（缺失 ⇒ 回退 captureSteps 触发）。 */
+  readonly tokenMeter: TokenMeterLike | null
+  readonly thresholds: TokenLedgerThresholds
+}
+
+export type CaptureTriggerMode = 'tokens' | 'steps(degraded)'
+export type CapturePersistenceMode = 'available' | 'unavailable'
+
+export interface CaptureMode {
+  readonly trigger: CaptureTriggerMode
+  readonly persistence: CapturePersistenceMode
+}
+
 export interface CaptureRecorderOptions {
   /** 惰性取连接：建库完成前为 null（那一次采集直接放弃，不抛）。 */
   readonly connection: () => lbug.Connection | null
@@ -69,16 +122,25 @@ export interface CaptureRecorderOptions {
    * 缺省 = 模块默认（R1 + R3 开、R2 关）。L0 始终写**原文**（append-only，NFR10）。
    */
   readonly purify?: PurifyOptions
+  /**
+   * Story 10.1：指针化采集。缺省 = 旧 inline 快照路径（Epic 2 起的行为不变）。
+   * `available=false`（sessionPersistence 缺失）时也走旧路径并 warn。
+   */
+  readonly pointer?: PointerCaptureOptions
 }
 
 export interface CaptureRecorder {
   recordStepEnd(session: unknown, event: unknown): void
   recordCompactionStart(session: unknown, event: unknown): void
   recordTurnEnd(session: unknown, event: unknown): void
+  /** Story 10.1：三类消息事件（text part 非空）进「下一边界批量写指针行」的缓冲。 */
+  recordMessage(session: unknown, event: unknown): void
   /** 会话销毁：清掉该会话的步数计数与「已采集最大 turn」（有界内存，不依赖 turn/end 配对）。 */
   resetSession(sessionId: string): void
   /** 启动扫描残留快照（有文件 = 事务未提交）并重放；返回重放条数。 */
   replayOrphanSnapshots(): Promise<number>
+  /** Story 10.1：status 可见的采集模式（tokens / steps(degraded)；指针持久化是否可用）。 */
+  captureMode(): CaptureMode
 }
 
 interface CaptureEntry {
@@ -109,6 +171,128 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     options.logger?.warn(message)
   }
   const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error))
+
+  // Story 10.1：指针化采集状态（每会话的「下一边界要写的 seq → 事件类型」）。
+  const pointer = options.pointer
+  const pointerActive = pointer?.available === true
+  // sessionPersistence 缺失的降级告警：只在第一次边界出现（不在 apply 期刷，避免 success 路径告警）。
+  let warnedNoPersistence = false
+  const warnNoPersistenceOnce = (): void => {
+    if (pointer === undefined || pointerActive || warnedNoPersistence) return
+    warnedNoPersistence = true
+    warn('sessionPersistence 不可用：L0 保留 inline 快照采集（pointer 采集降级，status 可见）')
+  }
+  const buffered = new Map<string, Map<number, string>>()
+  const pointerBuffer = (sessionId: string): Map<number, string> => {
+    const existing = buffered.get(sessionId)
+    if (existing !== undefined) return existing
+    const created = new Map<number, string>()
+    buffered.set(sessionId, created)
+    return created
+  }
+
+  /** 把当前会话缓冲的指针行在一个事务里写出（同 seq 重放幂等）。 */
+  async function flushPointerRows(sessionId: string, connection: lbug.Connection): Promise<readonly number[]> {
+    const buffer = buffered.get(sessionId)
+    if (buffer === undefined || buffer.size === 0) return []
+    const entries = [...buffer.entries()].sort((a, b) => a[0] - b[0])
+    const recordedAt = now()
+    await runInTransaction(connection, async () => {
+      for (const [seq, eventType] of entries) {
+        await writeL0Pointer(connection, {
+          id: l0PointerId(sessionId, seq),
+          sessionId,
+          seq,
+          eventType,
+          recordedAt,
+        })
+      }
+    })
+    buffer.clear()
+    return entries.map(([seq]) => seq)
+  }
+
+  /** 指针模式下只写 INBOX（正文是 10.1 的过渡形态；L0 已由 pointer 行承载）。 */
+  async function persistInboxOnly(entry: CaptureEntry, firstSeq: number | null): Promise<void> {
+    const connection = options.connection()
+    if (connection === null) throw new Error('记忆库未就绪：采集写入放弃')
+    // INBOX id 指向本段第一条 pointer 行：EII 沿 source_refs 能命中真实 L0（且 pointer 行在新谓词下可达）。
+    const id = firstSeq !== null && Number.isInteger(firstSeq) && firstSeq >= 0
+      ? l0PointerId(entry.sessionId, firstSeq)
+      : l0RawId(captureStableKey(entry.kind, entry.sessionId, entry.ref))
+    await runInTransaction(connection, () =>
+      writeInboxItem(connection, {
+        id,
+        payload: entry.inboxText,
+        sessionId: entry.sessionId,
+        kind: entry.kind,
+        now: entry.recordedAt,
+      }))
+    if (entry.purify !== null && entry.inboxText !== entry.text) {
+      await recordPurifyRun(
+        {
+          sessionId: entry.sessionId,
+          rangeStart: 0,
+          rangeEnd: entry.purify.sourceChars,
+          ruleHits: entry.purify.ruleHits,
+          removedChars: entry.purify.removedChars,
+          removedTokens: entry.purify.removedTokens,
+        },
+        { logger: options.logger },
+      )
+    }
+  }
+
+  /**
+   * 一个采集边界的指针化处理：先写指针行，再算 token 增量并决定是否触发 INBOX。
+   *
+   * 触发条件（AC:2026）：`seq > lastSeq` 的 tokens 累计 ≥ captureTokens；`forceFlush`（compaction/start）
+   * 无视阈值强制触发；`tokenMeter` 缺失时退回 `captureSteps` 连续步数（NFR12）。
+   */
+  async function tokenBoundary(
+    kind: string,
+    session: unknown,
+    sessionId: string,
+    ref: string,
+    forceFlush: boolean,
+  ): Promise<void> {
+    const connection = options.connection()
+    if (connection === null) return
+    const firstSeq = (() => {
+      const buffer = buffered.get(sessionId)
+      if (buffer === undefined || buffer.size === 0) return null
+      return Math.min(...buffer.keys())
+    })()
+    const flushed = await flushPointerRows(sessionId, connection)
+    const refOfRange = flushed.length > 0
+      ? String(flushed[0]) + '-' + String(flushed[flushed.length - 1])
+      : ref
+
+    let triggered = false
+    if (pointer?.tokenMeter != null) {
+      const state = parseTokenLedgerState(await readMetaValue(connection, tokenLedgerMetaKey(sessionId)))
+      const nodes = pointer.tokenMeter.measure(session)?.nodes ?? []
+      const decision = planTrigger(state, nodes, pointer.thresholds, { forceFlush })
+      triggered = decision.triggered
+      if (decision.oversize) {
+        warn('token 触发超过硬上限（单事件不切碎，标记 oversize）：session=' + sessionId + ' ref=' + refOfRange)
+      }
+      if (triggered) {
+        const entry = entryFor(kind, session, refOfRange)
+        if (hasText(entry.text)) await persistInboxOnly(entry, firstSeq)
+      }
+      // 触发成功后才推进账本；写失败时 state 不前进，下一边界会重新带上同一批 nodes。
+      await writeMetaValue(connection, tokenLedgerMetaKey(sessionId), formatTokenLedgerState(decision.state))
+      return
+    }
+
+    // 降级：tokenMeter 缺失时用 captureSteps 连续步数触发（与旧路径同一计数器）。
+    triggered = steps.recordStep(sessionId)
+    if (triggered) {
+      const entry = entryFor(kind, session, refOfRange)
+      if (hasText(entry.text)) await persistInboxOnly(entry, firstSeq)
+    }
+  }
 
   /**
    * 一个事务里写 L0 行 + INBOX 行；同一稳定身份重放幂等（MERGE ON CREATE SET）。
@@ -188,16 +372,32 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
 
   return {
     recordStepEnd(session, event) {
+      warnNoPersistenceOnce()
       const payload = eventPayload(event)
       const sessionId = inboxSessionKey(session)
-      if (!steps.recordStep(sessionId)) return
       const ref = String(payload.turn ?? '?') + ':' + String(payload.step ?? '?')
+      // Story 10.1：指针模式只在边界批量写 pointer 行 + 算 token 触发；不再写 inline 快照。
+      if (pointerActive) {
+        background(tokenBoundary('step', session, sessionId, ref, false), 'step/end(pointer)')
+        return
+      }
+      if (!steps.recordStep(sessionId)) return
       const entry = entryFor('step', session, ref)
       if (!hasText(entry.text)) {
         warn('step/end 采集跳过：会话文本为空（' + entry.sessionId + ' @ ' + ref + '）')
         return
       }
       background(persist(entry), 'step/end')
+    },
+
+    recordMessage(session, event) {
+      if (!pointerActive) return
+      const type = (event as { readonly type?: unknown } | null | undefined)?.type
+      if (typeof type !== 'string' || !(POINTER_EVENT_TYPES as readonly string[]).includes(type)) return
+      const seq = (event as { readonly seq?: unknown } | null | undefined)?.seq
+      if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0) return
+      if (!eventHasText(event)) return
+      pointerBuffer(inboxSessionKey(session)).set(seq, type)
     },
 
     recordCompactionStart(session, event) {
@@ -208,6 +408,11 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
       const ref = typeof compactionId === 'string' && compactionId.length > 0
         ? compactionId
         : 'turn-' + String(payload.turn ?? 'manual')
+      // Story 10.1 / AC:2028：force flush 当前累计并重置游标；同步路径只记 seq 区间、不读正文。
+      if (pointerActive) {
+        background(tokenBoundary('compaction', session, sessionId, ref, true), 'compaction/start(pointer)')
+        return
+      }
       const entry = entryFor('compaction', session, ref)
       if (!hasText(entry.text)) {
         // P5：空文本连快照也不落，否则会造出「重放也写不出内容」的空孤儿。
@@ -240,6 +445,7 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     },
 
     recordTurnEnd(session, event) {
+      warnNoPersistenceOnce()
       const payload = eventPayload(event)
       const sessionId = inboxSessionKey(session)
       const reason = payload.reason
@@ -250,6 +456,26 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
       const turn = typeof payload.turn === 'number' && Number.isFinite(payload.turn) ? payload.turn : -1
       const seen = lastTurn.get(sessionId)
       if (seen !== undefined && turn <= seen) return
+      // Story 10.1：指针模式先 flush 指针行，再按 token 增量触发；turn 文本仍喂反思计分。
+      if (pointerActive) {
+        const turnEntry = entryFor('turn', session, String(turn))
+        steps.reset(sessionId)
+        background((async () => {
+          if (options.flush) {
+            try {
+              await options.flush(session)
+            } catch (error) {
+              warn('turn/end 采集前的 session flush 失败（继续采集）：' + errorText(error))
+            }
+          }
+          await tokenBoundary('turn', session, sessionId, String(turn), false)
+          if (hasText(turnEntry.text)) {
+            options.onTurnCaptured?.({ text: turnEntry.text, recordedAt: turnEntry.recordedAt })
+          }
+          lastTurn.set(sessionId, turn)
+        })(), 'turn/end(pointer)')
+        return
+      }
       // P3：文本与 recorded_at 必须在 flush 之前取，flush 之后 deriveMessages 可能已被下一轮推进。
       const entry = entryFor('turn', session, String(turn))
       if (!hasText(entry.text)) {
@@ -277,6 +503,14 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     resetSession(sessionId) {
       steps.reset(sessionId)
       lastTurn.delete(sessionId)
+      buffered.delete(sessionId)
+    },
+
+    captureMode() {
+      return {
+        trigger: pointer?.tokenMeter != null ? 'tokens' : 'steps(degraded)',
+        persistence: pointerActive ? 'available' : 'unavailable',
+      }
     },
 
     async replayOrphanSnapshots() {
@@ -317,3 +551,4 @@ export function createCaptureRecorder(options: CaptureRecorderOptions): CaptureR
     },
   }
 }
+
