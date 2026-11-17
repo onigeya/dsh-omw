@@ -33,6 +33,7 @@ import { createCompactionWiring } from './context/compaction-wiring.js'
 import { registerCompactionCriteria, resetCompactionPlans } from './context/compaction-plan-registry.js'
 import { resetPurifyOptions, registerPurifyOptions } from './context/purify-runtime.js'
 import { createPurifyLedgerWriter, registerPurifyLedgerWriter } from './context/purify-ledger.js'
+import { IOT_THINKING_PRESENT_NOTICE, detectIotThinking } from './context/purify-probe.js'
 import { detectCompactionOverlayGap, compactionOverlayGapWarning } from './context/compaction-gap.js'
 import { registerHandleWriter, setCompactionReadonly } from './context/handle-writer.js'
 import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
@@ -327,6 +328,13 @@ export async function apply(
   }
 
   const dbPath = resolveMemoryDbPath(profile.dir)
+  // Story 8.6 / T7：iot-thinking 互斥探测（只读）。在场 ⇒ 本插件仍只做 text 面并说明；
+  // 不在场 ⇒ 行为完全相同（不写日志、不改变净化规则）。
+  const iotThinking = detectIotThinking({
+    dshHome: typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : null,
+    profileDir: profile.dir,
+  })
+  if (iotThinking.present) ctx.logger.info(IOT_THINKING_PRESENT_NOTICE)
   const embedding = resolveEmbeddingProfile(resolved.embedding)
   for (const message of embedding.warnings) {
     ctx.logger.warn(message)
