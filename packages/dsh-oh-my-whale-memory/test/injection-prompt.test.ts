@@ -22,6 +22,7 @@ import {
   type InjectionPromptHost,
 } from '../src/injection/prompt'
 import { createInjectionStore } from '../src/injection/state'
+import { createSkeletonStore } from '../src/injection/skeleton'
 
 interface CapturedSection { name: string; order: number; text: string | ((context: unknown) => string); interpolate?: boolean }
 interface CapturedContext { name: string; order: number; text: string | ((context: unknown) => string); interpolate?: boolean }
@@ -47,10 +48,12 @@ function makeHost(): { host: InjectionPromptHost; sections: CapturedSection[]; c
 
 describe('注入面注册（Story 3.3 / B1）', () => {
   it('section 是常量文本、名 omw-memory、order=600、关闭插值（AD-23：section 常量 + context 动态）', () => {
-    const { host, sections } = makeHost()
-    const dispose = registerInjectionPrompt(host, createInjectionStore())
+    const { host, sections, contexts } = makeHost()
+    const dispose = registerInjectionPrompt(host, createInjectionStore(), createSkeletonStore())
 
-    expect(dispose).toHaveLength(2)
+    // Story 8.5 / T3：第三个注册项是动态骨架 context（名 omw-memory-dynamic）。
+    expect(dispose).toHaveLength(3)
+    expect(contexts.map((entry) => entry.name)).toEqual(['omw-memory:recall', 'omw-memory-dynamic'])
     const section = sections[0]!
     expect(section.name).toBe(INJECTION_SECTION_NAME)
     expect(section.name).toBe('omw-memory')
@@ -123,3 +126,4 @@ describe('注入面注册（Story 3.3 / B1）', () => {
     await expect(plugin.apply(ctx, {})).resolves.toBeUndefined()
   })
 })
+

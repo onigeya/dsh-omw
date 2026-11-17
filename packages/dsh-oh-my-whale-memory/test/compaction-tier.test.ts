@@ -21,6 +21,7 @@ import {
   planRegionTier,
 } from '../src/context/compaction-tier'
 import type { T1MessageLike } from '../src/context/compaction-t1'
+import { SKELETON_SOURCE_KIND } from '../src/shared/injection-vocab'
 
 const CRITERIA = { lengthMin: 1200, t3Threshold: 8000 }
 
@@ -184,8 +185,7 @@ describe('planRegionTier：区间定档（长度三带 + 硬下界的组合入�
     expect(plan.protectedContent).toBe(true)
   })
 
-  it('user 原话超过 lengthMin - 余量 ⇒ 下界越界可见；受保护内容仍短路成 T1', () => {
-    // 一条约 1500 token 的 user 原话 + 余量 200 > lengthMin 1200 ⇒ 越界。
+  it('user 原话超过 lengthMin - 余量 ⇒ 下界越界可见；受保护内容仍短路成 T1', () => {    // 一条约 1500 token 的 user 原话 + 余量 200 > lengthMin 1200 ⇒ 越界。
     const longUser = 'u'.repeat(6000)
     const plan = planRegionTier({ messages: [assistantText(40_000), userText(longUser)], criteria: CRITERIA })
     expect(plan.tier).toBe('T1')
@@ -198,6 +198,18 @@ describe('planRegionTier：区间定档（长度三带 + 硬下界的组合入�
     expect(floorOnly.tier).toBe('T1')
     expect(floorOnly.reason).toBe(TIER_REASON_LENGTH_MIN_FLOOR)
     expect(floorOnly.requiredMin).toBe(LENGTH_MIN_SAFETY_MARGIN_TOKENS)
+  })
+
+  it('动态骨架消息 ⇒ T1 且 protectedContent=true（Story 8.5 / T4：骨架不计可压预算）', () => {
+    const skeleton: T1MessageLike = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '记忆骨架（本会话不可删）' }],
+      source: { kind: SKELETON_SOURCE_KIND },
+    }
+    const plan = planRegionTier({ messages: [assistantText(40_000), skeleton], criteria: CRITERIA })
+    expect(plan.tier).toBe('T1')
+    expect(plan.reason).toBe(TIER_REASON_PROTECTED)
+    expect(plan.protectedContent).toBe(true)
   })
 
   it('判据缺失 ⇒ T1 且不做硬下界计算（不抛）', () => {

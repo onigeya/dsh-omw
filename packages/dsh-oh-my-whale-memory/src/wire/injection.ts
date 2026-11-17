@@ -24,7 +24,13 @@ import {
   type OpenstartPreStepPayload,
 } from '../injection/openstart.js'
 import type { InjectionStore } from '../injection/state.js'
+import {
+  createSkeletonRefresher,
+  createSkeletonStore,
+  type SkeletonFact,
+} from '../injection/skeleton.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
+import { computeInjectionBudget } from '../recall/injection-budget.js'
 import type { SessionEventHost } from './host.js'
 
 /**
@@ -65,14 +71,41 @@ export interface InjectionWiringOptions {
    * 监听器都必须在该预算内向宿主交回决策，不阻塞首个请求（F-01 / D2）。
    */
   readonly generationBudgetMs?: number
+  /**
+   * Story 8.5 / T2：宿主窗口与压力（`tokenMeter.contextPressure(session)`）。
+   * 可选服务缺失 / 抛错一律返回 undefined ⇒ 预算退回绝对上限（AC:1829：不假设窗口）。
+   */
+  readonly contextPressure?: (session: unknown) => {
+    readonly pressureTokens?: number
+    readonly contextWindow?: number
+  } | undefined
+  /**
+   * Story 8.5 / T3：动态骨架的读库端口与绝对上限（Config `alwaysOnTokenCap`，不套窗口公式）。
+   * 缺省 = 不注册骨架 context（裸 ctx / 精简宿主），注入面照常工作。
+   */
+  readonly skeleton?: {
+    readonly readFacts: () => Promise<readonly SkeletonFact[]>
+    readonly capTokens: () => number
+  }
 }
 
 export function wireInjection(ctx: Context, options: InjectionWiringOptions): void {
-  // 1) 注入面：section 常量 + 动态 context provider。
+  // 1) 注入面：section 常量 + 动态 context provider + Story 8.5 的动态骨架 context。
+  const skeletonStore = createSkeletonStore()
   const systemPromptHost = (ctx as unknown as { readonly systemPrompt?: InjectionPromptHost }).systemPrompt
   if (systemPromptHost !== undefined) {
-    registerInjectionPrompt(systemPromptHost, options.store)
+    registerInjectionPrompt(systemPromptHost, options.store, skeletonStore)
   }
+  // Story 8.5 / T3：骨架每次命题刷新一次（压缩移除后下一请求自动补回，AC:1823）。
+  // 没有 systemPrompt 面时骨架无处消费，不刷新（裸 ctx 不产生无用读库）。
+  const refreshSkeleton = options.skeleton === undefined || systemPromptHost === undefined
+    ? undefined
+    : createSkeletonRefresher({
+      store: skeletonStore,
+      readFacts: options.skeleton.readFacts,
+      capTokens: options.skeleton.capTokens,
+      logger: ctx.logger,
+    })
 
   // 2) 生成入口：`agent/pre-step`。必须调用 next() 并把决策交回宿主（F-01：waterfall
   //    监听器不调 next 即短路宿主决策，宿主随后读 decision.kind 会 TypeError）。
@@ -92,18 +125,35 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       : routeFromSession(session)),
     logger: ctx.logger,
     budgetMs,
+    // Story 8.5 / T2：注入预算改读 T1 的 tokens 公式（窗口/压力缺席即退回绝对上限）。
+    resolveBudget: (session) => {
+      const pressure = options.contextPressure?.(session)
+      return computeInjectionBudget({
+        contextWindow: pressure?.contextWindow,
+        pressureTokens: pressure?.pressureTokens,
+        injectionTokenCap: options.resolved.injectionTokenCap,
+        ratio: options.resolved.injectionRatio,
+        singleCap: options.resolved.injectionSingleCap,
+        summaryCap: options.resolved.injectionSummaryCap,
+      })
+    },
   })
   const host = ctx as unknown as AgentPreStepHost
   host.on?.('agent/pre-step', async (payload, next) => {
-    const generation = generator(payload as OpenstartPreStepPayload).catch(() => {
+    const preStep = payload as OpenstartPreStepPayload
+    const generation = generator(preStep).catch(() => {
       // 生成失败/超时/异常只在注入面降级，不影响宿主决策。
     })
+    // 骨架刷新与生成并行；两者都必须在本预算内交回决策（骨架刷新失败已在 refresher 内收敛）。
+    const skeleton = refreshSkeleton === undefined
+      ? Promise.resolve()
+      : refreshSkeleton(inboxSessionKey(preStep.agent?.session))
     let timer: ReturnType<typeof setTimeout> | undefined
     const budget = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, budgetMs)
     })
     try {
-      await Promise.race([generation, budget])
+      await Promise.race([Promise.allSettled([generation, skeleton]), budget])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }
@@ -118,5 +168,6 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     const type = (event as { readonly type?: unknown } | null | undefined)?.type
     if (type !== 'session/disposed') return
     options.store.reset(inboxSessionKey(session))
+    skeletonStore.reset(inboxSessionKey(session))
   })
 }

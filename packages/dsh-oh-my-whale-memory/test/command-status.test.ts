@@ -226,19 +226,19 @@ describe('renderMemoryStatus：开局注入两行（Story 3.3 / B4）', () => {
   const INJECTION = {
     sessionKey: 'session-1',
     items: 3,
-    chars: 1200,
+    tokens: 1200,
     degraded: false,
     truncated: false,
     overBudget: false,
     keptInviolable: 0,
-    unit: 'chars' as const,
+    unit: 'tokens' as const,
     elapsedMs: 12,
     at: '2026-11-14T00:00:00.000Z',
   }
 
-  it('已注入：显式标注「预算单位=字符」+ 条数/字符；无降级/截断后缀', () => {
+  it('已注入：显式标注「预算单位=tokens」+ 条数/tokens；无降级/截断后缀', () => {
     const text = renderMemoryStatus({ ...STATUS_BASE, injection: INJECTION, injectionEnabled: true })
-    expect(text).toContain('injection: enabled（预算单位=字符；上次注入 3 条 / 1200 字符）')
+    expect(text).toContain('injection: enabled（预算单位=tokens；上次注入 3 条 / 1200 tokens）')
     expect(text).not.toContain('injection: 预算超限')
   })
 
@@ -248,7 +248,7 @@ describe('renderMemoryStatus：开局注入两行（Story 3.3 / B4）', () => {
       injection: { ...INJECTION, degraded: true, truncated: true, overBudget: true, keptInviolable: 1 },
       injectionEnabled: true,
     })
-    expect(text).toContain('injection: enabled（预算单位=字符；上次注入 3 条 / 1200 字符，降级，已截断）')
+    expect(text).toContain('injection: enabled（预算单位=tokens；上次注入 3 条 / 1200 tokens，降级，已截断）')
     expect(text.split('\n').at(-1)).toBe('injection: 预算超限（不可删集合先保留）')
   })
 
@@ -416,3 +416,4 @@ describe('Story 5.1 / AC:1171：存储后端行（backend）', () => {
     expect(wasm.split('\n').at(-1)).toBe('backend: wasm')
   })
 })
+

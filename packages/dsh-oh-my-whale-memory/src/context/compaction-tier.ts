@@ -5,8 +5,9 @@
  * （NFR17 / AD-7：LLM 只做分段，且只在空闲闸门内异步跑）。
  *
  * 判定顺序（先短路、后分带）：
- * 1. 受保护内容（user 原话 / system 消息 / `priority=-1` / `kind=instruction`）⇒ **T1**，
- *    且不计入可压预算（AC:1693-1695：短路规则优先于熵与长度）；
+ * 1. 受保护内容（user 原话 / system 消息 / `priority=-1` / `kind=instruction` / **动态骨架**）
+ *    ⇒ **T1**，且不计入可压预算（AC:1693-1695：短路规则优先于熵与长度；T4 由
+ *    `classifyT1` 的骨架判据承担）；
  * 2. 判据算不出（缺字段 / NaN / 非法三带）⇒ **T1 fail-closed**，不抛（AC:1697-1699）；
  * 3. 否则 `< lengthMin ⇒ T1`、`[lengthMin, t3Threshold) ⇒ T2`、`>= t3Threshold ⇒ T3`。
  *

@@ -8,6 +8,7 @@
  * 三条纪律：
  * 1. **T1 短路优先于一切**（AC:1693-1695）：段内含 user 原话 / system 消息 / 受保护记忆
  *    （`priority=-1` 或 `kind=instruction`）⇒ 直接 T1，且**不计入可压预算**；
+ *    Story 8.5 / T4 追加一条：含**动态骨架**（`hasSkeleton`）同样 T1 + 不计可压；
  * 2. **判据算不出 ⇒ T1 不压**（AC:1697-1699）：分档失败时宁可不压（与 fail-open 方向相反，
  *    因为「压了」是不可逆的内容损失）；
  * 3. **边界不平衡 ⇒ 整次放弃**（AC:1687 / INV-10）：stock 的 `compactRegion` 会直接抛错，
@@ -33,6 +34,11 @@ export interface CompactionSegment {
   readonly hasSystemMessage: boolean
   /** 段内含受保护记忆：`priority=-1` 或 `kind=instruction`（AC:1695）。 */
   readonly hasProtectedMemory: boolean
+  /**
+   * 段内含**动态骨架**消息（Story 8.5 / T4、FR-25）：骨架与 T1 同样不计入可压预算，
+   * 否则「压缩把骨架折掉 → 再补回」会变成自噬循环。
+   */
+  readonly hasSkeleton?: boolean
   /** 熵判据；`null`/`undefined` = 算不出 ⇒ T1。 */
   readonly entropy?: number | null
   /** 起点是否 tool-call/result 平衡（调用方用 `toolPairingBalancedBefore` 判定）。 */
@@ -81,6 +87,8 @@ function classify(segment: CompactionSegment, lowEntropyThreshold: number): Comp
   if (segment.hasUserUtterance) return { ...span, tier: 'T1', reason: 'user-utterance' }
   if (segment.hasSystemMessage) return { ...span, tier: 'T1', reason: 'system-message' }
   if (segment.hasProtectedMemory) return { ...span, tier: 'T1', reason: 'protected-memory' }
+  // Story 8.5 / T4：骨架段按 T1 处理（不计入可压预算）。
+  if (segment.hasSkeleton === true) return { ...span, tier: 'T1', reason: 'skeleton-fact' }
   if (segment.entropy === null || segment.entropy === undefined || !Number.isFinite(segment.entropy)) {
     // 判据算不出：不压（AC:1697-1699）。
     return { ...span, tier: 'T1', reason: 'criterion-unavailable' }

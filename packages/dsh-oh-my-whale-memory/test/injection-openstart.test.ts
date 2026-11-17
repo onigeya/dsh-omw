@@ -23,6 +23,8 @@ import {
   type OpenstartRoute,
 } from '../src/injection/openstart'
 import { createInjectionStore } from '../src/injection/state'
+import { DEFAULT_INJECTION_BUDGET_CAPS } from '../src/injection/budget'
+import { estimateTokens } from '../src/shared/text-budget'
 import type { RecallCoreResult, RecallResultItem } from '../src/recall/core'
 
 const delta = (text: string): StreamChunk => ({ type: 'text-delta', index: 0, text }) as StreamChunk
@@ -323,23 +325,23 @@ describe('createOpenstartGenerator：每会话一次与隔离', () => {
 })
 
 describe('createOpenstartGenerator：预算与 lastInjection（B3）', () => {
-  it('超长证据被预算裁剪：text ≤8000 字符、lastInjection.truncated=true、unit=chars', async () => {
+  it('超长证据被预算裁剪：tokens ≤ 缺省总额度、lastInjection.truncated=true、unit=tokens', async () => {
     const { llm } = makeLlm(replyWith(SUMMARY_JSON))
     const longL1 = Array.from({ length: 10 }, (_, index) => ({
       id: `long-${index}`,
       layer: 'L1',
       kind: 'work_fact',
       priority: 0,
-      text: 'y'.repeat(1000),
+      text: 'y'.repeat(4000),
     }))
     const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, ...longL1] })
 
     await generate(payload('s-budget'))
 
     const last = store.readLastInjection()
-    expect(last).toMatchObject({ unit: 'chars', truncated: true, overBudget: false, degraded: false })
-    expect(last?.chars).toBeLessThanOrEqual(8000)
-    expect(last?.chars).toBeGreaterThan(0)
+    expect(last).toMatchObject({ unit: 'tokens', truncated: true, overBudget: false, degraded: false })
+    expect(last?.tokens).toBeLessThanOrEqual(DEFAULT_INJECTION_BUDGET_CAPS.budget)
+    expect(last?.tokens).toBeGreaterThan(0)
     expect(last?.items).toBeGreaterThan(0)
     expect(last?.elapsedMs).toBeGreaterThanOrEqual(0)
     expect(typeof last?.at).toBe('string')
@@ -347,22 +349,22 @@ describe('createOpenstartGenerator：预算与 lastInjection（B3）', () => {
 
   it('不可删集合成员完整出现在 text 中；超预算 ⇒ lastInjection.overBudget=true 且 keptInviolable 计数', async () => {
     const { llm } = makeLlm(replyWith(SUMMARY_JSON))
-    const pinned = { id: 'pin-rule', layer: 'L1', kind: 'work_fact', priority: -1, text: 'P'.repeat(9000) }
+    const pinned = { id: 'pin-rule', layer: 'L1', kind: 'work_fact', priority: -1, text: 'P'.repeat(20_000) }
     const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, L1_ITEM, pinned] })
 
     await generate(payload('s-over-budget'))
 
     const text = store.textFor('s-over-budget')
     expect(text).toContain('[L1] pin-rule')
-    expect(text).toContain('P'.repeat(9000))
+    expect(text).toContain('P'.repeat(20_000))
     const last = store.readLastInjection()
-    expect(last).toMatchObject({ overBudget: true, keptInviolable: 1, unit: 'chars' })
-    expect(last?.chars).toBeGreaterThan(8000)
+    expect(last).toMatchObject({ overBudget: true, keptInviolable: 1, unit: 'tokens' })
+    expect(last?.tokens).toBeGreaterThan(DEFAULT_INJECTION_BUDGET_CAPS.budget)
   })
 })
 
 describe('createOpenstartGenerator：观测事件（B4b）', () => {
-  it('注入完成 ⇒ logger.info 单行含全部结构化字段（injection/items/chars/degraded/truncated/overBudget/keptInviolable/elapsedMs/unit）', async () => {
+  it('注入完成 ⇒ logger.info 单行含全部结构化字段（injection/items/tokens/degraded/truncated/overBudget/keptInviolable/elapsedMs/unit）', async () => {
     const info = vi.fn()
     const { llm } = makeLlm(replyWith(SUMMARY_JSON))
     const { store, generate } = makeGenerator({ llm, logger: { warn: vi.fn(), info } })
@@ -374,13 +376,13 @@ describe('createOpenstartGenerator：观测事件（B4b）', () => {
     expect(line.startsWith('injection: ')).toBe(true)
     for (const field of [
       'items=',
-      'chars=',
+      'tokens=',
       'degraded=false',
       'truncated=false',
       'overBudget=false',
       'keptInviolable=0',
       'elapsedMs=',
-      'unit=chars',
+      'unit=tokens',
     ]) {
       expect(line).toContain(field)
     }
@@ -404,9 +406,9 @@ describe('createOpenstartGenerator：观测事件（B4b）', () => {
   })
 })
 
-  it('摘要超长（远超 512 tokens 的等价长度）⇒ 实现不做二次 token 校验，交给预算裁剪（≤1200 字符 + 截断）', async () => {
+  it('摘要超长（远超 512 tokens 的等价长度）⇒ 实现不做二次 token 校验，交给预算裁剪（summaryCap + 截断）', async () => {
     // 实现现状：只通过 LLM 的 `maxTokens=512` 约束输出（引擎侧截断），不在插件侧二次 estimateTokens
-    // 校验；超长 summary 由 B3 预算的单条 1200 字符规则兜底。本用例钉住该现状，防未来语义漂移。
+    // 校验；超长 summary 由预算的 `injectionSummaryCap`（缺省 512 tokens）兜底。
     const longSummary = 's'.repeat(5000)
     const { llm, calls } = makeLlm(replyWith(JSON.stringify({ summary: longSummary, evidence_ids: [] })))
     const { store, generate } = makeGenerator({ llm })
@@ -418,11 +420,11 @@ describe('createOpenstartGenerator：观测事件（B4b）', () => {
     expect(text).toContain('记忆摘要（开局注入）：')
     const last = store.readLastInjection()
     expect(last?.truncated).toBe(true)
-    expect(last?.chars).toBeLessThanOrEqual(8000)
-    // 摘要行按单条 1200 字符截断（含省略号）。
+    expect(last?.tokens).toBeLessThanOrEqual(DEFAULT_INJECTION_BUDGET_CAPS.budget)
+    // 摘要行按 `injectionSummaryCap`（512 tokens）截断（含省略号）。
     const summaryLine = text.split('\n')[1]!
     expect(summaryLine.endsWith('…')).toBe(true)
-    expect(summaryLine.length).toBeLessThanOrEqual(1200)
+    expect(estimateTokens(summaryLine)).toBeLessThanOrEqual(DEFAULT_INJECTION_BUDGET_CAPS.summaryCap)
   })
 
 describe('createOpenstartGenerator：总预算与取消信号（F-04）', () => {

@@ -16,11 +16,13 @@ import { foldStream } from '../shared/stream-fold.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
 import type { RecallCoreResult, RecallResultItem } from '../recall/core.js'
 import {
+  DEFAULT_INJECTION_BUDGET_RESULT,
   applyInjectionBudget,
   isInviolableItem,
   type InjectionBudgetResult,
   type InjectionDraft,
 } from './budget.js'
+import type { InjectionTokenBudget } from '../recall/injection-budget.js'
 import type { InjectionStore } from './state.js'
 
 /** 摘要输入的召回条数（AC:915：输入为 recall(top-K=8)）。 */
@@ -116,6 +118,11 @@ export interface OpenstartGeneratorOptions {
   readonly topK?: number
   /** F-04：整条生成链（embed/recall/LLM）共享的预算；缺省 = timeoutMs/3000ms。 */
   readonly budgetMs?: number
+  /**
+   * Story 8.5 / T2：本次注入的 tokens 额度（窗口/压力每次都变，故按会话解析而不是 apply 时固定）。
+   * 返回值就是 T1 的结果（含单条/摘要上限与可见告警）；缺省 = Config 默认额度。
+   */
+  readonly resolveBudget?: (session: unknown) => InjectionTokenBudget
   /** 时钟（观测用：`at` / `elapsedMs`；测试注入固定时间）。 */
   readonly now?: () => Date
 }
@@ -250,9 +257,20 @@ export function createOpenstartGenerator(
   /**
    * 收尾：预算裁剪（唯一裁剪点 `budget.ts`）→ 写 ready → 记录 `lastInjection` 观测摘要
    * （进程内、不持久化；B4 的 `/memory status` 读取）→ 结构化观测单行。文本为空 ⇒ 视为零注入 skipped。
+   *
+   * Story 8.5 / T2：额度由 T1（`computeInjectionBudget`）按窗口/压力算好（`caps`），
+   * T1 的可见告警在这里落 warn（AC:1832：不静默降为 0/负数）。
    */
-  const finalize = (key: string, draft: InjectionDraft, degraded: boolean, startedAt: Date): void => {
-    const budget: InjectionBudgetResult = applyInjectionBudget(draft)
+  const finalize = (
+    key: string,
+    draft: InjectionDraft,
+    degraded: boolean,
+    startedAt: Date,
+    resolvedBudget: InjectionTokenBudget,
+  ): void => {
+    // AC:1832：T1 的降级原因必须可见（压力打满 / ratio 非法），不静默按 0 处理。
+    for (const warning of resolvedBudget.warnings) options.logger?.warn(warning)
+    const budget: InjectionBudgetResult = applyInjectionBudget(draft, resolvedBudget)
     if (budget.text === '') {
       options.store.markSkipped(key)
       return
@@ -262,12 +280,12 @@ export function createOpenstartGenerator(
     const summary = {
       sessionKey: key,
       items: budget.items.length,
-      chars: budget.chars,
+      tokens: budget.tokens,
       degraded,
       truncated: budget.truncated,
       overBudget: budget.overBudget,
       keptInviolable: budget.keptInviolable,
-      unit: 'chars' as const,
+      unit: 'tokens' as const,
       elapsedMs: Math.max(0, finishedAt.getTime() - startedAt.getTime()),
       at: finishedAt.toISOString(),
     }
@@ -277,7 +295,7 @@ export function createOpenstartGenerator(
     try {
       options.logger?.info?.(
         'injection: ' +
-        `items=${summary.items} chars=${summary.chars} degraded=${String(summary.degraded)} ` +
+        `items=${summary.items} tokens=${summary.tokens} degraded=${String(summary.degraded)} ` +
         `truncated=${String(summary.truncated)} overBudget=${String(summary.overBudget)} ` +
         `keptInviolable=${summary.keptInviolable} elapsedMs=${summary.elapsedMs} unit=${summary.unit}`,
       )
@@ -293,6 +311,8 @@ export function createOpenstartGenerator(
     if (human === undefined) return
 
     const key = inboxSessionKey(payload.agent?.session)
+    // Story 8.5 / T2：本次注入额度（T1 公式 + Config 上限）；拿不到窗口/压力时退回绝对上限。
+    const resolvedBudget = options.resolveBudget?.(payload.agent?.session) ?? DEFAULT_INJECTION_BUDGET_RESULT
     // 每会话一次：pending（生成中）/ready/skipped 一律短路（AC:916）。
     if (options.store.read(key) !== undefined) return
     options.store.markPending(key)
@@ -308,7 +328,7 @@ export function createOpenstartGenerator(
         options.store.markSkipped(key)
         return
       }
-      finalize(key, draft, degraded, startedAt)
+      finalize(key, draft, degraded, startedAt, resolvedBudget)
     }
     if (aborted()) {
       options.store.markSkipped(key)
@@ -409,6 +429,7 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
-    finalize(key, { ...draft, evidence: [] }, true, startedAt)
+    finalize(key, { ...draft, evidence: [] }, true, startedAt, resolvedBudget)
   }
 }
+

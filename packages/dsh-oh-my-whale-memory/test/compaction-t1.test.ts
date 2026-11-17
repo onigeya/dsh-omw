@@ -8,11 +8,13 @@ import {
   buildT1Summary,
   classifyT1,
   fnv1aAnchor,
+  isSkeletonMessage,
   regionMessages,
   renderRegionText,
   summarizeWithT1,
   type T1MessageLike,
 } from '../src/context/compaction-t1'
+import { SKELETON_SOURCE_KIND } from '../src/shared/injection-vocab'
 
 const text = (value: string): T1MessageLike => ({ role: 'user', content: [{ type: 'text', text: value }] })
 
@@ -40,6 +42,24 @@ describe('classifyT1（矩阵行 1–4）', () => {
 
   it('只有 assistant / tool ⇒ 不是 T1（走 stock T2/T3）', () => {
     expect(classifyT1([{ role: 'system', content: 'head' }, { role: 'assistant', content: 'a' }, { role: 'tool', content: 'r' }])).toBe(false)
+  })
+
+  // Story 8.5 / T4：动态骨架消息即使 role 是 assistant 也按受保护内容处理（折掉它就是自噬）。
+  it('动态骨架消息（source.kind=omw-memory-dynamic）⇒ T1，与 role 无关', () => {
+    const skeleton: T1MessageLike = {
+      role: 'assistant',
+      content: [{ type: 'text', text: '记忆骨架（本会话不可删）' }],
+      source: { kind: SKELETON_SOURCE_KIND },
+    }
+    expect(isSkeletonMessage(skeleton)).toBe(true)
+    expect(classifyT1([{ role: 'system', content: 'head' }, skeleton])).toBe(true)
+  })
+
+  it('source.kind 非骨架 / 缺失 ⇒ 仍按 role 判定（不误伤普通 assistant）', () => {
+    const normal: T1MessageLike = { role: 'assistant', content: 'a', source: { kind: 'runtime-context' } }
+    expect(isSkeletonMessage(normal)).toBe(false)
+    expect(classifyT1([{ role: 'system', content: 'head' }, normal])).toBe(false)
+    expect(classifyT1([{ role: 'system', content: 'head' }, { role: 'assistant', content: 'a', source: null }])).toBe(false)
   })
 })
 

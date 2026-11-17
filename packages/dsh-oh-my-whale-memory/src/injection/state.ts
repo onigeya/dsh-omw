@@ -28,18 +28,18 @@ export interface LastInjectionSummary {
   readonly sessionKey: string
   /** 注入条目数（不含被预算丢弃的）。 */
   readonly items: number
-  /** 计入预算的正文总字符数（摘要 + 引用证据；标题不计）。 */
-  readonly chars: number
+  /** 计入预算的正文总 tokens（摘要 + 引用证据；标题不计）。 */
+  readonly tokens: number
   /** true = 摘要降级（仅 L1 原文）或零摘要注入。 */
   readonly degraded: boolean
   /** true = 发生过截断/丢弃。 */
   readonly truncated: boolean
-  /** true = 不可删集合导致（或最终文本）超 8000 字符预算。 */
+  /** true = 不可删集合导致（或最终文本）超出本实例算出的预算。 */
   readonly overBudget: boolean
   /** 保留的不可删集合成员数（INV-2）。 */
   readonly keptInviolable: number
-  /** 预算单位：本 story 按绝对字符实现（AC:935），tokens 化归 Story 8.5。 */
-  readonly unit: 'chars'
+  /** 预算单位：Story 8.5 起一律 tokens（AD-25 / AC:1801：字符口径退役）。 */
+  readonly unit: 'tokens'
   /** 本次生成耗时（ms；观测用）。 */
   readonly elapsedMs: number
   /** 记录时刻（UTC ISO-8601）。 */

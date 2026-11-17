@@ -36,10 +36,12 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(missing).toEqual([])
     // 顶层字段数量锁定 FR-18 全字段，防止后续误删
     expect(Object.keys(dict).sort()).toEqual([
-      'captureSteps', 'chainDepthThreshold', 'compactionLengthMin', 'compactionOrphanTimeoutMs',
-      'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding', 'expandCountThreshold',
-      'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
-      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'reflection', 'rerank', 'retrievalTopK', 'rrfK', 'strategyGate', 'systemOne',
+      'alwaysOnTokenCap', 'captureSteps', 'chainDepthThreshold', 'compactionLengthMin',
+      'compactionOrphanTimeoutMs', 'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding',
+      'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
+      'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'injectionTokenCap',
+      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'reflection', 'rerank',
+      'retrievalTopK', 'rrfK', 'strategyGate', 'systemOne',
     ])
   })
 
@@ -91,6 +93,12 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.expandCountThreshold.get()).toBe(2)
     expect(resolved.chainDepthThreshold.get()).toBe(2)
     expect(resolved.compactionSelfTuneEnabled.get()).toBe(false)
+    // Story 8.5 / AC:1827-1832：注入预算一律 tokens 的默认值（经验值，可运行期覆盖）。
+    expect(resolved.injectionTokenCap.get()).toBe(4096)
+    expect(resolved.injectionRatio.get()).toBe(0.5)
+    expect(resolved.injectionSingleCap.get()).toBe(512)
+    expect(resolved.injectionSummaryCap.get()).toBe(512)
+    expect(resolved.alwaysOnTokenCap.get()).toBe(2000)
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
@@ -348,6 +356,76 @@ describe('Story 8.4 阈值治理（AC:1713-1760 / INV-12 / FR-28）', () => {
   it('表单投影：五项都带 volatile（否则不进 /settings，AD-11）', () => {
     const dict = Config.dict as Record<string, any>
     for (const field of ['compactionLengthMin', 'compactionT3Threshold', 'expandCountThreshold', 'chainDepthThreshold', 'compactionSelfTuneEnabled']) {
+      expect(dict[field]?.meta?.volatile, field).toBe(true)
+    }
+  })
+})
+
+/**
+ * Story 8.5 / T2：注入预算的五个 Config 字段（AC:1826-1832、AD-25、INV-12）。
+ * 四项上限是正整数硬校验（0/负/NaN 会让注入静默变零或无限）；`injectionRatio` 刻意不校验负数——
+ * 负 ratio 的语义是「预算 0 + 可见告警」，由 T1 产出 warning，不在这里变成启动失败。
+ */
+describe('Story 8.5：注入预算字段（tokens）', () => {
+  it('默认值与 resolved 同源（schema 的 .get() 与 resolveRuntimeConfig 一致）', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    // embedding 缺失的降级 warn 与本组字段无关，用全合法配置只钉注入预算五项。
+    const runtime = resolveRuntimeConfig(validConfig())
+    for (const [schemaField, runtimeValue] of [
+      ['injectionTokenCap', runtime.injectionTokenCap],
+      ['injectionRatio', runtime.injectionRatio],
+      ['injectionSingleCap', runtime.injectionSingleCap],
+      ['injectionSummaryCap', runtime.injectionSummaryCap],
+      ['alwaysOnTokenCap', runtime.alwaysOnTokenCap],
+    ] as const) {
+      expect(schemaResolved[schemaField].get(), schemaField).toBe(runtimeValue)
+    }
+    expect(runtime.injectionTokenCap).toBe(4096)
+    expect(runtime.injectionRatio).toBe(0.5)
+    expect(runtime.injectionSingleCap).toBe(512)
+    expect(runtime.injectionSummaryCap).toBe(512)
+    expect(runtime.alwaysOnTokenCap).toBe(2000)
+    expect(runtime.warnings).toEqual([])
+  })
+
+  it('运行期可覆盖：五项全部按传入值生效（INV-12）', () => {
+    const runtime = resolveRuntimeConfig({
+      ...validConfig(),
+      injectionTokenCap: 2048,
+      injectionRatio: 0.3,
+      injectionSingleCap: 256,
+      injectionSummaryCap: 128,
+      alwaysOnTokenCap: 1024,
+    })
+    expect(runtime.injectionTokenCap).toBe(2048)
+    expect(runtime.injectionRatio).toBe(0.3)
+    expect(runtime.injectionSingleCap).toBe(256)
+    expect(runtime.injectionSummaryCap).toBe(128)
+    expect(runtime.alwaysOnTokenCap).toBe(1024)
+    expect(runtime.warnings).toEqual([])
+  })
+
+  it('四项上限正整数硬校验：0 / 负数 / 非整数 / NaN 抛错', () => {
+    const cases: ReadonlyArray<readonly [string, number]> = [
+      ['injectionTokenCap', 0],
+      ['injectionSingleCap', -1],
+      ['injectionSummaryCap', 2.5],
+      ['alwaysOnTokenCap', Number.NaN],
+    ]
+    for (const [field, bad] of cases) {
+      const cfg = { ...validConfig(), [field]: bad }
+      expect(() => resolveRuntimeConfig(cfg), field + '=' + String(bad)).toThrowError(new RegExp(field))
+      expect(() => resolveRuntimeConfig(cfg), field + '=' + String(bad)).toThrowError(/≥ 1/)
+    }
+  })
+
+  it('injectionRatio 为负不抛错：降级语义是「预算 0 + 可见告警」，由 T1 产出 warning', () => {
+    expect(resolveRuntimeConfig({ ...validConfig(), injectionRatio: -1 }).injectionRatio).toBe(-1)
+  })
+
+  it('五个字段都带 volatile（否则不进 /settings，AD-11）', () => {
+    const dict = Config.dict as Record<string, any>
+    for (const field of ['injectionTokenCap', 'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'alwaysOnTokenCap']) {
       expect(dict[field]?.meta?.volatile, field).toBe(true)
     }
   })

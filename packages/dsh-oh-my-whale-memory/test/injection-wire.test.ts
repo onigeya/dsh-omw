@@ -17,6 +17,7 @@ import type { RuntimeConfig } from '../src/config'
 import type { RecallCoreResult, RecallResultItem } from '../src/recall/core'
 import type { MemoryRecallStore } from '../src/tools/memory-recall'
 import { createInjectionStore } from '../src/injection/state'
+import type { SkeletonFact } from '../src/injection/skeleton'
 import { wireInjection, type InjectionWiringOptions } from '../src/wire/injection'
 
 interface CapturedPromptContext {
@@ -84,6 +85,12 @@ const RESOLVED = {
   injectOnNewSession: true,
   llmProvider: 'p',
   llmModel: 'm',
+  // Story 8.5 / T2：预算字段真实存在（否则 computeInjectionBudget 按 0 处理 ⇒ 零注入）。
+  injectionTokenCap: 4096,
+  injectionRatio: 0.5,
+  injectionSingleCap: 512,
+  injectionSummaryCap: 512,
+  alwaysOnTokenCap: 2000,
 } as unknown as RuntimeConfig
 
 function wire(options: { readonly store?: ReturnType<typeof createInjectionStore>; readonly recall?: MemoryRecallStore; readonly budgetMs?: number } = {}) {
@@ -261,5 +268,72 @@ describe('wireInjection / agent/pre-step waterfall（F-01）', () => {
     wireInjection(host.ctx, { store: createInjectionStore(), recallStore: makeRecall(), resolved: RESOLVED })
     expect(host.contexts).toHaveLength(0)
     expect(host.listeners.filter((entry) => entry.event === 'agent/pre-step')).toHaveLength(1)
+  })
+})
+
+/**
+ * Story 8.5 / T3：动态骨架接线（与下文矩阵 11 的前缀不变量分开，这里只钉「每次命题刷新」）。
+ */
+describe('wireInjection / 动态骨架（T3）', () => {
+  function wireWithSkeleton(options: {
+    readonly readFacts: () => Promise<readonly SkeletonFact[]>
+  }) {
+    const host = makeHost()
+    const store = createInjectionStore()
+    wireInjection(host.ctx, {
+      store,
+      recallStore: makeRecall(),
+      resolved: RESOLVED,
+      skeleton: { readFacts: options.readFacts, capTokens: () => 2000 },
+    })
+    const listener = host.listeners.find((entry) => entry.event === 'agent/pre-step')?.listener
+    if (listener === undefined) throw new Error('wireInjection 未注册 agent/pre-step 监听')
+    const provider = host.contexts.find((entry) => entry.name === 'omw-memory-dynamic')?.text
+    if (typeof provider !== 'function') throw new Error('wireInjection 未注册动态骨架 context')
+    return { listener, read: (key: string) => (provider as (context: unknown) => string)({ agent: { session: { id: key } } }) }
+  }
+
+  it('每次命题刷新骨架：压缩移除后再请求即自动补回（AC:1823）', async () => {
+    let facts: SkeletonFact[] = [{
+      id: 'pin-1',
+      layer: 'L1',
+      kind: 'work_fact',
+      priority: -1,
+      text: '不推送、不提交',
+      recordedAt: '2026-11-17T00:00:00.000Z',
+    }]
+    const skeleton = wireWithSkeleton({ readFacts: async () => facts })
+    const next = vi.fn(async () => DEFAULT_DECISION)
+
+    await skeleton.listener(PAYLOAD, next)
+    expect(skeleton.read('s-f01')).toContain('不推送、不提交')
+
+    // 模拟压缩移除骨架：宿主重新组装前再次 pre-step ⇒ 内容被重新读库补回。
+    facts = [...facts]
+    await skeleton.listener(PAYLOAD, next)
+    expect(skeleton.read('s-f01')).toContain('不推送、不提交')
+    expect(next).toHaveBeenCalledTimes(2)
+  })
+
+  it('骨架读库失败 ⇒ 空串 + warn，且 next 照常调用一次（不阻塞注入）', async () => {
+    const skeleton = wireWithSkeleton({
+      readFacts: async () => {
+        throw new Error('db down')
+      },
+    })
+    const next = vi.fn(async () => DEFAULT_DECISION)
+    const decision = await skeleton.listener(PAYLOAD, next)
+    expect(decision).toEqual(DEFAULT_DECISION)
+    expect(next).toHaveBeenCalledTimes(1)
+    expect(skeleton.read('s-f01')).toBe('')
+  })
+
+  it('未提供 skeleton 端口 ⇒ 不注册动态 context（裸 ctx / 精简宿主不报错）', () => {
+    const host = makeHost()
+    wireInjection(host.ctx, { store: createInjectionStore(), recallStore: makeRecall(), resolved: RESOLVED })
+    // 动态 context 的注册只依赖 store（骨架为可选端口）：这里断言其 provider 恒为空串。
+    const provider = host.contexts.find((entry) => entry.name === 'omw-memory-dynamic')?.text
+    expect(typeof provider).toBe('function')
+    expect((provider as (context: unknown) => string)({ agent: { session: { id: 's-x' } } })).toBe('')
   })
 })
