@@ -89,6 +89,16 @@ let writer: { stop(): Promise<void> } | undefined
 let listeners: Listener[]
 let commands: MemoryCommandDefinition[]
 let closers: Array<() => unknown>
+/** Story 8.1：tap 采集到的 measure()（只读实例的归因快照唯一数据源）。 */
+const measureResult = {
+  totalTokens: 105,
+  nodes: [
+    { seq: 0, tokens: 50 },
+    { seq: 1, tokens: 10 },
+    { seq: 2, tokens: 30 },
+    { seq: 3, tokens: 15 },
+  ],
+}
 
 async function countRows(cypher: string): Promise<number> {
   const rows = await queryAll({ connection: undefined as never } as never, cypher).catch(() => [])
@@ -108,6 +118,8 @@ beforeAll(async () => {
     systemPrompt: { section: () => () => {}, context: () => () => {} },
     get: (key: string) => {
       if (key === 'profileContext') return { dir }
+      // Story 8.1：归因账本是纯内存观测面，只读实例也必须能采集（AC:1581）。
+      if (key === 'tokenMeter') return { measure: () => measureResult }
       if (key === 'commands') {
         return {
           register: (definition: MemoryCommandDefinition) => {
@@ -162,6 +174,38 @@ async function readOnlyCounts(): Promise<{ inbox: number, runs: number, orphanAu
 }
 
 describe('只读实例：压缩事件零写入（INV-7 / AC:1581）', () => {
+  it('归因采集只写内存（矩阵行 21）：status 出五类数值，INBOX / compaction_run / 账本零增长', async () => {
+    const before = await readOnlyCounts()
+
+    const session = {
+      id: 's-ro-ledger',
+      snapshotEvents: () => [
+        { seq: 0, type: 'system/message' },
+        { seq: 1, type: 'user/message' },
+        { seq: 2, type: 'tool/result' },
+        { seq: 3, type: 'assistant/message' },
+      ],
+    }
+    for (const listener of listeners) {
+      await listener(session, { type: 'turn/end', seq: 4, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    }
+
+    const command = commands.find((definition) => definition.name === 'memory')
+    expect(command).toBeDefined()
+    const result = await command!.handler({ rawInput: ' status' })
+    expect(result.kind).toBe('success')
+    // 归因快照来自 measure()，只存在进程内存（readOnly 实例不写库）。
+    expect(result.text).toContain(
+      'context_ledger: system=50 user=10 tool=30 assistant=15 unknown=0 total=105 indexedSeqs=4 captured=',
+    )
+
+    const after = await readOnlyCounts()
+    expect(after.inbox).toBe(before.inbox)
+    expect(after.runs).toBe(before.runs)
+    expect(after.ingestedAudit).toBe(before.ingestedAudit)
+    expect(after.orphanAudit).toBe(before.orphanAudit)
+  })
+
   it('投递完整 compaction 序列后，INBOX / compaction_run / 账本 全部零增长', async () => {
     const before = await readOnlyCounts()
 

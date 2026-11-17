@@ -25,6 +25,17 @@ export interface SessionEventHandlerDeps {
   readonly capture?: CaptureHooks
   /** Story 8.1：压缩事件（summary 入图 / 孤儿解除）。 */
   readonly compaction?: { handleEvent(session: unknown, event: unknown): Promise<void> }
+  /**
+   * Story 8.1：turn/end 的归因采集（AC:1565-1569）。
+   * 在 `capture.recordTurnEnd` **之后**调用，且只有 `turn/end` 触发；纯内存、不写库（INV-7）。
+   */
+  readonly onTurnEnd?: (session: unknown) => void
+}
+
+/** 事件类型（字符串）；非对象 / 无 `type` / 非字符串一律 null（防御式，同 compaction wiring）。 */
+export function sessionEventType(event: unknown): string | null {
+  const type = (event as { readonly type?: unknown } | null | undefined)?.type
+  return typeof type === 'string' ? type : null
 }
 
 /** 返回 ctx.on('session/event', …) 的监听器：闸门/提升 + 三钩子采集分派。 */
@@ -32,7 +43,7 @@ export function createSessionEventHandler(
   deps: SessionEventHandlerDeps,
 ): (session: unknown, event: unknown) => void {
   return (session, event) => {
-    const type = (event as { readonly type?: unknown } | null | undefined)?.type
+    const type = sessionEventType(event)
     const sessionId = inboxSessionKey(session)
     if (type === 'turn/start') {
       deps.gate.enterTurn(sessionId)
@@ -43,6 +54,8 @@ export function createSessionEventHandler(
       deps.gate.exitTurn(sessionId)
       deps.promotion.recordSessionEnd({ sessionId })
       deps.capture?.recordTurnEnd(session, event)
+      // Story 8.1：归因采集在写侧采集之后（同一 turn/end，纯内存）。
+      deps.onTurnEnd?.(session)
     } else if (type === 'step/end') {
       deps.capture?.recordStepEnd(session, event)
     } else if (type === 'compaction/start') {

@@ -30,6 +30,7 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
+import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
 import { writeHandle } from './context/handles.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
@@ -43,7 +44,7 @@ import { wireMemoryLifecycle } from './wire/lifecycle.js'
 import { wireCapture } from './wire/capture.js'
 import { createDistillWiring } from './wire/distill.js'
 import { createPromotionWiring, reclaimInboxOnStartup, startInboxConsumers } from './wire/inbox.js'
-import { wireSessionEvents } from './wire/events.js'
+import { wireSessionEvents, wireTurnEndCapture } from './wire/events.js'
 import { createMemoryRuntimeSlots } from './wire/runtime.js'
 
 export { Config, resolveRuntimeConfig } from './config.js'
@@ -168,6 +169,13 @@ export async function apply(
   // 「未就绪」。不放模块级：同进程第二次 apply 会覆盖前一个实例的运行态（评审 P19）。
   const slots = createMemoryRuntimeSlots()
   const getDb = (): MemoryDatabase | undefined => slots.db
+  // Story 8.1：上下文归因账本（AC:1565-1569）。`tokenMeter` 是**可选**服务：用 `ctx.get` 探测，
+  // 不进 `inject`（缺了不该阻塞插件激活）；缺失/抛错都只在采集时 warn 一次，快照保持 null。
+  // 快照纯进程内存 ⇒ 只读实例同样采集（零写库，INV-7）。
+  const attributionTap = createAttributionTap({
+    getTokenMeter: () => (ctx.get?.('tokenMeter') ?? undefined) as TokenMeterLike | undefined,
+    logger: ctx.logger,
+  })
   // Story 3.3：每 apply 一份注入状态（prompt provider / 生成编排 / status 共用；进程内、不持久化）。
   const injectionStore = createInjectionStore()
   const instance: { readonly: boolean; reason: string | undefined } = { readonly: false, reason: undefined }
@@ -195,6 +203,8 @@ export async function apply(
     getSystemOneClient: () => slots.systemOneClient,
     // Story 3.3：status 读注入观测摘要（进程内，null=本实例尚未触发注入）。
     injectionStore,
+    // Story 8.1：status 的 context_ledger 行读同一个 tap 快照（null ⇒ n/a）。
+    contextLedgerView: () => attributionTap.snapshot(),
     // Story 7.2：reflection 行数据源（窗口分 / 最近决策 / 熔断态）。
     reflectionView: () => {
       const view = readReflectionView(reflectionState)
@@ -344,6 +354,11 @@ export async function apply(
       `记忆库以只读模式打开（readonly: true, reason: '${READONLY_REASON}'）：${dbPath}；` +
       '本窗口不采集、不精炼、拒绝写入。关闭持有写者锁的窗口后重启本窗口可恢复读写。',
     )
+    // Story 8.1 / AC:1581：只读实例**零写库**，但归因账本只占进程内存，仍要采集
+    // （否则读窗口的 `/memory status` 永远 n/a）。只装这一个 turn/end 监听器：不接闸门、
+    // 不接采集器、不订阅 compaction（INV-7）。
+    await wireStep('attribution-events', () =>
+      wireTurnEndCapture(ctx, (session) => attributionTap.capture(session)))
     return
   }
 
@@ -502,6 +517,8 @@ export async function apply(
     promotion,
     capture,
     compaction: compactionWiring ?? undefined,
+    // Story 8.1：turn/end 写侧采集之后再采一次归因（纯内存，AC:1565-1569）。
+    onTurnEnd: (session) => attributionTap.capture(session),
   }))
   }
 }
