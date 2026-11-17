@@ -242,7 +242,9 @@ export function createSummaryRewriteProcessor(
       })
     })
     if (!marked) return { completed: true, kinds: [] }
-    return { completed: true, kinds: [HANDLE_KIND] }
+    // 不记 L1 提升信号：重写产出的是摘要版本（kind='handle'），不是可提升的原子事实；
+    // 句柄本来也不经 INBOX 计数（8.3 起由压缩引擎直接写），这里保持同一口径。
+    return { completed: true, kinds: [] }
   }
 }
 
