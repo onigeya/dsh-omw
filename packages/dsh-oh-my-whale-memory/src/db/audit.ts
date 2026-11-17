@@ -211,6 +211,20 @@ export interface InvalidationCauseInput {
   triggerId: string
 }
 
+/**
+ * 13 列的历史写法（无 `detail`）。`detail` 由迁移 0002 加过，但仍有「schema 版本已到 7/8、
+ * 表里却没有该列」的夹具/异常库（见 db-migration 的冻结 DDL）：不带 detail 的行必须仍能写，
+ * 否则整个写入链会因为一个观测列而失败。
+ */
+const INSERT_GENERATION_LOG_LEGACY = [
+  'CREATE (:' + GENERATION_LOG_TABLE + ' {',
+  '  id: $id, recorded_at: $recorded_at, actor: $actor, kind: $kind, action: $action,',
+  '  policy: $policy, l0_refs: $l0_refs, outcome: $outcome, reason: $reason,',
+  '  question_key: $question_key, probability: $probability, threshold: $threshold,',
+  '  passed: $passed, cascade_depth: $cascade_depth, trigger_id: $trigger_id',
+  '})',
+].join('\n')
+
 const INSERT_GENERATION_LOG = [
   'CREATE (:' + GENERATION_LOG_TABLE + ' {',
   '  id: $id, recorded_at: $recorded_at, actor: $actor, kind: $kind, action: $action,',
@@ -346,9 +360,11 @@ export async function insertGenerationLog(
   entry: GenerationLogEntry,
 ): Promise<string> {
   const id = entry.id ?? randomUUID()
-  const statement = await connection.prepare(INSERT_GENERATION_LOG)
+  // 只有真的要写 detail 时才引用该列：老库/异常库没有这一列时，不带 detail 的行照常可写。
+  const withDetail = entry.detail !== undefined && entry.detail !== null
+  const statement = await connection.prepare(withDetail ? INSERT_GENERATION_LOG : INSERT_GENERATION_LOG_LEGACY)
   // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
-  await runPrepared(connection, statement, {
+  const params: Record<string, unknown> = {
     id,
     recorded_at: entry.recordedAt,
     actor: entry.actor,
@@ -364,8 +380,10 @@ export async function insertGenerationLog(
     passed: entry.passed ?? null,
     cascade_depth: entry.cascadeDepth ?? null,
     trigger_id: entry.triggerId ?? null,
-    detail: entry.detail ?? null,
-  })
+  }
+  if (withDetail) params.detail = entry.detail
+  // 结果必须释放，否则 pin 满 buffer pool（见 backend.ts closeQueryResult）。
+  await runPrepared(connection, statement, params as Record<string, lbug.LbugValue>)
   return id
 }
 
