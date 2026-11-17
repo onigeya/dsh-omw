@@ -10,7 +10,7 @@
  * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库此前由 database.ts 的幂等
  * `ALTER TABLE memory ADD parent_id STRING` 补列（Story 4.2 起新列一律只走迁移 0002）。
- * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '2'。
+ * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '8'（迁移 0008）。
  * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）；
  *   唯一例外是 Story 4.2 的 redact 墓碑（redacted_by/redacted_at 记录改写者与时刻）。
  * - generation_log：detail（Story 4.2 只加列，写入方留给后续 story）
@@ -34,7 +34,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '7'
+export const SCHEMA_VERSION = '8'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -77,6 +77,10 @@ export function createMemoryTableStatement(dim: number): string {
     '  support INT64,',
     // AC:1053 逐字要求 DEFAULT false（0.22.3 的 CREATE 与 ALTER 都接受 DEFAULT，实测）。
     '  evidence_degraded BOOL DEFAULT false,',
+    // Story 8.4 / FR-29：句柄 / 摘要节点的展开计数与链深（迁移 0008 给旧库补列）。
+    '  expand_count INT64 DEFAULT 0,',
+    '  chain_depth INT64 DEFAULT 0,',
+    '  last_expanded_at STRING,',
     '  PRIMARY KEY(id)',
     ')',
   ].join('')
@@ -437,6 +441,18 @@ export function createCompactionRunTableStatement(): string {
     'id STRING, compaction_id STRING, session_id STRING, config_snapshot_json STRING, started_at STRING, ' +
     // AC:1535：被折叠的 seq 列表与区间必须可回溯（JSON 字符串，不引入结构化列）。
     'shadowed_seqs_json STRING, shadowed_range_json STRING, ' +
+    // Story 8.4：档位落账（迁移 0008 给旧库补这三列；缺 plan 时留 NULL，不编造）。
+    'plan_json STRING, tier STRING, delegate STRING, ' +
     'PRIMARY KEY(id))'
   )
 }
+
+/** Story 8.4 / T1：`compaction_run` 的三列（档位判定证据，全部可空）。 */
+export const COMPACTION_PLAN_JSON_COLUMN = 'plan_json'
+export const COMPACTION_TIER_COLUMN = 'tier'
+export const COMPACTION_DELEGATE_COLUMN = 'delegate'
+
+/** Story 8.4 / T1：`memory` 的句柄展开统计三列（迁移 0008 给旧库补列）。 */
+export const EXPAND_COUNT_COLUMN = 'expand_count'
+export const CHAIN_DEPTH_COLUMN = 'chain_depth'
+export const LAST_EXPANDED_AT_COLUMN = 'last_expanded_at'

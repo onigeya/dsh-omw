@@ -53,9 +53,13 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
     expect(columns.get('support')).toBe('INT64')
     // Story 4.2：证据被用户授权抹除的标记（AD-19；BOOL 缺省 NULL = 未降级）。
     expect(columns.get('evidence_degraded')).toBe('BOOL')
+    // Story 8.4 / FR-29：句柄展开统计（计数带 DEFAULT 0，时刻可空）。
+    expect(columns.get('expand_count')).toBe('INT64')
+    expect(columns.get('chain_depth')).toBe('INT64')
+    expect(columns.get('last_expanded_at')).toBe('STRING')
     // Story 1.10 / AD-3：新表只增不改，memory 的列数锁死
-    //（2.4 加 parent_id、2.5 加 support、4.2 加 evidence_degraded 后为 16）。
-    expect(columns.size).toBe(16)
+    //（2.4 加 parent_id、2.5 加 support、4.2 加 evidence_degraded、8.4 加统计三列后为 19）。
+    expect(columns.size).toBe(19)
   })
 
   it('l0_raw 表含 AC2 四列 + Story 4.2 墓碑两列', async () => {
@@ -102,7 +106,7 @@ describe('记忆库建库（AC1/AC2/AC4）', () => {
   it('omw_meta 写入了库级元数据（AC2）', async () => {
     const rows = await queryAll(store.connection, 'MATCH (m:omw_meta) RETURN m.key AS key, m.value AS value')
     const meta = new Map(rows.map((r) => [String(r.key), String(r.value)]))
-    expect(meta.get('schema_version')).toBe('7')
+    expect(meta.get('schema_version')).toBe('8')
     expect(meta.get('embedding_dim')).toBe('4')
     expect(meta.get('embedding_model_id')).toBe('test-embed-model')
     expect(meta.get('created_at')).toMatch(/^\d{4}-\d{2}-\d{2}T/)

@@ -30,6 +30,7 @@ import { createMemoryAccess } from './wire/access.js'
 import { createReflectionState, readReflectionView, recordTurn } from './reflection/state.js'
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
+import { registerCompactionCriteria, resetCompactionPlans } from './context/compaction-plan-registry.js'
 import { detectCompactionOverlayGap, compactionOverlayGapWarning } from './context/compaction-gap.js'
 import { registerHandleWriter, setCompactionReadonly } from './context/handle-writer.js'
 import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
@@ -256,6 +257,12 @@ export async function apply(
     recallStore: retrieval.recallStore,
     relatedStore: retrieval.relatedStore,
     quota: retrieval.quota,
+    logger: ctx.logger,
+    // Story 8.4 / FR-29：句柄展开超阈（默认 expandCount ≥2 或 chainDepth ≥2）判为不合格。
+    expandThresholds: {
+      expandCountThreshold: resolved.expandCountThreshold,
+      chainDepthThreshold: resolved.chainDepthThreshold,
+    },
     // Story 8.2：`memory_related` 结果超阈值 ⇒ 折成句柄（全文入图，表面只留句柄）。
     fold: {
       thresholdTokens: resolved.foldThresholdTokens,
@@ -310,6 +317,12 @@ export async function apply(
   // Story 8.3 / AC:1683：压缩引擎是另一个入口（provider），通过这个按 ctx 分槽的标记知道
   // 当前实例是否只读；只读实例的 summarize 一律委托 stock（零折叠 / 零入图 / 零账本）。
   setCompactionReadonly(readonlyMode)
+  // Story 8.4 / T4：长度三带的判据来自 Config，而 provider 入口（`src/compaction.ts`）由宿主构造、
+  // 读不到这里的 Config ⇒ 经模块级注册表交接。未注册时引擎按「判据算不出」压 T1（fail-closed）。
+  registerCompactionCriteria({
+    lengthMin: resolved.compactionLengthMin,
+    t3Threshold: resolved.compactionT3Threshold,
+  })
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
     // 工具与命令经闭包读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
@@ -368,6 +381,8 @@ export async function apply(
       // Story 8.3：实例销毁后 provider 不能再写句柄（同 ctx 槽位清空，回到 fail-open）。
       registerHandleWriter(null)
       setCompactionReadonly(true)
+      // Story 8.4：档位注册表与判据一并复位（下一个实例重新登记，不继承旧值）。
+      resetCompactionPlans()
     },
   }))
 
@@ -504,6 +519,7 @@ export async function apply(
       promotion,
       l1Processor: distill.l1Processor,
       l2Processor: distill.l2Processor,
+      summaryRewriteProcessor: distill.summaryRewriteProcessor,
       maintenance: distill.maintenance,
     }))
   }
@@ -520,6 +536,15 @@ export async function apply(
           injectionEnabled: resolved.injectOnNewSession,
           retrievalTopK: resolved.retrievalTopK,
           captureSteps: resolved.captureSteps,
+          // Story 8.4 / AD-26：档位判据必须随快照一起落库，重放同一 (sessionId, compactionId)
+          // 才能用同一份 criteria 得到逐位相同的档位（矩阵行 5）。
+          criteria: {
+            lengthMin: resolved.compactionLengthMin,
+            t3Threshold: resolved.compactionT3Threshold,
+            expandCountThreshold: resolved.expandCountThreshold,
+            chainDepthThreshold: resolved.chainDepthThreshold,
+          },
+          selfTuneEnabled: resolved.compactionSelfTuneEnabled,
         }),
         orphanTimeoutMs: resolved.compactionOrphanTimeoutMs,
         onOrphan: (info) => {

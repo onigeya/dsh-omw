@@ -30,12 +30,19 @@ export interface HandleRecord {
   readonly text: string
   readonly invalidAt: string | null
   readonly expiredAt: string | null
+  /** Story 8.4 / FR-29：累计展开次数（迁移 0008 的 `expand_count`；NULL 读作 0）。 */
+  readonly expandCount: number
+  /** Story 8.4 / FR-29：重写链深（迁移 0008 的 `chain_depth`；NULL 读作 0）。 */
+  readonly chainDepth: number
+  /** Story 8.4：最近一次成功展开的时刻（ISO-8601；从未展开为 null）。 */
+  readonly lastExpandedAt: string | null
 }
 
 const READ_HANDLE = [
   'MATCH (m:' + MEMORY_TABLE + ' {id: $id})',
   'RETURN m.id AS id, m.text AS text, m.source_refs AS source_refs,',
-  '  m.invalid_at AS invalid_at, m.expired_at AS expired_at',
+  '  m.invalid_at AS invalid_at, m.expired_at AS expired_at,',
+  '  m.expand_count AS expand_count, m.chain_depth AS chain_depth, m.last_expanded_at AS last_expanded_at',
 ].join('\n')
 
 const FIND_BY_SEQ = [
@@ -44,8 +51,14 @@ const FIND_BY_SEQ = [
   "    AND 'session:' + $session IN m.source_refs",
   "    AND 'seq:' + $seq IN m.source_refs",
   '  RETURN m.id AS id, m.text AS text, m.source_refs AS source_refs,',
-  '    m.invalid_at AS invalid_at, m.expired_at AS expired_at LIMIT 1',
+  '    m.invalid_at AS invalid_at, m.expired_at AS expired_at,',
+  '    m.expand_count AS expand_count, m.chain_depth AS chain_depth, m.last_expanded_at AS last_expanded_at LIMIT 1',
 ].join('\n')
+
+function countOrZero(value: unknown): number {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? Math.trunc(parsed) : 0
+}
 
 function toRecord(row: Record<string, unknown> | undefined): HandleRecord | null {
   if (row === undefined) return null
@@ -59,6 +72,11 @@ function toRecord(row: Record<string, unknown> | undefined): HandleRecord | null
     text: String(row.text ?? ''),
     invalidAt: row.invalid_at === null || row.invalid_at === undefined ? null : String(row.invalid_at),
     expiredAt: row.expired_at === null || row.expired_at === undefined ? null : String(row.expired_at),
+    expandCount: countOrZero(row.expand_count),
+    chainDepth: countOrZero(row.chain_depth),
+    lastExpandedAt: row.last_expanded_at === null || row.last_expanded_at === undefined
+      ? null
+      : String(row.last_expanded_at),
   }
 }
 

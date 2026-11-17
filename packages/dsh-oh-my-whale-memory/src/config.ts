@@ -38,6 +38,15 @@ const MEMORY_CONFIG_DEFAULTS = {
   compactionOrphanTimeoutMs: 60_000,
   // Story 8.2 / FR-23：工具结果折叠阈值（tokens）；超阈值折成句柄，全文入图。
   foldThresholdTokens: 2000,
+  // Story 8.4 / AC:1713-1760：T1/T2/T3 长度三带的两条阈值与句柄重写阈值。
+  // **经验值**（无实证语料标定，AC:1806 要求字段文档显式标注）：1200 / 8000 / 2 / 2。
+  // 全部可运行期覆盖（INV-12 / FR-28），且 `lengthMin` 的硬下界由调用方按滚动窗口校验。
+  compactionLengthMin: 1200,
+  compactionT3Threshold: 8000,
+  expandCountThreshold: 2,
+  chainDepthThreshold: 2,
+  // 反思驱动的阈值自调开关（AC:1737-1740）。默认关：没有建议生产端时开启也只是 no-op。
+  compactionSelfTuneEnabled: false,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -124,6 +133,18 @@ export const Config = Schema.object({
   compactionOrphanTimeoutMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.compactionOrphanTimeoutMs).volatile(),
   /** Story 8.2：工具结果折叠阈值（tokens）。 */
   foldThresholdTokens: Schema.number().default(MEMORY_CONFIG_DEFAULTS.foldThresholdTokens).volatile(),
+  /**
+   * Story 8.4 / AC:1713-1760：长度三带的两条阈值（tokens）。
+   * `< lengthMin ⇒ T1`、`[lengthMin, t3Threshold) ⇒ T2`、`>= t3Threshold ⇒ T3 候选`。
+   * 均为**经验值**（AC:1806：无证据支撑的默认值必须显式标注），不是实测标定结果。
+   */
+  compactionLengthMin: Schema.number().default(MEMORY_CONFIG_DEFAULTS.compactionLengthMin).volatile(),
+  compactionT3Threshold: Schema.number().default(MEMORY_CONFIG_DEFAULTS.compactionT3Threshold).volatile(),
+  /** Story 8.4 / FR-29：句柄展开计数与重写链深的超阈判据（`>=` 即不合格）。 */
+  expandCountThreshold: Schema.number().default(MEMORY_CONFIG_DEFAULTS.expandCountThreshold).volatile(),
+  chainDepthThreshold: Schema.number().default(MEMORY_CONFIG_DEFAULTS.chainDepthThreshold).volatile(),
+  /** Story 8.4 / AC:1737-1740：自调开关；关时不改任何数值（建议生产端见 spec 的 deferred）。 */
+  compactionSelfTuneEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.compactionSelfTuneEnabled).volatile(),
 })
 
 /**
@@ -153,6 +174,14 @@ export interface RuntimeConfig {
   compactionOrphanTimeoutMs: number
   /** Story 8.2：工具结果折叠阈值（tokens）。 */
   foldThresholdTokens: number
+  /** Story 8.4：T1/T2/T3 长度三带阈值（tokens，已校验为正整数且 lengthMin < t3Threshold）。 */
+  compactionLengthMin: number
+  compactionT3Threshold: number
+  /** Story 8.4 / FR-29：句柄展开计数与重写链深阈值（已校验为正整数）。 */
+  expandCountThreshold: number
+  chainDepthThreshold: number
+  /** Story 8.4：自调开关（默认 false；无建议生产端时即使开启也不改数值）。 */
+  compactionSelfTuneEnabled: boolean
   warnings: string[]
 }
 
@@ -227,6 +256,11 @@ export function resolveRuntimeConfig(config: {
     strategyGate?: Getter<{ minConfidence?: number; expiryDays?: number; maxPendingPerSession?: number }>
     compactionOrphanTimeoutMs?: Getter<number>
     foldThresholdTokens?: Getter<number>
+    compactionLengthMin?: Getter<number>
+    compactionT3Threshold?: Getter<number>
+    expandCountThreshold?: Getter<number>
+    chainDepthThreshold?: Getter<number>
+    compactionSelfTuneEnabled?: Getter<boolean>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -282,6 +316,33 @@ export function resolveRuntimeConfig(config: {
     'foldThresholdTokens',
     Math.trunc(read(config.foldThresholdTokens ?? MEMORY_CONFIG_DEFAULTS.foldThresholdTokens)),
   )
+  // Story 8.4（AC:1713-1760）：两条长度阈值必须构成合法三带（lengthMin < t3Threshold），
+  // 否则 `<lengthMin ⇒ T1` 与 `>=t3Threshold ⇒ T3` 会自相矛盾，档位判定静默退化。
+  // 刻意**不** `Math.trunc`：2.5 这种值截断后就成了合法阈值，属于「静默夹紧」。
+  const compactionLengthMin = requirePositiveInt(
+    'compactionLengthMin',
+    read(config.compactionLengthMin ?? MEMORY_CONFIG_DEFAULTS.compactionLengthMin),
+  )
+  const compactionT3Threshold = requirePositiveInt(
+    'compactionT3Threshold',
+    read(config.compactionT3Threshold ?? MEMORY_CONFIG_DEFAULTS.compactionT3Threshold),
+  )
+  if (compactionLengthMin >= compactionT3Threshold) {
+    throw new Error(
+      `compactionLengthMin（期望 < compactionT3Threshold，实际 ${compactionLengthMin} vs ${compactionT3Threshold}）`,
+    )
+  }
+  const expandCountThreshold = requirePositiveInt(
+    'expandCountThreshold',
+    read(config.expandCountThreshold ?? MEMORY_CONFIG_DEFAULTS.expandCountThreshold),
+  )
+  const chainDepthThreshold = requirePositiveInt(
+    'chainDepthThreshold',
+    read(config.chainDepthThreshold ?? MEMORY_CONFIG_DEFAULTS.chainDepthThreshold),
+  )
+  const compactionSelfTuneEnabled = read(
+    config.compactionSelfTuneEnabled ?? MEMORY_CONFIG_DEFAULTS.compactionSelfTuneEnabled,
+  ) === true
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -349,6 +410,11 @@ export function resolveRuntimeConfig(config: {
     },
     compactionOrphanTimeoutMs,
     foldThresholdTokens,
+    compactionLengthMin,
+    compactionT3Threshold,
+    expandCountThreshold,
+    chainDepthThreshold,
+    compactionSelfTuneEnabled,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -379,4 +445,9 @@ export interface ConfigShape {
   systemOne: Volatile<{ enabled: boolean; endpoint?: string; model?: string; token?: string }>
   reflection: Volatile<{ threshold: number; idleWaitMs: number; intervalMs: number }>
   strategyGate: Volatile<{ minConfidence: number; expiryDays: number; maxPendingPerSession: number }>
+  compactionLengthMin: Volatile<number>
+  compactionT3Threshold: Volatile<number>
+  expandCountThreshold: Volatile<number>
+  chainDepthThreshold: Volatile<number>
+  compactionSelfTuneEnabled: Volatile<boolean>
 }

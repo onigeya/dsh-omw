@@ -30,6 +30,7 @@ import {
 } from '../distill/promotion.js'
 import type { InboxProcessor } from './distill.js'
 import type { MemoryRuntimeSlots } from './runtime.js'
+import { HANDLE_REWRITE_KIND } from '../context/handle-stats.js'
 
 export interface PromotionWiringOptions {
   readonly ctx: Context
@@ -128,6 +129,8 @@ export interface InboxConsumerWiringOptions {
   readonly promotion: PromotionTracker
   readonly l1Processor: InboxProcessor
   readonly l2Processor: InboxProcessor
+  /** Story 8.4 / T6：`summary-rewrite` 条目的处理器（同一条 L1 消费链，按 kind 路由）。 */
+  readonly summaryRewriteProcessor: InboxProcessor
   readonly maintenance: () => Promise<number>
 }
 
@@ -140,7 +143,12 @@ export function startInboxConsumers(options: InboxConsumerWiringOptions): void {
     connection: getConnection,
     gate,
     promotion,
-    process: options.l1Processor,
+    // Story 8.4 / T6：同一条 FIFO 上按 kind 路由——`summary-rewrite` 走摘要重写处理器，
+    // 其余仍走 FR-5 的 L1 精炼处理器（复用队列/退避/审计，不新造消费链）。
+    process: (item) =>
+      (item.kind === HANDLE_REWRITE_KIND
+        ? options.summaryRewriteProcessor(item)
+        : options.l1Processor(item)),
     maintenance: options.maintenance,
     logger: ctx.logger,
   })
