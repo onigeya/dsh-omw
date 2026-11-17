@@ -329,11 +329,8 @@ export async function apply(
 
   const dbPath = resolveMemoryDbPath(profile.dir)
   // Story 8.6 / T7：iot-thinking 互斥探测（只读）。在场 ⇒ 本插件仍只做 text 面并说明；
-  // 不在场 ⇒ 行为完全相同（不写日志、不改变净化规则）。
-  const iotThinking = detectIotThinking({
-    dshHome: typeof process.env.DSH_HOME === 'string' ? process.env.DSH_HOME : null,
-    profileDir: profile.dir,
-  })
+  // 不在场 ⇒ 行为完全相同（不写日志、不改变净化规则）。路径由本实例的 profile 反推。
+  const iotThinking = detectIotThinking({ profileDir: profile.dir })
   if (iotThinking.present) ctx.logger.info(IOT_THINKING_PRESENT_NOTICE)
   const embedding = resolveEmbeddingProfile(resolved.embedding)
   for (const message of embedding.warnings) {

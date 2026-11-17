@@ -2,7 +2,8 @@
  * iot-thinking 互斥探测测试（Story 8.6 / T7、AC:1898-1901、矩阵行 14）。
  *
  * 三件事：
- * 1. 路径解析：`DSH_HOME` 优先，缺省由 `profileContext.dir` 反推，两者都没有 ⇒ 不探测；
+ * 1. 路径解析：由 `profileContext.dir`（`<DSH_HOME>/profiles/<name>`）反推，**不读**
+ *    `process.env.DSH_HOME`（全局值可能指向另一个安装）；拿不到形状 ⇒ 不探测；
  * 2. 只读探测：目录在场 true、不在场 false（探测失败按不在场处理，不抛）；
  * 3. 装配：`apply` 在场时打一条 info 说明「只做 text 面」，不在场时**不产日志**、行为不变。
  */
@@ -24,36 +25,39 @@ afterEach(() => {
   vi.unstubAllEnvs()
 })
 
-describe('路径解析（不猜 DSH_HOME）', () => {
-  it('DSH_HOME 优先；缺省由 profileContext.dir 反推', () => {
-    expect(iotThinkingProbePath({ dshHome: 'D:/dsh-home' })).toBe(
+describe('路径解析（profile 目录是唯一事实来源）', () => {
+  it('由 profileContext.dir 反推 $DSH_HOME；不读 process.env.DSH_HOME', () => {
+    expect(iotThinkingProbePath({ profileDir: join('D:/dsh-home', 'profiles', 'web') })).toBe(
       join('D:/dsh-home', PLUGIN_DATA_DIR, IOT_THINKING_PLUGIN),
     )
-    expect(iotThinkingProbePath({ profileDir: 'D:/dsh-home/profiles/web' })).toBe(
+    // 环境变量是宿主进程全局值：即使在场也不得改变探测目标（否则单测依赖运行环境）
+    vi.stubEnv('DSH_HOME', join('E:/other-install'))
+    expect(iotThinkingProbePath({ profileDir: join('D:/dsh-home', 'profiles', 'web') })).toBe(
       join('D:/dsh-home', PLUGIN_DATA_DIR, IOT_THINKING_PLUGIN),
     )
-    // 形状不符 / 都没有 ⇒ null（不探测，调用方静默）
+    // 形状不符 / 没有 profile ⇒ null（不探测，调用方静默）
     expect(iotThinkingProbePath({})).toBeNull()
-    expect(iotThinkingProbePath({ dshHome: '   ', profileDir: null })).toBeNull()
+    expect(iotThinkingProbePath({ profileDir: '   ' })).toBeNull()
   })
 })
 
 describe('只读探测（矩阵行 14）', () => {
   it('目录在场 ⇒ present: true 且给出路径；不在场 ⇒ false', async () => {
     const home = await makeTempDir('omw-iot-thinking-')
+    const profileDir = join(home, 'profiles', 'web')
     const target = join(home, PLUGIN_DATA_DIR, IOT_THINKING_PLUGIN)
-    expect(detectIotThinking({ dshHome: home })).toEqual({ present: false, path: target })
+    expect(detectIotThinking({ profileDir })).toEqual({ present: false, path: target })
 
     await mkdir(target, { recursive: true })
     await writeFile(join(target, 'package.json'), '{}', 'utf8')
-    expect(detectIotThinking({ dshHome: home })).toEqual({ present: true, path: target })
+    expect(detectIotThinking({ profileDir })).toEqual({ present: true, path: target })
 
     // 清理后回到不在场（探测无状态、不缓存）
     await rm(target, { recursive: true, force: true })
-    expect(detectIotThinking({ dshHome: home }).present).toBe(false)
+    expect(detectIotThinking({ profileDir }).present).toBe(false)
   })
 
-  it('定位不到 DSH_HOME ⇒ present: false、path: null（不抛）', () => {
+  it('定位不到 $DSH_HOME ⇒ present: false、path: null（不抛）', () => {
     expect(detectIotThinking({})).toEqual({ present: false, path: null })
   })
 })
@@ -73,8 +77,6 @@ describe('装配：在场只做 text 面并留说明（apply 级）', () => {
     const home = await makeTempDir('omw-iot-apply-')
     const profileDir = join(home, 'profiles', 'web')
     await mkdir(join(home, PLUGIN_DATA_DIR, IOT_THINKING_PLUGIN), { recursive: true })
-    // 环境变量可能影响探测：显式清掉，改走 profile 反推（生产里两种来源都存在）
-    vi.stubEnv('DSH_HOME', '')
 
     const info = vi.fn()
     const warn = vi.fn()

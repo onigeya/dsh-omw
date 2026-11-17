@@ -320,18 +320,16 @@ function runRules(text: string, options: PurifyOptions, hits: Set<PurifyRule>): 
 
 /**
  * R2 的实际剥离：只在命中前缀、剩余（trim 后）长度 >= `minRemainder` 时返回新行。
- * 不满足安全阀 ⇒ `null`（整行不动，AC:1868）。
+ * 不满足安全阀 ⇒ `null`（整行不动，AC:1868）。缩进不算前缀的一部分，剥离后原样保留。
  */
 function stripPrefix(line: string, minRemainder: number): string | null {
-  const match = R2_PREFIX.exec(line)
-  if (match === null) return null
-  const remainder = line.slice(match[0].length)
-  if (remainder.trim().length < minRemainder) return null
-  // 保留原始缩进：前缀落在首个非空白字符处时，缩进原样留在前面。
   const indent = line.slice(0, line.length - line.trimStart().length)
-  const body = line.trimStart().slice(match[0].length)
-  if (body.trim().length < minRemainder) return null
-  return indent + body
+  const body = line.trimStart()
+  const match = R2_PREFIX.exec(body)
+  if (match === null) return null
+  const remainder = body.slice(match[0].length)
+  if (remainder.trim().length < minRemainder) return null
+  return indent + remainder
 }
 
 /** 净化只作用于这些 role 的消息（user 原话永不净化，system 是宿主提示）。 */

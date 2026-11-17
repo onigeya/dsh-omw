@@ -5,10 +5,11 @@
  * **text 面**（不夺舍、不复用其代码、不碰它的生成链），并在日志里说明「本机未安装/已安装」
  * 的事实与局限。不在场 ⇒ 行为完全相同（净化本来就是自带的确定性规则）。
  *
- * 路径来源（不自己拼 DSH_HOME 的唯一来源原则，`db/paths.ts:4-5`）：
- * 1. 宿主显式给的 `process.env.DSH_HOME`；
- * 2. 缺省时由 `profileContext.dir`（= `<DSH_HOME>/profiles/<name>`）反推一个 `<DSH_HOME>`。
- * 两条都拿不到 ⇒ 不探测（返回 `path: null`，调用方静默）。
+ * 路径来源（沿用「profile 目录是唯一事实来源」的原则，`db/paths.ts:4-5`）：由宿主注入的
+ * `profileContext.dir`（= `<DSH_HOME>/profiles/<name>`）反推 `<DSH_HOME>`。**刻意不读
+ * `process.env.DSH_HOME`**：那是宿主进程全局值（可能是另一个安装/另一个 profile 的根），
+ * 用它会让「本实例所在的 DSH home」与探测目标不一致，也会让单测依赖运行环境。
+ * 形状不符（拿不到 `<DSH_HOME>`）⇒ 不探测（`path: null`，调用方静默）。
  */
 import { existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
@@ -19,15 +20,13 @@ export const IOT_THINKING_PLUGIN = 'iot-thinking'
 export const PLUGIN_DATA_DIR = 'plugin-data'
 
 export interface IotThinkingProbeInput {
-  /** `process.env.DSH_HOME`；空串/缺失视为没有。 */
-  readonly dshHome?: string | null
   /** 宿主注入的 `profileContext.dir`（`<DSH_HOME>/profiles/<name>`）。 */
   readonly profileDir?: string | null
 }
 
 /** 探测目标路径；定位不到 `$DSH_HOME` 时返回 null（不猜）。 */
 export function iotThinkingProbePath(input: IotThinkingProbeInput): string | null {
-  const home = nonEmpty(input.dshHome) ?? homeFromProfileDir(input.profileDir)
+  const home = homeFromProfileDir(input.profileDir)
   return home === null ? null : join(home, PLUGIN_DATA_DIR, IOT_THINKING_PLUGIN)
 }
 

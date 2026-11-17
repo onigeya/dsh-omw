@@ -102,6 +102,10 @@ Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
 | `injectionSingleCap` | number | 512 | 单条注入正文绝对上限（tokens，经验值） |
 | `injectionSummaryCap` | number | 512 | 摘要正文绝对上限（tokens） |
 | `alwaysOnTokenCap` | number | 2000 | 动态骨架（常驻层）绝对上限（tokens，**不套窗口公式**） |
+| `purifyR1` | boolean | true | 确定性净化 R1：整行纯填充（`Let me…` / `Go.`）删除；命中惯用句例外表时整行不动（Story 8.6 / FR-30） |
+| `purifyR2` | boolean | false | R2：句内前缀剥离；剩余长度 `>= purifyMinRemainder` 且不命中例外表才改，否则整行不动 |
+| `purifyR3` | boolean | true | R3：连续复读行塌缩（只作用自然语言段；code fence 与结构化载荷不参与） |
+| `purifyMinRemainder` | number | 24 | R2 安全阀：剥离后剩余长度下限（正整数）。净化只改执行副本/注入副本，判据仍在净化前原文上算（INV-16） |
 
 ### 推荐服务配置（Q-5，2026-11-14 关闭，AD-14）
 

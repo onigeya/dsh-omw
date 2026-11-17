@@ -91,6 +91,13 @@ describe('矩阵行 2：R2 句内前缀剥离与 minRemainder 安全阀', () => 
     expect(purifyText(text, options({ r2: true, minRemainder: 18 })).changed).toBe(true)
     expect(purifyText(text, options({ r2: true, minRemainder: 19 })).changed).toBe(false)
   })
+
+  it('缩进行同样能剥离行首前缀，缩进原样保留', () => {
+    const text = '  Let me verify the migration ordering table rows before we ship.'
+    const result = purifyText(text, options({ r1: false, r2: true, r3: false }))
+    expect(result.changed).toBe(true)
+    expect(result.text).toBe('  verify the migration ordering table rows before we ship.')
+  })
 })
 
 describe('矩阵行 3：惯用句例外表', () => {
