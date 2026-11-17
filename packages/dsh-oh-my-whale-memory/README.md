@@ -97,6 +97,11 @@ Config 定义在 `src/config.ts`（`@deepseek-ai/schemastery`）。
 | `llmProvider` | string | — | 可选；LLM 显式 provider（AD-5） |
 | `llmModel` | string | — | 可选；LLM 显式 model（AD-5） |
 | `systemOne.enabled` | boolean | true | System One 判定开关 |
+| `injectionTokenCap` | number | 4096 | 注入总预算绝对上限（tokens，**经验值**）；`contextWindow` 缺失时直接用它 |
+| `injectionRatio` | number | 0.5 | 窗口占比：`min(cap, ratio × (contextWindow − pressureTokens))`；负数/非有限值 ⇒ 预算 0 + 可见告警（不抛错） |
+| `injectionSingleCap` | number | 512 | 单条注入正文绝对上限（tokens，经验值） |
+| `injectionSummaryCap` | number | 512 | 摘要正文绝对上限（tokens） |
+| `alwaysOnTokenCap` | number | 2000 | 动态骨架（常驻层）绝对上限（tokens，**不套窗口公式**） |
 
 ### 推荐服务配置（Q-5，2026-11-14 关闭，AD-14）
 
