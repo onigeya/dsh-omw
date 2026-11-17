@@ -97,7 +97,8 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     registerInjectionPrompt(systemPromptHost, options.store, skeletonStore)
   }
   // Story 8.5 / T3：骨架每次命题刷新一次（压缩移除后下一请求自动补回，AC:1823）。
-  const refreshSkeleton = options.skeleton === undefined
+  // 没有 systemPrompt 面时骨架无处消费，不刷新（裸 ctx 不产生无用读库）。
+  const refreshSkeleton = options.skeleton === undefined || systemPromptHost === undefined
     ? undefined
     : createSkeletonRefresher({
       store: skeletonStore,
