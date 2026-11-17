@@ -11,6 +11,7 @@
  */
 import { describe, expect, it } from 'vitest'
 import { Config, resolveRuntimeConfig } from '../src/config'
+import { DEFAULT_PURIFY_OPTIONS } from '../src/context/purify'
 
 /** 一张全合法配置（I/O 矩阵第 1 行基线）。 */
 function validConfig() {
@@ -40,7 +41,10 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       'compactionOrphanTimeoutMs', 'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding',
       'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
       'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'injectionTokenCap',
-      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'reflection', 'rerank',
+      'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight',
+      // Story 8.6 / AC:1868：确定性净化 pass 的四个开关。
+      'purifyMinRemainder', 'purifyR1', 'purifyR2', 'purifyR3',
+      'reflection', 'rerank',
       'retrievalTopK', 'rrfK', 'strategyGate', 'systemOne',
     ])
   })
@@ -99,6 +103,11 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.injectionSingleCap.get()).toBe(512)
     expect(resolved.injectionSummaryCap.get()).toBe(512)
     expect(resolved.alwaysOnTokenCap.get()).toBe(2000)
+    // Story 8.6 / AC:1868：默认开 R1 + R3、关 R2；安全阀 24。
+    expect(resolved.purifyR1.get()).toBe(true)
+    expect(resolved.purifyR2.get()).toBe(false)
+    expect(resolved.purifyR3.get()).toBe(true)
+    expect(resolved.purifyMinRemainder.get()).toBe(24)
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
@@ -117,6 +126,30 @@ describe('GC 正常配置（I/O 矩阵第 1 行）', () => {
     expect(resolved.rrfK).toBe(60)
     expect(resolved.layerWeights).toEqual({ l2: 0.7, l1: 0.4 })
     expect(resolved.priorityWeight).toBe(0.5)
+  })
+})
+
+describe('Story 8.6：净化配置投影（AC:1868 / T2）', () => {
+  it('缺省投影与 purify 模块的 DEFAULT_PURIFY_OPTIONS 同源（两处默认值不得漂移）', () => {
+    expect(resolveRuntimeConfig(validConfig()).purify).toEqual(DEFAULT_PURIFY_OPTIONS)
+  })
+
+  it('四个开关运行期可覆盖（volatile，INV-12）', () => {
+    const resolved = resolveRuntimeConfig({
+      ...validConfig(),
+      purifyR1: false,
+      purifyR2: true,
+      purifyR3: false,
+      purifyMinRemainder: 40,
+    })
+    expect(resolved.purify).toEqual({ r1: false, r2: true, r3: false, minRemainder: 40 })
+  })
+
+  it('purifyMinRemainder 非正整数 ⇒ 硬校验抛错（安全阀不得静默失效）', () => {
+    for (const bad of [0, -1, Number.NaN]) {
+      expect(() => resolveRuntimeConfig({ ...validConfig(), purifyMinRemainder: bad }))
+        .toThrowError(/purifyMinRemainder/)
+    }
   })
 })
 

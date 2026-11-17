@@ -24,6 +24,8 @@ import {
 } from '../src/injection/openstart'
 import { createInjectionStore } from '../src/injection/state'
 import { DEFAULT_INJECTION_BUDGET_CAPS } from '../src/injection/budget'
+import { DEFAULT_PURIFY_OPTIONS } from '../src/context/purify'
+import type { PurifyOptions } from '../src/context/purify'
 import { estimateTokens } from '../src/shared/text-budget'
 import type { RecallCoreResult, RecallResultItem } from '../src/recall/core'
 
@@ -108,6 +110,8 @@ function makeGenerator(args: {
   readonly logger?: { warn: (message: string) => void; info?: (message: string) => void }
   /** F-09：路由注入（缺省 ROUTE；null = 解析不出路由）。 */
   readonly route?: OpenstartRoute | null
+  /** Story 8.6 / T4：注入口净化开关（缺省 = 模块默认）。 */
+  readonly purify?: PurifyOptions
 }) {
   const store = args.store ?? createInjectionStore()
   const { port, calls: recallCalls, embedCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
@@ -119,6 +123,7 @@ function makeGenerator(args: {
     resolveRoute: () => ('route' in args ? args.route : ROUTE),
     timeoutMs: args.timeoutMs,
     logger: args.logger ?? { warn: vi.fn() },
+    ...(args.purify === undefined ? {} : { purify: args.purify }),
   })
   return { store, generate, recallCalls, embedCalls }
 }
@@ -479,5 +484,40 @@ describe('prompt 与 schema 同文件（§14）', () => {
 
   it('默认超时是 3000ms（AC:934 / NFR1）', () => {
     expect(OPENSTART_LLM_TIMEOUT_MS).toBe(3000)
+  })
+})
+
+describe('Story 8.6 / T4：注入口净化（矩阵行 11）', () => {
+  const dirtyItem: RecallResultItem = {
+    id: 'l1-dirty',
+    layer: 'L1',
+    kind: 'work_fact',
+    priority: 0,
+    text: ['Let me…', 'Go.', 'The evidence body must survive purification because it carries the decided fact.'].join('\n'),
+  }
+
+  it('回注副本的填充行被删；条目对象不被改写（只改注入副本）', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, dirtyItem], purify: DEFAULT_PURIFY_OPTIONS })
+
+    await generate(payload('s-purify'))
+
+    const text = store.textFor('s-purify')
+    expect(text).toContain('The evidence body must survive purification because it carries the decided fact.')
+    expect(text).not.toContain('Let me…')
+    expect(dirtyItem.text).toContain('Let me…')
+  })
+
+  it('净化关掉 ⇒ 回注文本保留填充行（运行期可覆盖，INV-12）', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({
+      llm,
+      recallItems: [L2_ITEM, dirtyItem],
+      purify: { r1: false, r2: false, r3: false, minRemainder: 24 },
+    })
+
+    await generate(payload('s-purify-off'))
+
+    expect(store.textFor('s-purify-off')).toContain('Let me…')
   })
 })

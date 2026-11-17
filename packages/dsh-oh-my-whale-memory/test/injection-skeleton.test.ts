@@ -33,6 +33,7 @@ import {
   type SkeletonFact,
 } from '../src/injection/skeleton'
 import { createInjectionStore } from '../src/injection/state'
+import { DEFAULT_PURIFY_OPTIONS } from '../src/context/purify'
 import { SKELETON_SOURCE_KIND } from '../src/shared/injection-vocab'
 import { estimateTokens } from '../src/shared/text-budget'
 import { cleanupTempDirs, makeTempDir } from './tmp'
@@ -305,3 +306,38 @@ describe('真库读法：不可删集合按当前快照取出', () => {
   })
 })
 
+
+describe('Story 8.6 / T4：骨架回注前净化（注入口）', () => {
+  it('骨架事实的填充行在渲染副本里被删；事实对象不被改写', async () => {
+    const store = createSkeletonStore()
+    const dirty = fact('pin', ['Let me…', 'Go.', '不推送远端分支，这是用户明确要求的硬约束。'].join('\n'), { priority: -1 })
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [dirty],
+      capTokens: () => 2000,
+      purifyOptions: () => DEFAULT_PURIFY_OPTIONS,
+    })
+
+    await refresh('s1')
+
+    const text = store.textFor('s1')
+    expect(text).toContain('不推送远端分支，这是用户明确要求的硬约束。')
+    expect(text).not.toContain('Let me…')
+    expect(dirty.text).toContain('Let me…')
+  })
+
+  it('净化关掉 ⇒ 骨架逐字保留（运行期可覆盖）', async () => {
+    const store = createSkeletonStore()
+    const dirty = fact('pin', ['Let me…', '不推送远端分支。'].join('\n'), { priority: -1 })
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [dirty],
+      capTokens: () => 2000,
+      purifyOptions: () => ({ r1: false, r2: false, r3: false, minRemainder: 24 }),
+    })
+
+    await refresh('s1')
+
+    expect(store.textFor('s1')).toContain('Let me…')
+  })
+})

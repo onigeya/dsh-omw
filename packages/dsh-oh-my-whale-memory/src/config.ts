@@ -59,6 +59,12 @@ export const MEMORY_CONFIG_DEFAULTS = {
   injectionSummaryCap: 512,
   // 常驻层 / 动态骨架的绝对上限，**不套窗口公式**（AC:1827，默认 2000）。
   alwaysOnTokenCap: 2000,
+  // Story 8.6 / AC:1868：确定性净化 pass 的四个开关。默认**开 R1 + R3、关 R2**；
+  // `purifyMinRemainder` 24 是 R1/R2 安全阀（剥离后剩余长度低于它 ⇒ 整行不动）。
+  purifyR1: true,
+  purifyR2: false,
+  purifyR3: true,
+  purifyMinRemainder: 24,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -167,6 +173,14 @@ export const Config = Schema.object({
   injectionSingleCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionSingleCap).volatile(),
   injectionSummaryCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionSummaryCap).volatile(),
   alwaysOnTokenCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.alwaysOnTokenCap).volatile(),
+  /**
+   * Story 8.6 / AC:1868、FR-30：确定性净化 pass 的开关（四字段全部 `.volatile()`，
+   * 运行期可覆盖，INV-12）。默认开 R1 + R3、关 R2；R1/R2 共用 `purifyMinRemainder` 安全阀。
+   */
+  purifyR1: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.purifyR1).volatile(),
+  purifyR2: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.purifyR2).volatile(),
+  purifyR3: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.purifyR3).volatile(),
+  purifyMinRemainder: Schema.number().default(MEMORY_CONFIG_DEFAULTS.purifyMinRemainder).volatile(),
 })
 
 /**
@@ -218,6 +232,11 @@ export interface RuntimeConfig {
   injectionSummaryCap: number
   /** Story 8.5 / AC:1827：常驻层 / 动态骨架的绝对上限（tokens，不套窗口公式）。 */
   alwaysOnTokenCap: number
+  /**
+   * Story 8.6 / AC:1868：确定性净化 pass 的选项（结构同 `context/purify.ts` 的
+   * `PurifyOptions`；**本文件不 import 它**，kernel 不得依赖 domain 层）。
+   */
+  purify: { r1: boolean; r2: boolean; r3: boolean; minRemainder: number }
   warnings: string[]
 }
 
@@ -302,6 +321,10 @@ export function resolveRuntimeConfig(config: {
     injectionSingleCap?: Getter<number>
     injectionSummaryCap?: Getter<number>
     alwaysOnTokenCap?: Getter<number>
+    purifyR1?: Getter<boolean>
+    purifyR2?: Getter<boolean>
+    purifyR3?: Getter<boolean>
+    purifyMinRemainder?: Getter<number>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -402,6 +425,15 @@ export function resolveRuntimeConfig(config: {
     'alwaysOnTokenCap',
     read(config.alwaysOnTokenCap ?? MEMORY_CONFIG_DEFAULTS.alwaysOnTokenCap),
   )
+  // Story 8.6 / AC:1868：净化四开关。三个布尔保持原样（缺省取 schema 同源默认值）；
+  // `purifyMinRemainder` 与相邻阈值同款硬校验（0 / 负数 / NaN 会让 R2 的安全阀失效）。
+  const purifyR1 = read(config.purifyR1 ?? MEMORY_CONFIG_DEFAULTS.purifyR1) === true
+  const purifyR2 = read(config.purifyR2 ?? MEMORY_CONFIG_DEFAULTS.purifyR2) === true
+  const purifyR3 = read(config.purifyR3 ?? MEMORY_CONFIG_DEFAULTS.purifyR3) === true
+  const purifyMinRemainder = requirePositiveInt(
+    'purifyMinRemainder',
+    read(config.purifyMinRemainder ?? MEMORY_CONFIG_DEFAULTS.purifyMinRemainder),
+  )
   // ratio 的负数/非有限值不抛错：语义是「预算 0 + 可见告警」（AC:1832，由 T1 产出 warning）。
   const injectionRatio = Number(read(config.injectionRatio ?? MEMORY_CONFIG_DEFAULTS.injectionRatio))
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
@@ -481,6 +513,8 @@ export function resolveRuntimeConfig(config: {
     injectionSingleCap,
     injectionSummaryCap,
     alwaysOnTokenCap,
+    // Story 8.6 / AC:1868：净化选项与 schema 的 `default(...)` 同源（MEMORY_CONFIG_DEFAULTS）。
+    purify: { r1: purifyR1, r2: purifyR2, r3: purifyR3, minRemainder: purifyMinRemainder },
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -521,4 +555,8 @@ export interface ConfigShape {
   injectionSingleCap: Volatile<number>
   injectionSummaryCap: Volatile<number>
   alwaysOnTokenCap: Volatile<number>
+  purifyR1: Volatile<boolean>
+  purifyR2: Volatile<boolean>
+  purifyR3: Volatile<boolean>
+  purifyMinRemainder: Volatile<number>
 }

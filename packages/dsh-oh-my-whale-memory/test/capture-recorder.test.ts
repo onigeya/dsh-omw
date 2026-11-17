@@ -8,7 +8,7 @@
  */
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { createCaptureRecorder, type CaptureRecorder } from '../src/capture/recorder'
 import { listSnapshots } from '../src/capture/snapshot-store'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
@@ -17,6 +17,8 @@ import { queryAll } from '../src/db/memory'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { runInTransaction } from '../src/db/transaction'
 import { drainInboxBackgroundTasks } from '../src/inbox/consumer'
+import { DEFAULT_PURIFY_OPTIONS } from '../src/context/purify'
+import { registerPurifyLedgerWriter, resetPurifyLedgerWriter, type PurifyLedgerEntry } from '../src/context/purify-ledger'
 import { writeInboxItem } from '../src/inbox/queue'
 import { cleanupTempDirs, makeTempDir } from './tmp'
 
@@ -291,5 +293,79 @@ describe('评审补丁回归钉（T1/T2 事件信封、P4 去重时序、P9 失�
     expect(l0).toHaveLength(1)
     expect(inbox).toHaveLength(1)
     expect(String(l0[0]?.id)).toBe(String(inbox[0]?.id))
+  })
+})
+
+describe('Story 8.6 / T4：采集口净化（矩阵行 9 / AC:1896）', () => {
+  const ledger: PurifyLedgerEntry[] = []
+
+  afterEach(() => {
+    ledger.length = 0
+    resetPurifyLedgerWriter()
+  })
+
+  it('assistant 段净化后进 INBOX；L0 保持原文；user 原话不净化', async () => {
+    registerPurifyLedgerWriter(async (entry) => {
+      ledger.push(entry)
+    })
+    const recorder = makeRecorder({ captureSteps: 1, purify: DEFAULT_PURIFY_OPTIONS })
+    const session = {
+      id: 'cap-purify',
+      deriveMessages: () => [
+        { role: 'user', content: 'Let me…\nGo.' },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Let me…\nGo.\nThe migration ordering is documented in AD-34 and matters for replay.' }],
+        },
+      ],
+    }
+
+    recorder.recordStepEnd(session, { type: 'step/end', seq: 1, time: 0, data: { turn: 1, step: 1 } })
+    await drainInboxBackgroundTasks()
+
+    // L0：append-only 原文（净化不写回）
+    const l0 = await l0Row('step', 'cap-purify', '1:1')
+    expect(String(l0?.raw_text)).toContain('Let me…')
+    // INBOX：assistant 段已净化，user 原话逐字保留
+    const inboxId = l0RawId(captureStableKey('step', 'cap-purify', '1:1'))
+    const inbox = (await queryAll(
+      store.connection,
+      "MATCH (q:l1_inbox) WHERE q.id = '" + inboxId + "' RETURN q.payload AS payload",
+    ))[0]
+    const payload = String(inbox?.payload)
+    expect(payload).toContain('user: Let me…')
+    expect(payload).not.toContain('assistant: Let me…')
+    expect(payload).toContain('The migration ordering is documented in AD-34')
+    // 账本：一行，六个字段齐全
+    expect(ledger).toHaveLength(1)
+    expect(ledger[0]).toMatchObject({ sessionId: 'cap-purify', rangeStart: 0 })
+    expect(ledger[0]?.removedChars).toBeGreaterThan(0)
+  })
+
+  it('净化关闭 ⇒ INBOX 与 L0 逐字一致、不记净化账本', async () => {
+    registerPurifyLedgerWriter(async (entry) => {
+      ledger.push(entry)
+    })
+    const recorder = makeRecorder({
+      captureSteps: 1,
+      purify: { r1: false, r2: false, r3: false, minRemainder: 24 },
+    })
+    const session = {
+      id: 'cap-purify-off',
+      deriveMessages: () => [{ role: 'assistant', content: [{ type: 'text', text: 'Let me…\nGo.\nReal detail.' }] }],
+    }
+
+    recorder.recordStepEnd(session, { type: 'step/end', seq: 1, time: 0, data: { turn: 1, step: 1 } })
+    await drainInboxBackgroundTasks()
+
+    const l0 = await l0Row('step', 'cap-purify-off', '1:1')
+    const inboxId = l0RawId(captureStableKey('step', 'cap-purify-off', '1:1'))
+    const inbox = (await queryAll(
+      store.connection,
+      "MATCH (q:l1_inbox) WHERE q.id = '" + inboxId + "' RETURN q.payload AS payload",
+    ))[0]
+    expect(String(inbox?.payload)).toBe(String(l0?.raw_text))
+    expect(String(inbox?.payload)).toContain('Let me…')
+    expect(ledger).toHaveLength(0)
   })
 })

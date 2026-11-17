@@ -104,6 +104,8 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     embeddingModel: resolved.embedding.model ?? null,
     embeddingModelId: embedding.modelId,
     logger: ctx.logger,
+    // Story 8.6 / T4：节点 text 落库前的净化（精炼口）。
+    purify: resolved.purify,
   })
 
   // Story 2.4 / U5：NULL 向量有界回填：只在 embedding 客户端存在时接线，挂消费者的

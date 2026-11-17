@@ -6,6 +6,9 @@
  * 以及 `lengthMin` 硬下界（低于 ⇒ 拒绝，不静默夹紧）。
  */
 import { describe, expect, it } from 'vitest'
+import { renderRegionText } from '../src/context/compaction-t1'
+import { estimateTokens } from '../src/context/fold'
+import { DEFAULT_PURIFY_OPTIONS, purifyText } from '../src/context/purify'
 import {
   LENGTH_MIN_SAFETY_MARGIN_TOKENS,
   TIER_REASON_BELOW_LENGTH_MIN,
@@ -218,5 +221,46 @@ describe('planRegionTier：区间定档（长度三带 + 硬下界的组合入�
       reason: TIER_REASON_CRITERIA_UNAVAILABLE,
       requiredMin: 0,
     })
+  })
+})
+
+describe('Story 8.6 / T6：档位判据与净化解耦（矩阵行 13 / INV-16）', () => {
+  /** 高填充密度的一段：净化后 token 数会跌进下带。 */
+  const DIRTY = [
+    ...Array.from({ length: 40 }, () => 'Let me…'),
+    ...Array.from({ length: 6 }, () => 'Repeated statement line for the collapse rule.'),
+    'The migration ordering is documented in AD-34 and the schema version must equal the largest migration number in the migrations directory.',
+    'Compaction keeps the retained tail and prices every decision with the effective token meter so the budget stays honest.',
+  ].join('\n')
+
+  const dirtyMessage = (): T1MessageLike => ({ role: 'assistant', content: [{ type: 'text', text: DIRTY }] })
+
+  it('用净化后文本算会改档，但 planRegionTier 只读原文 ⇒ 净化前后档位不变', () => {
+    const message = dirtyMessage()
+    const rawTokens = estimateTokens(renderRegionText([message]))
+    const purified = purifyText(DIRTY, DEFAULT_PURIFY_OPTIONS)
+    const purifiedTokens = estimateTokens(purified.text)
+
+    // 构造「原文落 T2、净化后落 T1」的三带
+    const criteria = { lengthMin: 200, t3Threshold: rawTokens + 20 }
+    expect(rawTokens).toBeGreaterThan(200)
+    expect(purified.changed).toBe(true)
+    expect(purifiedTokens).toBeLessThan(200)
+
+    // 判据入口只看原文 ⇒ T2（不会因为净化变短而折成 T1）
+    const plan = planRegionTier({ messages: [message], criteria })
+    expect(plan.tier).toBe('T2')
+    expect(plan.reason).toBe(TIER_REASON_MID_BAND)
+    expect(plan.tokens).toBe(rawTokens)
+
+    // 反证：若拿净化后的 token 去判，会掉到下带（这正是 INV-16 禁止的耦合）
+    expect(decideTier({ tokens: purifiedTokens }, criteria).tier).toBe('T1')
+  })
+
+  it('受保护内容判据也在原文上算：净化不改 classifyT1 的结论', () => {
+    const criteria = { lengthMin: 200, t3Threshold: 100_000 }
+    const plan = planRegionTier({ messages: [dirtyMessage()], criteria })
+    expect(plan.protectedContent).toBe(false)
+    expect(plan.tier).toBe('T2')
   })
 })

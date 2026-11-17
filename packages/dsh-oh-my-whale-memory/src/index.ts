@@ -31,6 +31,9 @@ import { createReflectionState, readReflectionView, recordTurn } from './reflect
 import { createReflectionExecutor } from './reflection/executor.js'
 import { createCompactionWiring } from './context/compaction-wiring.js'
 import { registerCompactionCriteria, resetCompactionPlans } from './context/compaction-plan-registry.js'
+import { resetPurifyOptions, registerPurifyOptions } from './context/purify-runtime.js'
+import { createPurifyLedgerWriter, registerPurifyLedgerWriter } from './context/purify-ledger.js'
+import { IOT_THINKING_PRESENT_NOTICE, detectIotThinking } from './context/purify-probe.js'
 import { detectCompactionOverlayGap, compactionOverlayGapWarning } from './context/compaction-gap.js'
 import { registerHandleWriter, setCompactionReadonly } from './context/handle-writer.js'
 import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
@@ -325,6 +328,10 @@ export async function apply(
   }
 
   const dbPath = resolveMemoryDbPath(profile.dir)
+  // Story 8.6 / T7：iot-thinking 互斥探测（只读）。在场 ⇒ 本插件仍只做 text 面并说明；
+  // 不在场 ⇒ 行为完全相同（不写日志、不改变净化规则）。路径由本实例的 profile 反推。
+  const iotThinking = detectIotThinking({ profileDir: profile.dir })
+  if (iotThinking.present) ctx.logger.info(IOT_THINKING_PRESENT_NOTICE)
   const embedding = resolveEmbeddingProfile(resolved.embedding)
   for (const message of embedding.warnings) {
     ctx.logger.warn(message)
@@ -346,6 +353,9 @@ export async function apply(
     lengthMin: resolved.compactionLengthMin,
     t3Threshold: resolved.compactionT3Threshold,
   })
+  // Story 8.6 / T3：净化四开关同样经模块级注册表交给 provider 入口（它拿不到本文件的闭包）。
+  // 只读实例也注册：净化只改执行副本，零读库写库（INV-7 不涉及）。
+  registerPurifyOptions(resolved.purify)
   try {
     // AC5：维度不符在 openMemoryDatabase 内抛 embedding_dim_mismatch，阻塞本插件启动。
     // 工具与命令经闭包读同一句柄：只读实例的 upsertMemory 抛 readonly_mode，
@@ -384,6 +394,9 @@ export async function apply(
       })
       return { id: record.id }
     })
+    // Story 8.6 / T5：净化账本写入方（只读实例不注册 ⇒ `recordPurifyRun` 只 warn 一次，
+    // 净化结果不受影响）。写的是 generation_log 的 detail 列，不新增表。
+    registerPurifyLedgerWriter(createPurifyLedgerWriter({ connection: () => getDb()?.connection ?? null }))
   }
 
   // Story 8.3 / AC:1675、NFR19：覆盖缺口检测延到微任务，避开「apply 时压缩服务尚未激活」的误报。
@@ -404,6 +417,9 @@ export async function apply(
       // Story 8.3：实例销毁后 provider 不能再写句柄（同 ctx 槽位清空，回到 fail-open）。
       registerHandleWriter(null)
       setCompactionReadonly(true)
+      // Story 8.6：净化选项复位、账本写入方撤销（下一个实例重新登记，不继承旧值）。
+      resetPurifyOptions()
+      registerPurifyLedgerWriter(null)
       // Story 8.4：档位注册表与判据一并复位（下一个实例重新登记，不继承旧值）。
       resetCompactionPlans()
     },

@@ -22,6 +22,8 @@ import {
   type InjectionBudgetResult,
   type InjectionDraft,
 } from './budget.js'
+import { purifyText, type PurifyOptions, type PurifyRule } from '../context/purify.js'
+import { recordPurifyRun } from '../context/purify-ledger.js'
 import type { InjectionTokenBudget } from '../recall/injection-budget.js'
 import type { InjectionStore } from './state.js'
 
@@ -125,6 +127,11 @@ export interface OpenstartGeneratorOptions {
   readonly resolveBudget?: (session: unknown) => InjectionTokenBudget
   /** 时钟（观测用：`at` / `elapsedMs`；测试注入固定时间）。 */
   readonly now?: () => Date
+  /**
+   * Story 8.6 / T4、AC:1896：**注入口**（FR-25 回注前）的确定性净化。
+   * 只净化注入副本（摘要 + 条目正文），库里的节点与观测摘要都不改（INV-1）。
+   */
+  readonly purify?: PurifyOptions
 }
 
 /** 摘要输出解析结果。 */
@@ -244,6 +251,60 @@ async function generateSummary(args: {
 }
 
 /**
+ * 注入口净化（Story 8.6 / T4）：摘要与三类条目的正文各跑一次 {@link purifyText}。
+ * 返回新草稿（不改入参），并带上账本需要的聚合数据；无改动时原样返回同一引用。
+ */
+function purifyDraft(draft: InjectionDraft, options: PurifyOptions | undefined): {
+  readonly draft: InjectionDraft
+  readonly ledger: {
+    readonly ruleHits: readonly PurifyRule[]
+    readonly removedChars: number
+    readonly removedTokens: number
+    readonly sourceChars: number
+  } | null
+} {
+  const hits = new Set<PurifyRule>()
+  let removedChars = 0
+  let removedTokens = 0
+  let sourceChars = 0
+  let changed = false
+
+  const purifyBody = (text: string): string => {
+    const result = purifyText(text, options ?? null)
+    sourceChars += text.length
+    if (!result.changed) return text
+    changed = true
+    for (const rule of result.ruleHits) hits.add(rule)
+    removedChars += result.removedChars
+    removedTokens += result.removedTokens
+    return result.text
+  }
+  const purifyItems = (items: readonly RecallResultItem[]): RecallResultItem[] =>
+    items.map((item) => {
+      const text = purifyBody(item.text)
+      return text === item.text ? item : { ...item, text }
+    })
+
+  const summary = draft.summary === undefined ? undefined : purifyBody(draft.summary)
+  const next: InjectionDraft = {
+    ...(summary === undefined ? {} : { summary }),
+    evidence: purifyItems(draft.evidence),
+    l1: purifyItems(draft.l1),
+    inviolable: purifyItems(draft.inviolable),
+  }
+  if (!changed) return { draft, ledger: null }
+  return {
+    draft: next,
+    ledger: {
+      ruleHits: [...hits],
+      removedChars,
+      removedTokens,
+      sourceChars,
+    },
+  }
+}
+
+/**
  * 构造 pre-step 监听器：`(payload) => Promise<void>`（宿主 waterfall 会 await，故 3s 预算是
  * 「首个请求前最多等 3s」，超时即降级；详见 spec D2）。
  */
@@ -270,12 +331,28 @@ export function createOpenstartGenerator(
   ): void => {
     // AC:1832：T1 的降级原因必须可见（压力打满 / ratio 非法），不静默按 0 处理。
     for (const warning of resolvedBudget.warnings) options.logger?.warn(warning)
-    const budget: InjectionBudgetResult = applyInjectionBudget(draft, resolvedBudget)
+    // Story 8.6 / T4：注入口净化（只改注入副本；库里节点与观测摘要不动，INV-1）。
+    const purified = purifyDraft(draft, options.purify)
+    const budget: InjectionBudgetResult = applyInjectionBudget(purified.draft, resolvedBudget)
     if (budget.text === '') {
       options.store.markSkipped(key)
       return
     }
     options.store.markReady(key, budget.text)
+    // Story 8.6 / T5：注入成功才记账（跳过的注入没有产生任何被净化的表面文本）。
+    if (purified.ledger !== null) {
+      void recordPurifyRun(
+        {
+          sessionId: key,
+          rangeStart: 0,
+          rangeEnd: purified.ledger.sourceChars,
+          ruleHits: purified.ledger.ruleHits,
+          removedChars: purified.ledger.removedChars,
+          removedTokens: purified.ledger.removedTokens,
+        },
+        { logger: options.logger },
+      )
+    }
     const finishedAt = now()
     const summary = {
       sessionKey: key,
