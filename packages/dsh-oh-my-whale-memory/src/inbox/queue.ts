@@ -106,6 +106,64 @@ export interface InboxItemInput {
   readonly id?: string
 }
 
+/**
+ * Story 10.2：L1_INBOX 的指针化 payload（长度与正文无关，只随事件数增长）。
+ *
+ * `l1_inbox.payload` 是 STRING 列，本 story 不加列（AD-34），故用 JSON 结构化：
+ * 精炼时按 `seqs` 经 `db/host-log.ts` 读回宿主事件，`eventTypes` 与 `seqs` 一一对应。
+ */
+export interface InboxPointerPayload {
+  readonly sessionId: string
+  readonly seqs: readonly number[]
+  readonly eventTypes: readonly string[]
+}
+
+/** 写指针 payload（序列化顺序固定，便于断言与人工排查）。 */
+export function formatInboxPointerPayload(input: InboxPointerPayload): string {
+  return JSON.stringify({
+    sessionId: input.sessionId,
+    seqs: input.seqs.map((seq) => seq),
+    eventTypes: input.eventTypes.map((type) => type),
+  })
+}
+
+/**
+ * 兼容读（AC：旧文本 payload 行仍可消费）：JSON 解析失败或形状不符一律返回 null，
+ * 调用方按「旧文本 payload」处理，不把它当坏条目。
+ */
+export function parseInboxPointerPayload(payload: string): InboxPointerPayload | null {
+  if (payload.length === 0 || payload[0] !== '{') return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(payload)
+  } catch {
+    return null
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null
+  const candidate = parsed as {
+    readonly sessionId?: unknown
+    readonly seqs?: unknown
+    readonly eventTypes?: unknown
+  }
+  const sessionId = candidate.sessionId
+  const seqs = candidate.seqs
+  const eventTypes = candidate.eventTypes
+  if (typeof sessionId !== 'string' || sessionId.length === 0) return null
+  if (!Array.isArray(seqs) || !Array.isArray(eventTypes)) return null
+  if (seqs.length !== eventTypes.length) return null
+  const normalizedSeqs: number[] = []
+  const normalizedTypes: string[] = []
+  for (let index = 0; index < seqs.length; index += 1) {
+    const seq = seqs[index]
+    const type = eventTypes[index]
+    if (typeof seq !== 'number' || !Number.isInteger(seq) || seq < 0) return null
+    if (typeof type !== 'string' || type.length === 0) return null
+    normalizedSeqs.push(seq)
+    normalizedTypes.push(type)
+  }
+  return { sessionId, seqs: normalizedSeqs, eventTypes: normalizedTypes }
+}
+
 export interface ClaimInboxOptions {
   /** lease 持有者标识，缺省进程 id（AC1）。 */
   readonly owner?: string

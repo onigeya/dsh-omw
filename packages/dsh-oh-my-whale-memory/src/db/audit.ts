@@ -104,6 +104,18 @@ export const REJECT_EVIDENCE_ACTION = 'reject_evidence'
 export const WRITE_EVIDENCE_SKIPPED_ACTION = 'write_evidence_skipped'
 
 /**
+ * Story 10.2：单事件超限的切片（`> captureMaxTokens`）被独立成单时记一行 capture 审计，
+ * `/memory status` 的 `oversize_items` 按本 action 计数（spec：审计 + status 可见）。
+ */
+export const CAPTURE_OVERSIZE_ACTION = 'capture_oversize'
+
+/**
+ * Story 10.2：指针 hydrate 解析不到的 seq（宿主日志缺失/读取失败/部分缺失）。独立 action
+ * 让 `/memory status` 的 `unresolvable_pointers` 可计数；条目本身仍按可重试失败处理，不判死。
+ */
+export const UNRESOLVABLE_POINTERS_ACTION = 'unresolvable_pointers'
+
+/**
  * L1→L2 提升写路径的 action 取值（Story 2.5 / FR-5）。
  * kind 沿用既有 `'refine'`（audit.ts 的 kind 词表 capture | refine | verify | cascade | redact）。
  */
@@ -521,6 +533,44 @@ export async function countUncertainAudits(connection: lbug.Connection): Promise
     return Number(value ?? 0)
   } catch (error) {
     if (isMissingTableError(error)) return null
+    throw error
+  }
+}
+
+/**
+ * Story 10.2：指针化采集/精炼的两个可见计数（`/memory status` 的
+ * `unresolvable_pointers` / `oversize_items`）。两者都从 `generation_log.action` 计数：
+ * - 单事件超限切片：{@link CAPTURE_OVERSIZE_ACTION}（采集侧写）；
+ * - hydrate 解析不到：{@link UNRESOLVABLE_POINTERS_ACTION}（精炼侧写，含部分缺失与整条失败）。
+ *
+ * 返回 null 表示算不出来（审计表不存在），与 `countRelatedSkips` 同一约定：调用方渲染「未知」，
+ * 不静默报 0。其它错误照抛。
+ */
+export interface PointerAuditCounts {
+  readonly unresolvablePointers: number | null
+  readonly oversizeItems: number | null
+}
+
+export async function countPointerAudits(connection: lbug.Connection): Promise<PointerAuditCounts> {
+  try {
+    await queryAll(connection, GENERATION_LOG_PROBE)
+    const rows = await queryAll(
+      connection,
+      'MATCH (g:' + GENERATION_LOG_TABLE + ')' +
+        ' WHERE g.action IN [' +
+        "'" + CAPTURE_OVERSIZE_ACTION + "', '" + UNRESOLVABLE_POINTERS_ACTION + "']" +
+        ' RETURN g.action AS action, count(*) AS total',
+    )
+    let oversizeItems = 0
+    let unresolvablePointers = 0
+    for (const row of rows) {
+      const total = Number(row.total ?? 0)
+      if (String(row.action) === CAPTURE_OVERSIZE_ACTION) oversizeItems += total
+      if (String(row.action) === UNRESOLVABLE_POINTERS_ACTION) unresolvablePointers += total
+    }
+    return { unresolvablePointers, oversizeItems }
+  } catch (error) {
+    if (isMissingTableError(error)) return { unresolvablePointers: null, oversizeItems: null }
     throw error
   }
 }
