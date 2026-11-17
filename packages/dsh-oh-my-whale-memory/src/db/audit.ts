@@ -169,6 +169,12 @@ export interface GenerationLogEntry {
   cascadeDepth?: number | null
   /** 级联记账：触发源 generation_log 行 id。 */
   triggerId?: string | null
+  /**
+   * Story 8.6 / AC:1890-1892：净化明细（JSON 串）。列由迁移 0002 加过，写入方一直是空；
+   * 本 story 起 `purify_text` 行用它承载 `{sessionId, rangeStart, rangeEnd, ruleHits,
+   * removedChars, removedTokens}`。凭据/正文一律不进这里（NFR9）。
+   */
+  detail?: string | null
 }
 
 /** 一条 keyed 裁决记录（写入用）。 */
@@ -210,7 +216,8 @@ const INSERT_GENERATION_LOG = [
   '  id: $id, recorded_at: $recorded_at, actor: $actor, kind: $kind, action: $action,',
   '  policy: $policy, l0_refs: $l0_refs, outcome: $outcome, reason: $reason,',
   '  question_key: $question_key, probability: $probability, threshold: $threshold,',
-  '  passed: $passed, cascade_depth: $cascade_depth, trigger_id: $trigger_id',
+  '  passed: $passed, cascade_depth: $cascade_depth, trigger_id: $trigger_id,',
+  '  detail: $detail',
   '})',
 ].join('\n')
 
@@ -357,6 +364,7 @@ export async function insertGenerationLog(
     passed: entry.passed ?? null,
     cascade_depth: entry.cascadeDepth ?? null,
     trigger_id: entry.triggerId ?? null,
+    detail: entry.detail ?? null,
   })
   return id
 }

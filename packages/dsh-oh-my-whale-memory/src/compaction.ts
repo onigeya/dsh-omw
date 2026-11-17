@@ -19,8 +19,11 @@ import {
   type CompactionPlanRecord,
 } from './context/compaction-plan-registry.js'
 import { summarizeWithT1 } from './context/compaction-t1.js'
-import { planRegionTier } from './context/compaction-tier.js'
+import { planSummarizeExecution } from './context/compaction-execution.js'
 import { getHandleWriter, isCompactionReadonly } from './context/handle-writer.js'
+import { getPurifyOptions } from './context/purify-runtime.js'
+import { recordPurifyRun, PURIFY_LEDGER_KIND } from './context/purify-ledger.js'
+import type { PurifyMessagesResult } from './context/purify.js'
 
 type SummarizeArgs = Parameters<BasicCompactionEngine['summarize']>
 type SummarizeResult = Awaited<ReturnType<BasicCompactionEngine['summarize']>>
@@ -55,15 +58,23 @@ export class OmwCompactionEngine extends BasicCompactionEngine {
    * 收敛为「委托 stock」，这里不再重复判一次（避免两份裁决漂移）。
    */
   protected override async summarize(...args: SummarizeArgs): Promise<SummarizeResult> {
-    const messages = args[0].messages
+    const input = args[0]
     const sessionId = sessionIdOf(args[1])
-    // 判据来自 Config 的运行期注册（`apply` 写入）；没注册 ⇒ planRegionTier 归 T1（fail-closed）。
-    const planned = planRegionTier({ messages, criteria: getCompactionCriteria() })
+    // Story 8.6 / T3 / AC:1864：净化是 **pass 不是档位**。`planSummarizeExecution` 先产出
+    // 执行副本，再用**净化前原文**定档（INV-16 / AC:1886-1888：填充不会把一段推过门槛）。
+    const plan = planSummarizeExecution({
+      messages: input.messages,
+      criteria: getCompactionCriteria(),
+      purifyOptions: getPurifyOptions(),
+    })
+    const planned = plan.planned
     const readonly = isCompactionReadonly()
 
     if (planned.tier === 'T1') {
       const outcome = await summarizeWithT1({
-        messages,
+        // Story 8.6 / AC:1882-1884：T1 句柄存**净化前原文**（句柄还原物 = 原文，
+        // 逐字还原率 100%）；净化只作用执行副本，而 T1 的执行副本就是句柄正文。
+        messages: plan.foldMessages,
         sessionId,
         readonly,
         writeHandle: getHandleWriter(),
@@ -77,8 +88,30 @@ export class OmwCompactionEngine extends BasicCompactionEngine {
     }
 
     // T2/T3：stock 摘要（LLM 只在这里出现；同步压缩路径本身零 LLM，NFR17 / AD-7）。
+    // 执行副本是净化后的消息（INV-1：只改内存副本，不写回 surface、不动检查点）。
     this.recordPlan(sessionId, planned, 'stock')
-    return super.summarize(...args)
+    this.recordPurify(sessionId, plan.purify)
+    return super.summarize({ ...input, messages: plan.stockMessages }, args[1], args[2])
+  }
+
+  /**
+   * Story 8.6 / T5 / AC:1890-1892：一次净化一行账本（只在执行副本**真的被用到**时记，
+   * 也就是 T2/T3 的 stock 摘要路径；T1 折叠不产生执行副本，省不下任何 token）。
+   * 写入方未注册 / 缺表 / 只读 ⇒ `recordPurifyRun` 内部只 warn，绝不影响压缩结果。
+   */
+  private recordPurify(sessionId: string, execution: PurifyMessagesResult<unknown>): void {
+    if (!execution.changed) return
+    void recordPurifyRun(
+      {
+        sessionId,
+        rangeStart: 0,
+        rangeEnd: execution.sourceChars,
+        ruleHits: execution.ruleHits,
+        removedChars: execution.removedChars,
+        removedTokens: execution.removedTokens,
+      },
+      { logger: { warn: (message) => this.warn(PURIFY_LEDGER_KIND + '：' + message) } },
+    )
   }
 
   /** 档位落账（模块级注册表；空会话 id 不可归属，跳过）。 */
