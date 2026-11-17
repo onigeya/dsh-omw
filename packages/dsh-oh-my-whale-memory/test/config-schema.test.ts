@@ -36,7 +36,9 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(missing).toEqual([])
     // 顶层字段数量锁定 FR-18 全字段，防止后续误删
     expect(Object.keys(dict).sort()).toEqual([
-      'captureSteps', 'compactionOrphanTimeoutMs', 'embedding', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
+      'captureSteps', 'chainDepthThreshold', 'compactionLengthMin', 'compactionOrphanTimeoutMs',
+      'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding', 'expandCountThreshold',
+      'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
       'layerWeights', 'llmModel', 'llmProvider', 'priorityWeight', 'reflection', 'rerank', 'retrievalTopK', 'rrfK', 'strategyGate', 'systemOne',
     ])
   })
@@ -83,6 +85,12 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.systemOne.get()).toEqual({ enabled: true })
     expect(resolved.embedding.get()).toEqual({})
     expect(resolved.rerank.get()).toEqual({})
+    // Story 8.4 / AC:1713-1760：长度三带与句柄重写阈值的默认值（经验值，可覆盖）。
+    expect(resolved.compactionLengthMin.get()).toBe(1200)
+    expect(resolved.compactionT3Threshold.get()).toBe(8000)
+    expect(resolved.expandCountThreshold.get()).toBe(2)
+    expect(resolved.chainDepthThreshold.get()).toBe(2)
+    expect(resolved.compactionSelfTuneEnabled.get()).toBe(false)
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
@@ -285,5 +293,62 @@ describe('凭据脱敏（第 11 行 / AD-9）', () => {
     cfg.embedding.model = 'bge-m3'
     const resolved = resolveRuntimeConfig(cfg)
     expect(resolved.warnings[0]).toMatch(/^embedding 降级为 disabled：缺少 embedding\.token/)
+  })
+})
+
+describe('Story 8.4 阈值治理（AC:1713-1760 / INV-12 / FR-28）', () => {
+  it('默认值与 resolved 同源：schema 默认 === resolveRuntimeConfig 兜底', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    const runtime = resolveRuntimeConfig({})
+    expect(schemaResolved.compactionLengthMin.get()).toBe(runtime.compactionLengthMin)
+    expect(schemaResolved.compactionT3Threshold.get()).toBe(runtime.compactionT3Threshold)
+    expect(schemaResolved.expandCountThreshold.get()).toBe(runtime.expandCountThreshold)
+    expect(schemaResolved.chainDepthThreshold.get()).toBe(runtime.chainDepthThreshold)
+    expect(schemaResolved.compactionSelfTuneEnabled.get()).toBe(runtime.compactionSelfTuneEnabled)
+  })
+
+  it('运行期可覆盖：五项全部按传入值生效', () => {
+    const runtime = resolveRuntimeConfig({
+      ...validConfig(),
+      compactionLengthMin: 500,
+      compactionT3Threshold: 4000,
+      expandCountThreshold: 3,
+      chainDepthThreshold: 4,
+      compactionSelfTuneEnabled: true,
+    })
+    expect(runtime.compactionLengthMin).toBe(500)
+    expect(runtime.compactionT3Threshold).toBe(4000)
+    expect(runtime.expandCountThreshold).toBe(3)
+    expect(runtime.chainDepthThreshold).toBe(4)
+    expect(runtime.compactionSelfTuneEnabled).toBe(true)
+    expect(runtime.warnings).toEqual([])
+  })
+
+  it('两条长度阈值必须构成合法三带：lengthMin >= t3Threshold 抛错（不静默夹紧）', () => {
+    expect(() => resolveRuntimeConfig({ ...validConfig(), compactionLengthMin: 8000 }))
+      .toThrowError(/compactionLengthMin.*compactionT3Threshold/)
+    expect(() => resolveRuntimeConfig({ ...validConfig(), compactionT3Threshold: 100 }))
+      .toThrowError(/compactionLengthMin.*compactionT3Threshold/)
+  })
+
+  it('四个数值阈值都是正整数硬校验（0 / 负数 / 非整数 / NaN 抛错）', () => {
+    const cases: ReadonlyArray<readonly [string, number]> = [
+      ['compactionLengthMin', 0],
+      ['compactionT3Threshold', -1],
+      ['expandCountThreshold', 2.5],
+      ['chainDepthThreshold', Number.NaN],
+    ]
+    for (const [field, bad] of cases) {
+      const cfg = { ...validConfig(), [field]: bad }
+      expect(() => resolveRuntimeConfig(cfg), field + '=' + String(bad)).toThrowError(new RegExp(field))
+      expect(() => resolveRuntimeConfig(cfg), field + '=' + String(bad)).toThrowError(/≥ 1/)
+    }
+  })
+
+  it('表单投影：五项都带 volatile（否则不进 /settings，AD-11）', () => {
+    const dict = Config.dict as Record<string, any>
+    for (const field of ['compactionLengthMin', 'compactionT3Threshold', 'expandCountThreshold', 'chainDepthThreshold', 'compactionSelfTuneEnabled']) {
+      expect(dict[field]?.meta?.volatile, field).toBe(true)
+    }
   })
 })
