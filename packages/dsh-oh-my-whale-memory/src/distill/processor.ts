@@ -12,6 +12,7 @@ import type * as lbug from '@ladybugdb/core'
 import {
   REFINE_INBOX_ACTION,
   REFINE_KIND,
+  UNRESOLVABLE_POINTERS_ACTION,
   WRITE_EVIDENCE_SKIPPED_ACTION,
   auditWriter,
   type GenerationLogOutcome,
@@ -19,6 +20,8 @@ import {
 import { memoryNodeId } from '../db/id.js'
 import { SemanticScanError, writeDeduplicatedMemory } from '../db/dedup.js'
 import { L0_LAYER, writeEvidenceEdges } from '../db/edges.js'
+import { l0PointerId } from '../db/l0.js'
+import { hydratePointerEvents, type HostLogServiceLike } from '../db/host-log.js'
 import { getMemoryById } from '../db/memory.js'
 import { runInTransaction } from '../db/transaction.js'
 import { EMBEDDING_MAX_BATCH, type EmbedClient } from '../embedding/client.js'
@@ -27,6 +30,7 @@ import {
   INBOX_STATUS_PENDING,
   INBOX_STATUS_PROCESSING,
   markInboxItemDone,
+  parseInboxPointerPayload,
   readInboxItemStatus,
   type InboxItem,
   type InboxStatus,
@@ -65,6 +69,12 @@ export const COERCED_CLASSIFICATION_REASON = 'coerced-kind-or-priority'
  */
 export const SEMANTIC_SCAN_DEGRADED_REASON = 'semantic-scan-degraded'
 
+/**
+ * Story 10.2：指针 hydrate 解析不到时的失败/降级理由。整条失败进 `InboxRefineError`
+ * （可重试、不丢条目）；部分缺失照常精炼并把缺失计进 `unresolvable_pointers`（status 可见）。
+ */
+export const UNRESOLVABLE_POINTERS_REASON = 'unresolvable-pointers'
+
 export interface InboxProcessorDeps {
   /** 惰性取连接（与消费者同一 accessor）。 */
   readonly connection: () => lbug.Connection | null
@@ -95,6 +105,12 @@ export interface InboxProcessorDeps {
    * 净化同时作用于写库文本与写时嵌入（两者必须同一份文本，否则向量与正文对不上）。
    */
   readonly purify?: PurifyOptions
+  /**
+   * Story 10.2 / AD-36：宿主会话日志服务（`ctx.sessionPersistence`）。指针 payload 的正文
+   * 只能经它按 seq 读回；缺失时指针条目按可重试失败处理（不伪造文本）。旧文本 payload
+   * 条目完全不使用它（兼容读）。
+   */
+  readonly hostLog?: HostLogServiceLike | null
 }
 
 export interface EmbedFactsResult {
@@ -142,7 +158,7 @@ export function isProcessableStatus(status: InboxStatus | null): boolean {
  */
 function insertRefineAudit(
   connection: lbug.Connection,
-  itemId: string,
+  l0Refs: readonly string[],
   outcome: GenerationLogOutcome,
   reason: string | null,
   now: () => Date,
@@ -157,19 +173,34 @@ function insertRefineAudit(
     recordedAt: now().toISOString(),
     actor: 'system',
     kind: REFINE_KIND,
-    l0Refs: [itemId],
+    l0Refs,
   })({ action, outcome, reason })
 }
 
 /** 失败审计行：必须另开事务写（调用方的事务已回滚），否则随回滚一起消失（N9）。 */
 async function recordRefineFailure(
   connection: lbug.Connection,
-  item: InboxItem,
+  l0Refs: readonly string[],
   failure: RefineFailure,
   now: () => Date,
 ): Promise<void> {
   await runInTransaction(connection, () =>
-    insertRefineAudit(connection, item.id, failure.retryable ? 'uncertain' : 'failure', failure.reason, now),
+    insertRefineAudit(connection, l0Refs, failure.retryable ? 'uncertain' : 'failure', failure.reason, now),
+  )
+}
+
+/**
+ * Story 10.2：hydrate 解析不到的可见计数行（独立 action ⇒ status 的 `unresolvable_pointers`）。
+ * 必须另开事务写：调用方随后抛错，不把这条观测行卷进任何写事务。
+ */
+async function recordUnresolvablePointers(
+  connection: lbug.Connection,
+  l0Refs: readonly string[],
+  reason: string,
+  now: () => Date,
+): Promise<void> {
+  await runInTransaction(connection, () =>
+    insertRefineAudit(connection, l0Refs, 'uncertain', reason, now, UNRESOLVABLE_POINTERS_ACTION),
   )
 }
 
@@ -192,6 +223,14 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     const status = await readInboxItemStatus(connection, item.id)
     if (!isProcessableStatus(status)) return { completed: true, kinds: [] }
 
+    // ⓪′ Story 10.2：payload 形态只判一次。指针条目（本 story 起）需要 hydrate；
+    // 10.2 之前入队的纯文本条目走兼容读，完全不走宿主日志。
+    const pointer = parseInboxPointerPayload(item.payload)
+    // 审计 l0Refs：指针条目记 seq 列表（AC 逐字要求）；旧文本条目沿用条目 id（= L0 id）。
+    const auditRefs: readonly string[] = pointer ? pointer.seqs.map(String) : [item.id]
+    let transcript = item.payload
+    let sourceRefs: readonly string[] = [item.id]
+
     // ① 路由解析闸门（AC:568）：解析失败直接降级，不调 LLM。
     const route = deps.resolveRoute(item.sessionId)
     if (!route) {
@@ -200,8 +239,41 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         message: '未解析到可用的 provider/model 路由（session=' + item.sessionId + '）',
         retryable: true,
       }
-      await recordRefineFailure(connection, item, failure, now)
+      await recordRefineFailure(connection, auditRefs, failure, now)
       throw new InboxRefineError(failure.message, { reason: failure.reason, fatal: false })
+    }
+
+    // ①′ Story 10.2 / AD-36：按 seq 经 host-log 读回正文 → renderMessage 拼接。读不到就抛
+    // 可重试的 InboxRefineError（消费者退避重试，条目不丢），绝不伪造文本、不静默当墓碑。
+    if (pointer) {
+      let hydrated
+      try {
+        hydrated = await hydratePointerEvents(deps.hostLog ?? null, pointer.sessionId, pointer.seqs)
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error)
+        await recordUnresolvablePointers(connection, auditRefs, UNRESOLVABLE_POINTERS_REASON + ': ' + message, now)
+        throw new InboxRefineError(
+          'INBOX 指针 hydrate 失败（可重试）：' + message,
+          { reason: UNRESOLVABLE_POINTERS_REASON, fatal: false },
+        )
+      }
+      if (hydrated.events.length === 0) {
+        const detail = '所有 seq 都解析不到（session=' + pointer.sessionId + '，seq=' + pointer.seqs.join(',') + '）'
+        await recordUnresolvablePointers(connection, auditRefs, UNRESOLVABLE_POINTERS_REASON + ': ' + detail, now)
+        throw new InboxRefineError(
+          'INBOX 指针 hydrate 失败（可重试）：' + detail,
+          { reason: UNRESOLVABLE_POINTERS_REASON, fatal: false },
+        )
+      }
+      if (hydrated.missing.length > 0) {
+        // 部分缺失：可用部分照常精炼，缺失计数可见（AC：不伪造）。
+        const missingReason = UNRESOLVABLE_POINTERS_REASON + ': missing=' + hydrated.missing.join(',')
+        deps.logger?.warn('INBOX 指针部分缺失（照常精炼可用部分，id=' + item.id + '）：' + missingReason)
+        await recordUnresolvablePointers(connection, auditRefs, missingReason, now)
+      }
+      transcript = hydrated.text
+      // 多源：每个解析到的 seq 对应一个 pointer L0 id（EII 链 pointer L0 → L1 可达）。
+      sourceRefs = hydrated.resolvedSeqs.map((seq) => l0PointerId(pointer.sessionId, seq))
     }
 
     // ② 一次尝试 = 一次 ctx.llm.stream（R2：重试不在同一次尝试内）；总上界 30s，LLM 只吃 20s（T13）。
@@ -210,11 +282,11 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
     const refined = await refineTranscript({
       llm: deps.llm,
       route,
-      transcript: item.payload,
+      transcript,
       signal: llmSignal,
     })
     if (!refined.ok) {
-      await recordRefineFailure(connection, item, refined.failure, now)
+      await recordRefineFailure(connection, auditRefs, refined.failure, now)
       throw new InboxRefineError(
         'LLM 精炼失败（' + refined.failure.reason + '）：' + refined.failure.message,
         { reason: refined.failure.reason, fatal: !refined.failure.retryable },
@@ -302,7 +374,7 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
               embeddingModelId: vector ? (deps.embeddingModelId ?? null) : null,
               kind: existing ? existing.kind : fact.kind,
               priority: existing ? existing.priority : fact.priority,
-              sourceRefs: [item.id],
+              sourceRefs: [...sourceRefs],
               actor: 'system',
             },
             { now, logger: deps.logger, scanFailure: 'throw', skipSemanticScan },
@@ -313,24 +385,26 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
           }
         }
         // EVIDENCE 结构写者：为本次新写/命中的每个 L1 节点建 l0_raw→memory 边（MERGE 幂等）。
-        // 层序由 writeEvidenceEdges 内判：item.id 属 L0、to 属 L1，低→高成立。
+        // Story 10.2：多源——每个解析到的 pointer L0 id → 每个 L1 节点都建一条边（复用既有
+        // source_refs / EVIDENCE 机制，不引入区间边）。旧文本条目的 sourceRefs 仍是单个 L0 id。
         const edgeResult = await writeEvidenceEdges(
           connection,
-          writtenL1Ids.map((id) => ({
-            fromId: item.id,
-            fromLayer: L0_LAYER,
-            toId: id,
-            toLayer: MEMORY_REMEMBER_LAYER,
-            reason: 'refine',
-          })),
+          writtenL1Ids.flatMap((id) =>
+            sourceRefs.map((fromId) => ({
+              fromId,
+              fromLayer: L0_LAYER,
+              toId: id,
+              toLayer: MEMORY_REMEMBER_LAYER,
+              reason: 'refine',
+            }))),
         )
-        await insertRefineAudit(connection, item.id, 'success', null, now)
+        await insertRefineAudit(connection, auditRefs, 'success', null, now)
         if (edgeResult.skipped.length > 0) {
           // 评审 P16（T18）：落独立 action（不是 refine_inbox 的 reason 文本）。
           // countRelatedSkips 按 action 白名单计数，只改 reason 统计不到（AD-21 降级必须可见）。
           await insertRefineAudit(
             connection,
-            item.id,
+            auditRefs,
             'uncertain',
             'skipped=' + String(edgeResult.skipped.length),
             now,
@@ -340,19 +414,19 @@ export function createInboxProcessor(deps: InboxProcessorDeps): (item: InboxItem
         if (embedded.failure) {
           await insertRefineAudit(
             connection,
-            item.id,
+            auditRefs,
             'uncertain',
             EMBEDDING_FAILED_REASON + ': ' + embedded.failure.reason,
             now,
           )
         }
         if (facts.some((fact) => fact.coerced)) {
-          await insertRefineAudit(connection, item.id, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
+          await insertRefineAudit(connection, auditRefs, 'uncertain', COERCED_CLASSIFICATION_REASON, now)
         }
         if (scanDegraded !== null) {
           await insertRefineAudit(
             connection,
-            item.id,
+            auditRefs,
             'uncertain',
             SEMANTIC_SCAN_DEGRADED_REASON + ': ' + scanDegraded,
             now,
