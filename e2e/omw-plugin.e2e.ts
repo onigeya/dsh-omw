@@ -108,7 +108,8 @@ describe('dsh-oh-my-whale 在独立 profile 中的端到端行为', () => {
       await option.waitFor({ timeout: 10_000 })
       expect(await option.count()).toBe(1)
       // 描述文案来自插件注册的命令定义，说明命令确实由本插件提供。
-      await page.getByText('记录与浏览长期记忆（remember / list / show / status / recall / related）', { exact: false })
+      // Story 4.1 起描述里追加了 forget —— 期望值随之更新（契约变更，不是放宽断言）。
+      await page.getByText('记录与浏览长期记忆（remember / list / show / status / recall / related / forget）', { exact: false })
         .waitFor({ timeout: 10_000 })
       expect(pageErrors).toEqual([])
     } finally {
@@ -220,6 +221,14 @@ describe('dsh-oh-my-whale 在独立 profile 中的端到端行为', () => {
       layerWeights: { l2: 0.7, l1: 0.4 },
       priorityWeight: 0.5,
       systemOne: { enabled: true },
+      // Story 7.2 / AD-37：反思触发三项（阈值不是 7.2 拍定的，锁在架构里）。
+      reflection: { threshold: 6, idleWaitMs: 90_000, intervalMs: 900_000 },
+      // Story 7.3 / AD-20：策略采纳门三项。
+      strategyGate: { minConfidence: 0.6, expiryDays: 7, maxPendingPerSession: 5 },
+      // Story 8.1 / AC:1544：压缩孤儿解阻塞超时。
+      compactionOrphanTimeoutMs: 60_000,
+      // Story 8.2 / FR-23：工具结果折叠阈值。
+      foldThresholdTokens: 2000,
     })
   })
 })

@@ -371,6 +371,76 @@ async function startWriterInstance(dbPath: string, statements: string[]): Promis
   }
 }
 
+/**
+ * Story 8.1 第 3 轮：`context_ledger:` 行的真实数据通路（T4 装配 + T5 渲染）。
+ *
+ * 这里证的是**接线**而不是渲染（渲染逐字口径在 context-status 单测）：
+ * `apply` 拿到可选 `tokenMeter` 服务 → `turn/end` 经 session/event 交给 tap →
+ * tap 调 `measure()` → status 读到同一份快照。缺 tokenMeter 的夹具（本文件其余用例）
+ * 必须仍渲染 `n/a`，所以「未采集」与「已采集」两种形态都在此出现。
+ */
+describe('Story 8.1：status 的 context_ledger 行来自真实 tap 采集（AC:1566-1568）', () => {
+  it('未采集 ⇒ n/a；turn/end 后 ⇒ 五类数值与 indexedSeqs（和恒等于 total）', async () => {
+    const ledgerDir = await makeTempDir('omw-status-ledger-')
+    const listeners: Array<(session: unknown, event: unknown) => void> = []
+    const defs: MemoryCommandDefinition[] = []
+    const measure = vi.fn(() => ({
+      totalTokens: 105,
+      nodes: [
+        { seq: 0, tokens: 50 },
+        { seq: 1, tokens: 10 },
+        { seq: 2, tokens: 30 },
+        { seq: 3, tokens: 15 },
+      ],
+    }))
+    const ctx = {
+      logger: { warn: vi.fn(), info: vi.fn() },
+      get: (key: string) => {
+        if (key === 'profileContext') return { dir: ledgerDir }
+        // 可选服务：真实宿主由 dsh-token-meter 提供，这里给最小形态。
+        if (key === 'tokenMeter') return { measure }
+        if (key === 'commands') return { register: (definition: MemoryCommandDefinition) => { defs.push(definition); return () => {} } }
+        return undefined
+      },
+      on: (event: string, listener: (session: unknown, event: unknown) => void) => {
+        if (event === 'session/event') listeners.push(listener)
+        return () => {}
+      },
+      effect: (factory: () => () => unknown) => factory(),
+      tools: { register: () => () => {} },
+    } as unknown as Parameters<typeof plugin.apply>[0]
+
+    await plugin.apply(ctx, EMBEDDING_CONFIG)
+    const command = defs[0]
+    expect(command).toBeDefined()
+
+    const before = await command!.handler({ rawInput: ' status' })
+    expect(before.kind).toBe('success')
+    expect(before.text).toContain('context_ledger: n/a（本实例尚未采集）')
+
+    // 会话事件是 seq→来源 的唯一来源：四类 surface 事件各一条。
+    const session = {
+      id: 's-ledger',
+      snapshotEvents: () => [
+        { seq: 0, type: 'system/message' },
+        { seq: 1, type: 'user/message' },
+        { seq: 2, type: 'tool/result' },
+        { seq: 3, type: 'assistant/message' },
+      ],
+    }
+    for (const listener of listeners) {
+      listener(session, { type: 'turn/end', seq: 4, time: 0, data: { turn: 1, reason: { kind: 'completed' } } })
+    }
+
+    expect(measure).toHaveBeenCalledTimes(1)
+    const after = await command!.handler({ rawInput: ' status' })
+    expect(after.kind).toBe('success')
+    expect(after.text).toContain(
+      'context_ledger: system=50 user=10 tool=30 assistant=15 unknown=0 total=105 indexedSeqs=4 captured=',
+    )
+  }, 30_000)
+})
+
 describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数照常', () => {
   it('写者持锁 → readonly: true, reason: <READONLY_REASON>；层计数仍读得到', async () => {
     const roDir = await makeTempDir('omw-status-ro-')

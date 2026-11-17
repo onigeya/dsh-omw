@@ -33,11 +33,10 @@ afterAll(async () => {
 /** 假 exec：只带 agent.session（quotaOwnerOf 用它取会话键）。 */
 const exec = { agent: { session: { id: 's-tool' } } }
 
-function makeTool(options: { readonly db?: MemoryDatabase, readonly quota?: ReturnType<typeof createRecallTurnQuota>, readonly sessionId?: string }) {
+function makeTool(options: { readonly db?: MemoryDatabase, readonly quota?: ReturnType<typeof createRecallTurnQuota> }) {
   const tool = createMemoryExpandTool({
     getDb: () => options.db,
     quota: options.quota ?? createRecallTurnQuota(3),
-    sessionId: options.sessionId === undefined ? undefined : () => options.sessionId as string,
   })
   return tool
 }
@@ -76,7 +75,7 @@ describe('memory_expand 工具（AC:1615-1622）', () => {
   it('成功：逐字还原 + total/bytes 正确', async () => {
     const text = '工具结果原文 🐋\n第二行'
     const record = await writeHandle(store.connection, { sessionId: 's-tool', seq: 1, text, recordedAt: T0 })
-    const tool = makeTool({ db: store, sessionId: 's-tool' })
+    const tool = makeTool({ db: store })
     const value = await tool.execute({ handle: record.id }, exec)
     expect(value.restored).toBe(true)
     const success = value as { text: string, total: number, bytes: number, handle: string }
@@ -89,7 +88,7 @@ describe('memory_expand 工具（AC:1615-1622）', () => {
   it('也接受整段句柄块作为入参', async () => {
     const text = '块入参'
     const record = await writeHandle(store.connection, { sessionId: 's-tool', seq: 2, text, recordedAt: T0 })
-    const tool = makeTool({ db: store, sessionId: 's-tool' })
+    const tool = makeTool({ db: store })
     const value = await tool.execute({ handle: '[omw:handle=' + record.id + ' ~3 tokens]' }, exec)
     expect(value.restored).toBe(true)
   })
@@ -98,7 +97,7 @@ describe('memory_expand 工具（AC:1615-1622）', () => {
     const text = '别人的正文不该泄露'
     const record = await writeHandle(store.connection, { sessionId: 's-other', seq: 3, text, recordedAt: T0 })
     const before = await queryRows(store.connection, "MATCH (m:memory) WHERE m.kind = 'handle' RETURN count(m) AS c")
-    const tool = makeTool({ db: store, sessionId: 's-tool' })
+    const tool = makeTool({ db: store })
     const value = await tool.execute({ handle: record.id }, exec)
     expect(value.restored).toBe(false)
     const failure = value as { error: { code: string, retryable: boolean } }
