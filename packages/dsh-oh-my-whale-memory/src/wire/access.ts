@@ -7,7 +7,7 @@
  */
 import type { MemoryDatabase } from '../db/database.js'
 import { createReadonlyModeError, memoryDatabaseBackendKind } from '../db/database.js'
-import { computeAuditGap, countUncertainAudits } from '../db/audit.js'
+import { computeAuditGap, countPointerAudits, countUncertainAudits } from '../db/audit.js'
 import { computeEvidenceGap } from '../db/eii.js'
 import { collectHealthMetrics } from '../db/health.js'
 import { forgetMemory as forgetMemoryInDb } from '../db/forget.js'
@@ -141,6 +141,8 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
     const evidenceGap = await computeEvidenceGap(connection, now)
     const relatedSkipped = await countRelatedSkips(connection)
     const inboxCounts = await countInboxByStatus(connection)
+    // Story 10.2：指针化采集/精炼的两个可见计数（审计 action 计数；表缺失 = null ⇒ 渲染未知）。
+    const pointerAudits = await countPointerAudits(connection)
     // Story 2.5 / U1：L2_INBOX 行从「memory.layer 的历史计数槽」换成 l2_inbox 的真实队列深度
     // （pending + processing = 待提升条目；done/failed 不计入，failed 另有 failed 行）。
     const l2InboxCounts = await l2InboxQueue.countByStatus(connection)
@@ -205,7 +207,11 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
         }))
         .catch(() => null),
       // Story 10.1：采集模式（tokens / steps(degraded)；指针持久化不可用时显式可见）。
-      capture: options.captureModeView?.() ?? null,
+      // Story 10.2：同一行块里带指针解析/超限三计数（trigger 即 capture_trigger 行）。
+      capture: (() => {
+        const view = options.captureModeView?.() ?? null
+        return view === null ? null : { ...view, ...pointerAudits }
+      })(),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。
       backend: memoryDatabaseBackendKind(readConnection().dbPath),
       uncertain: await countUncertainAudits(connection),

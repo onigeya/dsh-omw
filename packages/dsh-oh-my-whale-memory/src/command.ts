@@ -378,8 +378,16 @@ export interface MemoryStatusSnapshot {
    * Story 10.1：采集模式（缺省 = 不渲染，保既有逐行输出不变）。
    * `trigger` = `tokens`（token 增量）或 `steps(degraded)`（tokenMeter 缺失的降级）；
    * `persistence` = `available` / `unavailable`（sessionPersistence 缺失 ⇒ 指针采集降级）。
+   *
+   * Story 10.2：同块追加 `unresolvablePointers` / `oversizeItems` 两计数（null = 审计表缺失、
+   * 渲染「未知」；0/undefined 不追加行，既有逐行输出逐字不变）。`trigger` 即 `capture_trigger` 行。
    */
-  readonly capture?: { readonly trigger: string; readonly persistence: string } | null
+  readonly capture?: {
+    readonly trigger: string
+    readonly persistence: string
+    readonly unresolvablePointers?: number | null
+    readonly oversizeItems?: number | null
+  } | null
   /**
    * 存储后端（Story 5.1 / AC:1171 / AD-32）：`native` = 纯 Node 宿主的 `@ladybugdb/core`，
    * `wasm` = Electron 宿主的 `@ladybugdb/wasm-core`。缺省 = 未提供，渲染时不追加该行
@@ -1033,6 +1041,17 @@ function renderCaptureLines(snapshot: MemoryStatusSnapshot): string[] {
   if (view === undefined || view === null) return []
   const lines = [`capture_trigger: ${view.trigger}`]
   if (view.persistence === 'unavailable') lines.push('pointer_persistence: unavailable（sessionPersistence 缺失，L0 走 inline 快照）')
+  // Story 10.2：0/未提供时不追加（既有逐行输出不变）；null = 审计表缺失，渲染未知不静默报 0。
+  if (view.unresolvablePointers === null) {
+    lines.push('unresolvable_pointers: 未知（审计表缺失）')
+  } else if (view.unresolvablePointers !== undefined && view.unresolvablePointers > 0) {
+    lines.push(`unresolvable_pointers: ${view.unresolvablePointers}`)
+  }
+  if (view.oversizeItems === null) {
+    lines.push('oversize_items: 未知（审计表缺失）')
+  } else if (view.oversizeItems !== undefined && view.oversizeItems > 0) {
+    lines.push(`oversize_items: ${view.oversizeItems}`)
+  }
   return lines
 }
 

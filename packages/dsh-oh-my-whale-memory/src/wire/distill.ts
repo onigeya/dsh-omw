@@ -12,6 +12,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type { RuntimeConfig } from '../config.js'
 import type { MemoryDatabase } from '../db/database.js'
 import type { EmbeddingProfile } from '../db/embedding-profile.js'
+import type { HostLogServiceLike } from '../db/host-log.js'
 import { createEmbeddingBackfill } from '../embedding/backfill.js'
 import { createEmbeddingClient, type EmbedClient } from '../embedding/client.js'
 import { createInboxProcessor } from '../distill/processor.js'
@@ -84,6 +85,11 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
   const resolveRoute = (sessionId: string): RefineRoute | null =>
     configuredRoute ?? sessionRoute(sessionId)
 
+  // Story 10.2 / AD-36：hydrate 只经宿主 read 句柄。服务缺失时给 null：指针条目会走
+  // 「可重试失败」路径（不伪造文本），旧文本 payload 条目完全不受影响。
+  const hostLog = ((ctx as unknown as { get?: (name: string) => unknown }).get?.('sessionPersistence') ?? null) as
+    HostLogServiceLike | null
+
   // Story 2.6：关系维护跑者：在每个新 L1 节点上跑一次 KNN + 一次 ctx.llm 识别 + 应用层
   // 校验 + 写 RELATED 边。调用点在精炼事务之外（AC:779-782：关系失败不影响记忆进库）。
   // embedding 禁用 ⇒ 整体跳过 RELATED（记忆照常进库）并落一条 skip 审计供 status 可见。
@@ -106,6 +112,8 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     logger: ctx.logger,
     // Story 8.6 / T4：节点 text 落库前的净化（精炼口）。
     purify: resolved.purify,
+    // Story 10.2：指针 payload 的正文 hydrate 通道（唯一读宿主处，AD-36）。
+    hostLog,
   })
 
   // Story 2.4 / U5：NULL 向量有界回填：只在 embedding 客户端存在时接线，挂消费者的
