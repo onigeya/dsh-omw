@@ -1,4 +1,3 @@
-#!/usr/bin/env node
 /**
  * INV-11 / AC:1691 / AC:1703 的漂移锁：**只许依赖压缩后端的公共面**。
  *
@@ -11,6 +10,11 @@
  * 这里管的是**对上游实现的依赖面**（AD-27 的漂移锁），两者的红/绿判据不同，混在一起会难定位。
  *
  * 用法：`node scripts/check-compaction-surface.mjs`（被 `pnpm verify` 调用）。
+ *
+ * **刻意不写 shebang**：本模块被 `test/compaction-surface-gate.test.ts` 直接 import 做自检，
+ * 而 Vite/vitest 的 SSR transform 不剥 shebang，首行 `#!` 会让整个套件以
+ * `SyntaxError: Invalid or unexpected token` 失败（Story 8.4 T8 实测）。门禁一律经 `node` 调用，
+ * shebang 对本文件没有作用。
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { join, relative } from 'node:path'
