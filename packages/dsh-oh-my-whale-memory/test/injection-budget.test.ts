@@ -18,6 +18,14 @@ import {
   isInviolableItem,
   type InjectionDraft,
 } from '../src/injection/budget'
+import {
+  INJECTION_DEFAULT_RATIO,
+  INJECTION_WARNING_PRESSURE_EXHAUSTED,
+  INJECTION_WARNING_RATIO_INVALID,
+  computeInjectionBudget,
+  truncateToTokenCap,
+} from '../src/recall/injection-budget'
+import { estimateTokens } from '../src/shared/text-budget'
 import type { RecallResultItem } from '../src/recall/core'
 
 function item(id: string, text: string, overrides: Partial<RecallResultItem> = {}): RecallResultItem {
@@ -210,5 +218,119 @@ describe('Story 7.1 / AC:1369-1372：persona 恒置顶且永不因预算被裁',
     expect(result.items.filter((entry) => entry.inviolable)).toHaveLength(1)
     expect(result.items.filter((entry) => !entry.inviolable)).toHaveLength(INJECTION_MAX_ITEMS)
     expect(result.items[0]?.id).toBe('persona-2')
+  })
+})
+
+/**
+ * Story 8.5 / T1：`computeInjectionBudget` 的 I/O 矩阵 1–7（AC:1826-1832、AD-25）。
+ * 单位一律 tokens；窗口/压力来自宿主 `tokenMeter.contextPressure()`，上限来自 Config。
+ */
+describe('computeInjectionBudget：矩阵 1–7（tokens 口径）', () => {
+  const BASE = {
+    contextWindow: 128_000,
+    pressureTokens: 100_000,
+    injectionTokenCap: 4096,
+    ratio: 0.5,
+    singleCap: 512,
+    summaryCap: 512,
+  } as const
+
+  it('矩阵 1：contextWindow 缺失 ⇒ 预算 = injectionTokenCap（不假设窗口大小）', () => {
+    for (const contextWindow of [undefined, null, Number.NaN, Number.POSITIVE_INFINITY, 0]) {
+      const budget = computeInjectionBudget({ ...BASE, contextWindow })
+      expect(budget.budget).toBe(BASE.injectionTokenCap)
+      expect(budget.warnings).toEqual([])
+    }
+  })
+
+  it('矩阵 2：pressureTokens >= contextWindow ⇒ 预算 0 + 可见 warning（含相等与越界）', () => {
+    for (const pressureTokens of [128_000, 200_000]) {
+      const budget = computeInjectionBudget({ ...BASE, pressureTokens })
+      expect(budget.budget).toBe(0)
+      expect(budget.warnings).toEqual([INJECTION_WARNING_PRESSURE_EXHAUSTED])
+    }
+  })
+
+  it('矩阵 3：ratio 为负 ⇒ 预算 0 + 可见 warning（即使窗口有余额）', () => {
+    const budget = computeInjectionBudget({ ...BASE, ratio: -0.5 })
+    expect(budget.budget).toBe(0)
+    expect(budget.warnings).toEqual([INJECTION_WARNING_RATIO_INVALID])
+  })
+
+  it('矩阵 3 补：ratio 非有限值同样是「非法」而不是静默按缺省值算', () => {
+    const budget = computeInjectionBudget({ ...BASE, ratio: Number.NaN })
+    expect(budget.budget).toBe(0)
+    expect(budget.warnings).toEqual([INJECTION_WARNING_RATIO_INVALID])
+  })
+
+  it('矩阵 4：ratio 未配置 ⇒ 0.5', () => {
+    expect(INJECTION_DEFAULT_RATIO).toBe(0.5)
+    const budget = computeInjectionBudget({ ...BASE, contextWindow: 20_000, pressureTokens: 10_000, ratio: undefined })
+    // 0.5 × (20000 − 10000) = 5000 → 仍受 cap 4096 约束，故用更小的窗口验证 0.5 本身。
+    expect(budget.budget).toBe(BASE.injectionTokenCap)
+    const small = computeInjectionBudget({ ...BASE, contextWindow: 4000, pressureTokens: 1000, ratio: undefined })
+    expect(small.budget).toBe(1500)
+  })
+
+  it('矩阵 5：计算结果为负/极小时夹到 0（max(0, ·)）', () => {
+    const tiny = computeInjectionBudget({ ...BASE, contextWindow: 4000, pressureTokens: 3999, ratio: 0.5 })
+    expect(tiny.budget).toBe(0)
+    expect(tiny.warnings).toEqual([])
+    const zeroRatio = computeInjectionBudget({ ...BASE, ratio: 0 })
+    expect(zeroRatio.budget).toBe(0)
+  })
+
+  it('矩阵 6：单条 / 摘要各自被自己的绝对上限截断（互不代替）', () => {
+    const long = '很长的一段记忆正文。'.repeat(500)
+    const single = truncateToTokenCap(long, 100)
+    expect(single.truncated).toBe(true)
+    expect(single.text.endsWith(INJECTION_ELLIPSIS)).toBe(true)
+    expect(estimateTokens(single.text)).toBeLessThanOrEqual(100)
+
+    const summary = truncateToTokenCap(long, 40)
+    expect(summary.truncated).toBe(true)
+    expect(estimateTokens(summary.text)).toBeLessThanOrEqual(40)
+
+    // 未超限不动（不白加省略号）
+    const short = truncateToTokenCap('短记忆', 40)
+    expect(short).toEqual({ text: '短记忆', truncated: false })
+    // 上限 0 ⇒ 空串（预算耗尽，不产出碎片）
+    expect(truncateToTokenCap('短记忆', 0)).toEqual({ text: '', truncated: true })
+  })
+
+  it('矩阵 7：window 极大 ⇒ 仍不超 injectionTokenCap', () => {
+    const budget = computeInjectionBudget({ ...BASE, contextWindow: 10_000_000, pressureTokens: 0 })
+    expect(budget.budget).toBe(BASE.injectionTokenCap)
+  })
+
+  it('单条 / 摘要上限原样透传（并折成非负整数）', () => {
+    const budget = computeInjectionBudget({ ...BASE, singleCap: 300, summaryCap: 200 })
+    expect(budget.singleCap).toBe(300)
+    expect(budget.summaryCap).toBe(200)
+    const broken = computeInjectionBudget({ ...BASE, singleCap: -1, summaryCap: Number.NaN })
+    expect(broken.singleCap).toBe(0)
+    expect(broken.summaryCap).toBe(0)
+  })
+
+  it('不抛错：全字段 NaN/Infinity/负数也只返回预算与告警', () => {
+    expect(() => computeInjectionBudget({
+      contextWindow: Number.NaN,
+      pressureTokens: -5,
+      injectionTokenCap: Number.NaN,
+      ratio: Number.POSITIVE_INFINITY,
+      singleCap: Number.NaN,
+      summaryCap: -10,
+    })).not.toThrow()
+    const budget = computeInjectionBudget({
+      contextWindow: 1000,
+      pressureTokens: Number.NaN,
+      injectionTokenCap: 100,
+      ratio: 0.5,
+      singleCap: 10,
+      summaryCap: 10,
+    })
+    // 压力非法按 0 处理：0.5 × 1000 = 500 → cap 100。
+    expect(budget.budget).toBe(100)
+    expect(budget.warnings).toEqual([])
   })
 })
