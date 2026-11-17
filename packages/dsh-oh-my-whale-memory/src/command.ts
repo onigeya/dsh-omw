@@ -411,6 +411,24 @@ export interface MemoryStatusSnapshot {
     /** 本插件目标 schema 版本（`SCHEMA_VERSION`）。 */
     readonly expected: string
   }
+  /**
+   * Story 11.3 / T6：Self-Knowledge 三态计数 + record-only 可见数（审计面，不含正文）。
+   * `undefined` = 调用方未提供（不渲染该行，既有逐行输出逐字不变）；`null` = 表缺失 /
+   * 算不出来（渲染成「未知」，与 auditGap / evidenceGap 同一约定，不静默报 0）。
+   */
+  readonly selfKnowledge?: MemorySelfKnowledgeCounts | null
+}
+
+/**
+ * Self-Knowledge 的 status 计数（命令层镜像 `persona/self-knowledge.ts` 的 `SelfKnowledgeCounts`；
+ * 命令层只做格式化，不重新判断可见性）。`recordOnly` 是 `candidate` 的子集：
+ * `state='candidate'` 且已有 `decision_reason`（无独立信号时的规定降级态）。
+ */
+export interface MemorySelfKnowledgeCounts {
+  readonly candidate: number
+  readonly accepted: number
+  readonly rejected: number
+  readonly recordOnly: number
 }
 
 /**
@@ -963,6 +981,8 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   lines.push(...renderInjectionStatusLines(snapshot))
   // Story 11.2 / T5：Persona Spec 的可见性（紧随注入面；缺省不追加，既有钉死块逐字不变）。
   lines.push(...renderPersonaStatusLines(snapshot))
+  // Story 11.3 / T6：Self-Knowledge 计数行（紧随 persona；缺省不追加，既有钉死块逐字不变）。
+  lines.push(...renderSelfKnowledgeStatusLines(snapshot))
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
   lines.push(...renderHealthStatusLines(snapshot))
@@ -1247,6 +1267,24 @@ function renderPersonaStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   if (persona === undefined) return []
   if (persona === null) return ['persona: disabled(awaiting-approval)']
   return [`persona: ${persona.version} hash=${persona.hash.slice(0, 12)}`]
+}
+
+/**
+ * Self-Knowledge 计数行（Story 11.3 / T6）：
+ * - 缺省（undefined）= 调用方没有这项数据 ⇒ 不渲染该行（既有逐行输出不变）；
+ * - null = 表缺失 / 算不出来 ⇒ 「未知（库缺少该表）」（与 auditGap / evidenceGap 同一约定，
+ *   不静默报 0；旧库只读打开时自省面为空，这一行是它的可见证据）；
+ * - 计数对象 ⇒ `candidate=.. accepted=.. rejected=.. record-only=..`（record-only 是 candidate
+ *   的子集：无独立信号、只记录不晋升）。只给聚合计数，不打印任何观察正文（专用查询面的审计口径）。
+ */
+function renderSelfKnowledgeStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  const counts = snapshot.selfKnowledge
+  if (counts === undefined) return []
+  if (counts === null) return ['self_knowledge: 未知（库缺少该表）']
+  return [
+    `self_knowledge: candidate=${counts.candidate} accepted=${counts.accepted} ` +
+    `rejected=${counts.rejected} record-only=${counts.recordOnly}`,
+  ]
 }
 
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */

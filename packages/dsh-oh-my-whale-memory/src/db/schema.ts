@@ -10,7 +10,7 @@
  * AD-4 Rule / epics.md:328 本就列了此列，Epic 1 建表时漏落，2.5 的质量门判据③ 要写入它）。
  * 新库由 createMemoryTableStatement 直接带上；旧库此前由 database.ts 的幂等
  * `ALTER TABLE memory ADD parent_id STRING` 补列（Story 4.2 起新列一律只走迁移 0002）。
- * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '10'（迁移 0010）。
+ * SCHEMA_VERSION 从 Story 4.2 起被真正读取（迁移运行器比较版本），现在是 '11'（迁移 0011）。
  * - l0_raw：id/raw_text/recorded_at/actor（append-only，永不改写，AD-4）；
  *   唯一例外是 Story 4.2 的 redact 墓碑（redacted_by/redacted_at 记录改写者与时刻）。
  *   Story 10.1 / AD-36 起该表分两型：inline（`raw_text` 非空）与 pointer
@@ -36,7 +36,7 @@ export const FTS_INDEX_NAME = 'memory_text_fts'
  * 目标 schema 版本（Story 4.2 / AD-34）：必须等于 `src/db/migrations/` 的最大迁移号，
  * `scripts/check-migrations.mjs` 在 `pnpm verify` 里强制这条一致性。
  */
-export const SCHEMA_VERSION = '10'
+export const SCHEMA_VERSION = '11'
 
 /** omw_meta 的 key 常量（避免散落的魔法字符串）。 */
 export const META_KEYS = {
@@ -491,3 +491,32 @@ export const COMPACTION_DELEGATE_COLUMN = 'delegate'
 export const EXPAND_COUNT_COLUMN = 'expand_count'
 export const CHAIN_DEPTH_COLUMN = 'chain_depth'
 export const LAST_EXPANDED_AT_COLUMN = 'last_expanded_at'
+
+/**
+ * Agent Self-Knowledge 候选/已接受/已拒绝观察（Story 11.3 / AD-38、AD-34；ADR-11.1 方案 B）。
+ *
+ * 为什么必须独立成表（而不是复用 `memory` + 状态列）：普通召回、冲突路由与 `memory` 浏览
+ * 的查询根本不包含本表，candidate 在**结构上**无法进入候选池；矩阵由「查询入口分域 +
+ * `isVisible` 判据」双重保证（ADR-11.1 决策 3）。
+ *
+ * 列契约（spec T1 逐字）：
+ * - `id`：确定性内容键（`uuid5('self-knowledge:' + 归一化正文)`），重放同一观察幂等；
+ * - `state`：candidate / accepted / rejected 三态（`persona/contract.ts` 的 `SELF_KNOWLEDGE_STATES`）；
+ * - `text`：观察正文（append-only：状态迁移不改写本列）；
+ * - `source_refs STRING[]`：可达 L0 id（与 `memory.source_refs` 同形态，不带 `l0:` 前缀）；
+ * - `signal STRING`：晋升所依据的独立信号（outcome / tool-result / user-feedback，可空）；
+ * - `decision_reason STRING`：晋升/拒绝/record-only 的原因（record-only 时本列非空但 state 仍是
+ *   candidate —— 这是「只记录不晋升」的唯一可观测判据，不新增列）；
+ * - `created_at` / `decided_at`：UTC ISO-8601；record-only 不写 `decided_at`（没有终态决定）。
+ *
+ * 新库由迁移 0011 的 `run` 重放建出（bootstrap 同样重放），旧库由同一条迁移补表。
+ */
+export const AGENT_SELF_KNOWLEDGE_TABLE = 'agent_self_knowledge'
+
+export function createAgentSelfKnowledgeTableStatement(): string {
+  return (
+    'CREATE NODE TABLE IF NOT EXISTS ' + AGENT_SELF_KNOWLEDGE_TABLE + '(' +
+    'id STRING, state STRING, text STRING, source_refs STRING[], signal STRING, ' +
+    'decision_reason STRING, created_at STRING, decided_at STRING, PRIMARY KEY(id))'
+  )
+}

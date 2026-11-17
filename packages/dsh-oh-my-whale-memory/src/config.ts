@@ -74,6 +74,10 @@ export const MEMORY_CONFIG_DEFAULTS = {
   // Story 11.2 / AD-38：Persona Spec 静态 section 的开关。默认**关**——Spec 正文尚未经
   // 产品负责人批准（ADR-11.1 决策 2），打开也只是 no-op（未批准/空正文仍不注册）。
   personaSpecEnabled: false,
+  // Story 11.3 / T5、AD-38：反思成功后把观察写入 Self-Knowledge 候选区的开关。默认**关**：
+  // 关闭时反思不产生任何候选（fail-closed，spec 的 deferred 项）；打开后候选仍默认不可见，
+  // 只有通过独立晋升门（accepted）才进常驻层。
+  selfKnowledgeCaptureEnabled: false,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -206,6 +210,12 @@ export const Config = Schema.object({
    * 三者同时成立才注册 `omw-persona`；批准前的默认语义是「没有静态人设承诺」。
    */
   personaSpecEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.personaSpecEnabled).volatile(),
+  /**
+   * Story 11.3 / T5、AD-38：反思观察写入 Self-Knowledge 候选区的开关（默认 false）。
+   * 关闭时反思不产生任何候选（零候选，fail-closed）；打开也只写候选——候选默认不可见，
+   * 只有独立晋升门产生的 accepted 才进常驻层（AD-39）。
+   */
+  selfKnowledgeCaptureEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.selfKnowledgeCaptureEnabled).volatile(),
 })
 
 /**
@@ -271,6 +281,11 @@ export interface RuntimeConfig {
    * 打开后仍需 `PERSONA_SPEC_APPROVED` 为真且正文非空才注册（批准门在 `persona/spec.ts`）。
    */
   personaSpecEnabled: boolean
+  /**
+   * Story 11.3 / T5：反思观察写入 Self-Knowledge 候选区的开关（默认 false）。
+   * 关闭时零候选；打开也只写候选，可见性仍由晋升门与 `isVisible` 决定。
+   */
+  selfKnowledgeCaptureEnabled: boolean
   warnings: string[]
 }
 
@@ -363,6 +378,7 @@ export function resolveRuntimeConfig(config: {
     purifyR3?: Getter<boolean>
     purifyMinRemainder?: Getter<number>
     personaSpecEnabled?: Getter<boolean>
+    selfKnowledgeCaptureEnabled?: Getter<boolean>
 }): RuntimeConfig {
   const warnings: string[] = []
 
@@ -495,6 +511,10 @@ export function resolveRuntimeConfig(config: {
   // Story 11.2 / AD-38：Persona Spec 开关。布尔保持原样（缺省取 schema 同源默认值 = false）；
   // 打开也不代表会注入——批准门与空正文判据在 persona/spec.ts。
   const personaSpecEnabled = read(config.personaSpecEnabled ?? MEMORY_CONFIG_DEFAULTS.personaSpecEnabled) === true
+  // Story 11.3 / T5：Self-Knowledge 采集开关。布尔保持原样（缺省 false）；打开也只写候选区，
+  // 可见性由晋升门与 isVisible 决定，不在这里做任何可见性判断。
+  const selfKnowledgeCaptureEnabled =
+    read(config.selfKnowledgeCaptureEnabled ?? MEMORY_CONFIG_DEFAULTS.selfKnowledgeCaptureEnabled) === true
   // ratio 的负数/非有限值不抛错：语义是「预算 0 + 可见告警」（AC:1832，由 T1 产出 warning）。
   const injectionRatio = Number(read(config.injectionRatio ?? MEMORY_CONFIG_DEFAULTS.injectionRatio))
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
@@ -580,6 +600,7 @@ export function resolveRuntimeConfig(config: {
     // Story 8.6 / AC:1868：净化选项与 schema 的 `default(...)` 同源（MEMORY_CONFIG_DEFAULTS）。
     purify: { r1: purifyR1, r2: purifyR2, r3: purifyR3, minRemainder: purifyMinRemainder },
     personaSpecEnabled,
+    selfKnowledgeCaptureEnabled,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -625,4 +646,5 @@ export interface ConfigShape {
   purifyR3: Volatile<boolean>
   purifyMinRemainder: Volatile<number>
   personaSpecEnabled: Volatile<boolean>
+  selfKnowledgeCaptureEnabled: Volatile<boolean>
 }

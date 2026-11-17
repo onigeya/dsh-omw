@@ -19,6 +19,7 @@ import {
   type InjectionPromptHost,
 } from '../src/injection/prompt'
 import {
+  SELF_KNOWLEDGE_HEADER,
   SKELETON_CONTEXT_NAME,
   SKELETON_FACTS_STATEMENT,
   SKELETON_HEADER,
@@ -219,6 +220,45 @@ describe('矩阵 10：读库失败 ⇒ 空骨架 + warn，不阻塞注入', () =
     expect(store.textFor('s-b')).toBe('')
     store.reset('s-a')
     expect(store.textFor('s-a')).toBe('')
+  })
+
+  it('Story 11.3 / T3：readAccepted 的成员渲染在独立区块（与骨架事实不混排）', async () => {
+    const store = createSkeletonStore()
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [fact('pin', '不推送', { priority: -1 })],
+      readAccepted: async () => [{ id: 'k1', text: '已晋升观察', decidedAt: '2026-11-18T00:00:00.000Z' }],
+      capTokens: () => 2000,
+    })
+    await refresh('s1')
+    const text = store.textFor('s1')
+    expect(text).toContain(SKELETON_HEADER)
+    expect(text).toContain('不推送')
+    expect(text).toContain(SELF_KNOWLEDGE_HEADER)
+    expect(text).toContain('已晋升观察')
+    // 自省区块在骨架事实之后，且自省行不带骨架的 `[layer]` 前缀。
+    expect(text.indexOf(SELF_KNOWLEDGE_HEADER)).toBeGreaterThan(text.indexOf('不推送'))
+    expect(text).toContain('- k1: 已晋升观察')
+  })
+
+  it('Story 11.3：readAccepted 失败 ⇒ 自省块为空 + warn，骨架事实照常注入', async () => {
+    const store = createSkeletonStore()
+    const warn = vi.fn()
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [fact('pin', '不推送', { priority: -1 })],
+      readAccepted: async () => {
+        throw new Error('self-knowledge table missing')
+      },
+      capTokens: () => 2000,
+      logger: { warn },
+    })
+    await refresh('s1')
+    const text = store.textFor('s1')
+    expect(text).toContain('不推送')
+    expect(text).not.toContain(SELF_KNOWLEDGE_HEADER)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String((warn.mock.calls[0]?.[0]))).toContain('自省观察读取失败')
   })
 })
 

@@ -49,7 +49,10 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       // Story 8.6 / AC:1868：确定性净化 pass 的四个开关。
       'purifyMinRemainder', 'purifyR1', 'purifyR2', 'purifyR3',
       'reflection', 'rerank',
-      'retrievalTopK', 'rrfK', 'strategyGate', 'systemOne',
+      'retrievalTopK', 'rrfK',
+      // Story 11.3 / T5：反思观察写入 Self-Knowledge 候选区的开关（默认 false）。
+      'selfKnowledgeCaptureEnabled',
+      'strategyGate', 'systemOne',
     ])
   })
 
@@ -114,6 +117,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.purifyMinRemainder.get()).toBe(24)
     // Story 11.2 / T2：Persona Spec 开关默认**关**（正文未获产品负责人批准）。
     expect(resolved.personaSpecEnabled.get()).toBe(false)
+    // Story 11.3 / T5：Self-Knowledge 采集开关默认**关**（关闭时反思零候选，fail-closed）。
+    expect(resolved.selfKnowledgeCaptureEnabled.get()).toBe(false)
   })
 
   it('volatile 字段读取用 .get() 返回当前值（I/O 矩阵第 10 行）', () => {
@@ -489,5 +494,27 @@ describe('Story 11.2：Persona Spec 开关', () => {
   it('volatile 标记存在（否则不进 /settings 表单，AD-11）', () => {
     const dict = Config.dict as Record<string, any>
     expect(dict.personaSpecEnabled?.meta?.volatile).toBe(true)
+  })
+})
+
+/**
+ * Story 11.3 / T5：Self-Knowledge 采集开关（AD-38）。
+ * 默认关（关闭时零候选）、运行期可覆盖（INV-12）、schema 默认与 resolved 兜底同源。
+ */
+describe('Story 11.3：Self-Knowledge 采集开关', () => {
+  it('默认关闭，且 schema 默认值与 resolved 兜底同源', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    expect(schemaResolved.selfKnowledgeCaptureEnabled.get()).toBe(false)
+    expect(resolveRuntimeConfig(validConfig()).selfKnowledgeCaptureEnabled).toBe(false)
+  })
+
+  it('运行期可覆盖（volatile，INV-12）：true 生效', () => {
+    expect(resolveRuntimeConfig({ ...validConfig(), selfKnowledgeCaptureEnabled: true }).selfKnowledgeCaptureEnabled)
+      .toBe(true)
+  })
+
+  it('volatile 标记存在（否则不进 /settings 表单，AD-11）', () => {
+    const dict = Config.dict as Record<string, any>
+    expect(dict.selfKnowledgeCaptureEnabled?.meta?.volatile).toBe(true)
   })
 })

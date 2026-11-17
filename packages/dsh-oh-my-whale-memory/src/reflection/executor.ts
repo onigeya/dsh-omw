@@ -36,6 +36,13 @@ export interface ExtractPort {
   extract(messages: ReturnType<typeof buildStrategyMessages>): Promise<string>
 }
 
+/** 反思产出的观察（Story 11.3 / T5：写 Self-Knowledge 候选区的输入）。 */
+export interface ReflectionObservation {
+  readonly text: string
+  /** 回溯引用（`l0:<id>` 等，必须能回溯到 L0）。 */
+  readonly sourceRefs: readonly string[]
+}
+
 export interface ReflectionExecutorOptions {
   readonly connection: () => lbug.Connection | null
   /** 取材：返回最近窗口的样本（`ref` 必须能回溯到 L0）。 */
@@ -53,6 +60,15 @@ export interface ReflectionExecutorOptions {
   /** 空闲后多久评估一次（默认取 thresholds.idleWaitMs）；测试可注入假定时器。 */
   readonly setTimer?: (callback: () => void, ms: number) => unknown
   readonly clearTimer?: (handle: unknown) => void
+  /**
+   * Story 11.3 / T5：反思**成功后**的可选观察回调，把观察写入 Self-Knowledge 候选区。
+   *
+   * 缺省 = 不写（Config `selfKnowledgeCaptureEnabled=false` 时零候选，fail-closed）。
+   * 回调只拿 `{ text, sourceRefs }`：候选的 append-only/去重/校验全在
+   * `persona/self-knowledge.ts`，本执行器不碰自省表。单条回调失败只 warn，不影响
+   * 策略候选落库与反思状态机（观察是附加产物）。
+   */
+  readonly onObservation?: (observation: ReflectionObservation) => Promise<void> | void
 }
 
 export type ReflectionRunOutcome =
@@ -162,6 +178,16 @@ export function createReflectionExecutor(options: ReflectionExecutorOptions): Re
       inserted += 1
     }
     recordReflectionOutcome(options.state, 'success', at)
+    // Story 11.3 / T5：反思成功后的可选观察回调（候选区生产者）。缺省不写 ⇒ 零候选。
+    if (options.onObservation !== undefined) {
+      for (const candidate of parsed.candidates) {
+        try {
+          await options.onObservation({ text: candidate.text, sourceRefs: candidate.sourceRefs })
+        } catch (error) {
+          options.logger?.warn('自省候选写入失败（不影响策略候选与反思状态机）：' + String(error))
+        }
+      }
+    }
     return {
       outcome: inserted > 0 ? 'extracted' : 'no-candidates',
       candidates: inserted,

@@ -7,13 +7,14 @@
  *   `maxPendingPerSession` 限额、LLM 失败计入熔断。
  * 开库预算：1 个库。
  */
-import { afterAll, beforeAll, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 import { openMemoryDatabase, type MemoryDatabase } from '../src/db/database'
 import { resolveMemoryDbPath } from '../src/db/paths'
 import { createReflectionState, type ReflectionState } from '../src/reflection/state'
 import { createReflectionExecutor } from '../src/reflection/executor'
 import { DEFAULT_REFLECTION_THRESHOLDS, INITIAL_BREAKER_STATE } from '../src/reflection/trigger'
 import { listStrategyCandidates, strategyStats } from '../src/strategy/candidates'
+import { countsByState, readSelfKnowledge, recordCandidate, selfKnowledgeId } from '../src/persona/self-knowledge'
 import {
   STRATEGY_EXTRACT_INSTRUCTION,
   buildStrategyMessages,
@@ -105,6 +106,9 @@ function harness(options: {
   readonly samples?: readonly StrategySample[]
   readonly extract?: () => Promise<string>
   readonly maxPendingPerSession?: number
+  /** Story 11.3 / T5：可选观察回调（写 Self-Knowledge 候选区）。 */
+  readonly onObservation?: (observation: { readonly text: string; readonly sourceRefs: readonly string[] }) => Promise<void> | void
+  readonly logger?: { warn(message: string): void }
 }) {
   const state: ReflectionState = createReflectionState()
   state.windowScore = DEFAULT_REFLECTION_THRESHOLDS.threshold + 2
@@ -130,6 +134,8 @@ function harness(options: {
     clearTimer: () => {
       timerCallback = null
     },
+    ...(options.onObservation === undefined ? {} : { onObservation: options.onObservation }),
+    ...(options.logger === undefined ? {} : { logger: options.logger }),
   })
   return {
     state,
@@ -230,5 +236,64 @@ describe('执行器：触发与限额（AC:1455-1462、1490）', () => {
     const candidates = await listStrategyCandidates(store.connection, { includeFailure: true })
     const inserted = candidates.find((item) => item.payload === '改跨包代码前先跑 pnpm verify')
     expect(inserted?.sourceRefs).toEqual(['l0:1'])
+  })
+})
+
+describe('Story 11.3 / T5：反思成功后的自省候选接线', () => {
+  it('缺省 onObservation ⇒ 零候选（关闭时 fail-closed）', async () => {
+    const before = await countsByState(store.connection)
+    const { executor, runAfterIdle } = harness({
+      extract: async () => JSON.stringify({
+        candidates: [{ text: '缺省不写自省的观察', outcome: 'success', sourceRefs: ['l0:1'] }],
+      }),
+    })
+    const result = await runAfterIdle()
+    expect(result.outcome).toBe('extracted')
+    const after = await countsByState(store.connection)
+    expect(after.candidate + after.accepted + after.rejected)
+      .toBe(before.candidate + before.accepted + before.rejected)
+  })
+
+  it('onObservation 收到 {text, sourceRefs} 并写入候选区（source_refs 归一化为 L0 id）', async () => {
+    const seen: Array<{ text: string; sourceRefs: readonly string[] }> = []
+    const { executor, runAfterIdle } = harness({
+      extract: async () => JSON.stringify({
+        candidates: [{ text: '反思观察：先看证据再下结论', outcome: 'uncertain', sourceRefs: ['l0:1'] }],
+      }),
+      onObservation: async (observation) => {
+        seen.push(observation)
+        await recordCandidate(store.connection, {
+          text: observation.text,
+          sourceRefs: observation.sourceRefs,
+        })
+      },
+    })
+    const result = await runAfterIdle()
+    expect(result.outcome).toBe('extracted')
+    expect(seen).toEqual([{ text: '反思观察：先看证据再下结论', sourceRefs: ['l0:1'] }])
+    const row = await readSelfKnowledge(store.connection, selfKnowledgeId('反思观察：先看证据再下结论'))
+    expect(row?.state).toBe('candidate')
+    // `l0:` 前缀归一化为裸 L0 id（与 memory.source_refs 同形态）。
+    expect(row?.sourceRefs).toEqual(['1'])
+  })
+
+  it('回调失败只 warn：策略候选照常落库、反思状态机记成功', async () => {
+    const warn = vi.fn()
+    const { state, executor, runAfterIdle } = harness({
+      extract: async () => JSON.stringify({
+        candidates: [{ text: '回调失败不影响策略候选', outcome: 'success', sourceRefs: ['l0:2'] }],
+      }),
+      onObservation: async () => {
+        throw new Error('self-knowledge write failed')
+      },
+      logger: { warn },
+    })
+    const result = await runAfterIdle()
+    expect(result.outcome).toBe('extracted')
+    expect(state.lastReflectionAt).not.toBeNull()
+    const candidates = await listStrategyCandidates(store.connection, { includeFailure: true })
+    expect(candidates.some((item) => item.payload === '回调失败不影响策略候选')).toBe(true)
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(String(warn.mock.calls[0]?.[0])).toContain('自省候选写入失败')
   })
 })

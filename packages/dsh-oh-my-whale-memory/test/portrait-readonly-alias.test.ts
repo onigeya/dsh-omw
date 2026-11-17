@@ -154,11 +154,11 @@ describe('Story 11.4 / 矩阵行 3：只读实例打开未迁移旧 schema', () 
       const status = await access.getStatus()
       expect(status.pendingConflicts).toBe(1)
       expect(status.pendingConflictEntries?.[0]?.kind).toBe('user_portrait')
-      // ③ schema_version_mismatch 可见（旧库 9 / 插件 10），且 readonly 行为不变。
-      expect(SCHEMA_VERSION).toBe('10')
-      expect(status.schemaVersionMismatch).toEqual({ actual: '9', expected: '10' })
+      // ③ schema_version_mismatch 可见（旧库 9 / 插件 11），且 readonly 行为不变。
+      expect(SCHEMA_VERSION).toBe('11')
+      expect(status.schemaVersionMismatch).toEqual({ actual: '9', expected: '11' })
       const text = renderMemoryStatus(status)
-      expect(text).toContain('schema_version_mismatch: 库=9 插件=10')
+      expect(text).toContain('schema_version_mismatch: 库=9 插件=11')
       expect(text).toContain("readonly: true, reason: 'another instance owns the writer lock'")
 
       // ④ recall 的 kind 同样是规范值（旧库只读，行为不因迁移缺失而改变）。
