@@ -114,8 +114,56 @@ export function planTrigger(
   }
 }
 
-/** `omw_meta` 的键：每个会话一行；值形如 `<lastSeq>:<pendingTokens>`。 */
-export function tokenLedgerMetaKey(sessionId: string): string {
+/** 一条待入队指针事件的 token 权重（`tokens` 缺失按 0 计）。 */
+export interface PendingPointerEvent {
+  readonly seq: number
+  readonly eventType: string
+  readonly tokens: number
+}
+
+/** 一次切片的结果：一个 INBOX 条目对应的连续事件段。 */
+export interface PointerEventSlice {
+  readonly events: readonly PendingPointerEvent[]
+  /** 单事件自身超过硬上限（独立成单、不切碎；审计与 status 可见）。 */
+  readonly oversize: boolean
+}
+
+/**
+ * 按事件边界切片（Story 10.2 / AC：`> captureMaxTokens` 在事件边界切，单事件不切）。
+ *
+ * 贪心：顺序累加，加入下一条会超上限就先收束当前段；单事件自身超上限时**独立成单**并标
+ * `oversize`，不吸收后续事件（否则「独立成单」就不成立）。权重缺失按 0 计，故没有 token
+ * 信息时整批成一段（降级路径不做无法证明的切分）。
+ */
+export function slicePointerEvents(
+  events: readonly PendingPointerEvent[],
+  maxTokens: number,
+): PointerEventSlice[] {
+  if (events.length === 0) return []
+  if (!Number.isFinite(maxTokens) || maxTokens <= 0) {
+    return [{ events: [...events], oversize: false }]
+  }
+  const slices: PointerEventSlice[] = []
+  let current: PendingPointerEvent[] = []
+  let currentTokens = 0
+  const flush = (oversize: boolean): void => {
+    if (current.length === 0) return
+    slices.push({ events: current, oversize })
+    current = []
+    currentTokens = 0
+  }
+  for (const event of events) {
+    const weight = Number.isFinite(event.tokens) ? Math.max(0, Math.trunc(event.tokens)) : 0
+    if (current.length > 0 && currentTokens + weight > maxTokens) flush(false)
+    current.push(event)
+    currentTokens += weight
+    if (current.length === 1 && weight > maxTokens) flush(true)
+  }
+  flush(false)
+  return slices
+}
+
+/** `omw_meta` 的键：每个会话一行；值形如 `<lastSeq>:<pendingTokens>`。 */export function tokenLedgerMetaKey(sessionId: string): string {
   return 'capture_token_ledger:' + sessionId
 }
 
