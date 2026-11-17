@@ -64,6 +64,12 @@ export type MemoryDbErrorCode =
   | 'handle_write_failed'
   /** schema 迁移无法安全执行（备份失败 / 迁移中途报错，Story 4.2 / AD-34：拒绝启动）。 */
   | 'schema_migration_failed'
+  /** 自省候选写入参数无效（空正文 / 空 sourceRefs，Story 11.3：不造无源候选）。 */
+  | 'self_knowledge_invalid'
+  /** 自省候选不存在（Story 11.3：晋升门的目标 id 已失效或从未写入）。 */
+  | 'self_knowledge_not_found'
+  /** 自省候选已是终态（accepted/rejected），不得再判定（Story 11.3：状态伪造防护）。 */
+  | 'self_knowledge_decided'
 
 export class MemoryDbError extends Error {
   readonly code: MemoryDbErrorCode

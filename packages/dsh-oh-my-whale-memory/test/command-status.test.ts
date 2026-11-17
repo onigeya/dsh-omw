@@ -292,6 +292,36 @@ describe('renderMemoryStatus：persona 行（Story 11.2 / T5）', () => {
   })
 })
 
+describe('renderMemoryStatus：self_knowledge 行（Story 11.3 / T6）', () => {
+  it('缺省（调用方未提供）⇒ 不渲染该行，既有钉死输出逐字不变', () => {
+    expect(renderMemoryStatus(STATUS_BASE)).not.toContain('self_knowledge:')
+  })
+
+  it('表缺失（null）⇒ 未知，不静默报 0', () => {
+    expect(renderMemoryStatus({ ...STATUS_BASE, selfKnowledge: null }))
+      .toContain('self_knowledge: 未知（库缺少该表）')
+  })
+
+  it('计数对象 ⇒ candidate/accepted/rejected + record-only 四数并列', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      selfKnowledge: { candidate: 3, accepted: 2, rejected: 1, recordOnly: 2 },
+    })
+    expect(text).toContain('self_knowledge: candidate=3 accepted=2 rejected=1 record-only=2')
+  })
+
+  it('行位置紧随 persona 行', () => {
+    const lines = renderMemoryStatus({
+      ...STATUS_BASE,
+      persona: null,
+      selfKnowledge: { candidate: 0, accepted: 0, rejected: 0, recordOnly: 0 },
+    }).split('\n')
+    const personaIndex = lines.indexOf('persona: disabled(awaiting-approval)')
+    expect(personaIndex).toBeGreaterThan(-1)
+    expect(lines[personaIndex + 1]).toBe('self_knowledge: candidate=0 accepted=0 rejected=0 record-only=0')
+  })
+})
+
 describe('createMemoryCommandDefinition（status 分支）', () => {
   it('description / hint 必须同时反映四个子命令，否则文案回归无人发现', () => {
     const definition = createMemoryCommandDefinition(makeDeps())

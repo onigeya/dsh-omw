@@ -39,6 +39,7 @@ import type { RuntimeConfig } from '../config.js'
 import type { InjectionStore } from '../injection/state.js'
 import type { SystemOneClient } from '../distill/system-one.js'
 import { PERSONA_SPEC, PERSONA_SPEC_APPROVED, personaStatusOf } from '../persona/spec.js'
+import { countsByState } from '../persona/self-knowledge.js'
 
 export interface MemoryAccessOptions {
   /** Story 7.2：反思触发状态提供者（缺省 ⇒ status 不渲染 reflection 行）。 */
@@ -223,6 +224,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       reflection: options.reflectionView?.() ?? null,
       // Story 7.3：策略采纳门（AC:1494/1498）；缺表时全 0，不阻塞 status。
       strategyGate: await getStrategyStats().catch(() => null),
+      // Story 11.3 / T6：Self-Knowledge 三态计数 + record-only（审计面，不含正文）。
+      // 缺表（旧库只读、未迁移 0011）⇒ null = 渲染「未知」，与 auditGap / strategyGate 同一约定。
+      selfKnowledge: await countsByState(connection).catch(() => null),
       // Story 8.1：上下文归因（进程内快照）与压缩运行（落库）。
       contextLedger: mapContextLedger(options.contextLedgerView?.() ?? null),
       compaction: await readCompactionStatus(connection)

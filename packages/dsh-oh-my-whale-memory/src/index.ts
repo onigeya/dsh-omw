@@ -50,6 +50,8 @@ import { readSkeletonFacts } from './injection/skeleton.js'
 import { wireMemoryLifecycle } from './wire/lifecycle.js'
 import { wirePersonaSection } from './wire/persona.js'
 import { PERSONA_SPEC, PERSONA_SPEC_APPROVED } from './persona/spec.js'
+import { listAccepted, recordCandidate } from './persona/self-knowledge.js'
+import { isMissingTableError } from './db/errors.js'
 import { wireCapture } from './wire/capture.js'
 import { createDistillWiring } from './wire/distill.js'
 import { createPromotionWiring, reclaimInboxOnStartup, startInboxConsumers } from './wire/inbox.js'
@@ -321,6 +323,20 @@ export async function apply(
         if (database === undefined) throw new Error('记忆库未就绪')
         return readSkeletonFacts(database.connection)
       },
+      // Story 11.3 / T3：常驻层的 accepted 自省成员（AD-39）。candidate/rejected 由
+      // `listAccepted` 的查询分域 + `isVisible` 判据挡在外面，这里不做第二份可见性判断。
+      // 旧库只读打开（未迁移 0011）没有该表 ⇒ 自省面为空（ADR-11.1 方案 B 的已知缺点），
+      // 不把缺表当错误；其余读失败照抛，由 refresher 收敛为「本块为空 + warn」。
+      readAccepted: async () => {
+        const database = getDb()
+        if (database === undefined) return []
+        try {
+          return await listAccepted(database.connection)
+        } catch (error) {
+          if (isMissingTableError(error)) return []
+          throw error
+        }
+      },
       capTokens: () => resolved.alwaysOnTokenCap,
     },
   }))
@@ -542,6 +558,18 @@ export async function apply(
     thresholds: resolved.reflection,
     gate: resolved.strategyGate,
     logger: ctx.logger,
+    // Story 11.3 / T5：反思成功后把观察写入 Self-Knowledge 候选区（开关默认关 ⇒ 零候选）。
+    // 只写候选：晋升/可见性全在 persona/self-knowledge.ts 与晋升门，不在这里判断。
+    onObservation: resolved.selfKnowledgeCaptureEnabled
+      ? async (observation) => {
+        const connection = getDb()?.connection
+        if (connection === undefined) return
+        await recordCandidate(connection, {
+          text: observation.text,
+          sourceRefs: observation.sourceRefs,
+        })
+      }
+      : undefined,
   })
   cancelReflectionTimer = () => reflectionExecutor.cancel()
 

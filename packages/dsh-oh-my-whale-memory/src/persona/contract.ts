@@ -1,9 +1,10 @@
 /**
  * Agent 身份契约原型（Story 11.1 / FR-35、AD-38、AD-39）。
  *
- * 本模块是**设计原型**，不是运行时实现：纯常量 + 纯函数，无 I/O、无时钟、无随机；
- * 不被 `src/index.ts` / `apply` import，不接宿主、不写库。Story 11.2 才把 `omw-persona`
- * 静态 section 接到宿主，Story 11.3 才落地 Self-Knowledge 的物理表。
+ * 本模块是**契约的唯一实现**：纯常量 + 纯函数，无 I/O、无时钟、无随机。
+ * Story 11.2 起 `persona/spec.ts` 与 `wire/persona.ts` 消费它；Story 11.3 起
+ * `persona/self-knowledge.ts`（经 `src/index.ts` 的 apply 装配）消费 `decidePromotion` /
+ * `isVisible` / `canRewritePersonaSpec`。本模块自身仍不接宿主、不写库。
  *
  * 决策依据：`_bmad-output/implementation-artifacts/adr-11-1-agent-identity.md`。
  * 可见性矩阵一经批准即约束所有消费者（AD-38），消费者不得各自重写一套判断。

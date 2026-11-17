@@ -27,6 +27,7 @@ import type { InjectionStore } from '../injection/state.js'
 import {
   createSkeletonRefresher,
   createSkeletonStore,
+  type AcceptedKnowledgeFact,
   type SkeletonFact,
 } from '../injection/skeleton.js'
 import { inboxSessionKey } from '../inbox/idle-gate.js'
@@ -82,9 +83,14 @@ export interface InjectionWiringOptions {
   /**
    * Story 8.5 / T3：动态骨架的读库端口与绝对上限（Config `alwaysOnTokenCap`，不套窗口公式）。
    * 缺省 = 不注册骨架 context（裸 ctx / 精简宿主），注入面照常工作。
+   *
+   * Story 11.3 / T3：`readAccepted` 是常驻层的 accepted 自省收集端口（`listAccepted`）；
+   * 缺省 = 不收集（与 8.5 的钉死输出逐字一致）。它渲染在骨架 context 的独立区块里
+   * （AD-39 的常驻层成员），不进召回候选池。
    */
   readonly skeleton?: {
     readonly readFacts: () => Promise<readonly SkeletonFact[]>
+    readonly readAccepted?: () => Promise<readonly AcceptedKnowledgeFact[]>
     readonly capTokens: () => number
   }
 }
@@ -103,6 +109,8 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     : createSkeletonRefresher({
       store: skeletonStore,
       readFacts: options.skeleton.readFacts,
+      // Story 11.3 / T3：常驻层的 accepted 自省成员（缺省不收集）。
+      readAccepted: options.skeleton.readAccepted,
       capTokens: options.skeleton.capTokens,
       // Story 8.6 / T4：注入口（FR-25 回注前）净化开关。
       purifyOptions: () => options.resolved.purify,
