@@ -332,7 +332,7 @@ describe('applyInjectionBudget：渲染顺序（原则开头 / 证据跟随）',
 describe('Story 7.1 / AC:1369-1372：persona 恒置顶且永不因预算被裁', () => {
   it('预算耗尽（可删集合全被裁掉）时 persona 仍在注入集内，且是首条', () => {
     // 单个 persona 条目 + 30 条超量可删条目：可删集合会被 20 条上限与总 tokens 同时裁掉。
-    const persona = item('persona-1', '我偏好先看证据再下结论', { kind: 'persona', priority: -1 })
+    const persona = item('persona-1', '我偏好先看证据再下结论', { kind: 'user_portrait', priority: -1 })
     const result = applyInjectionBudget({
       ...EMPTY,
       inviolable: [persona],
@@ -354,7 +354,7 @@ describe('Story 7.1 / AC:1369-1372：persona 恒置顶且永不因预算被裁',
   })
 
   it('可删集合被 20 条上限裁掉时，persona 仍不被计入名额', () => {
-    const persona = item('persona-2', '我禁止自动提交', { kind: 'persona', priority: -1 })
+    const persona = item('persona-2', '我禁止自动提交', { kind: 'user_portrait', priority: -1 })
     const result = applyInjectionBudget({
       ...EMPTY,
       inviolable: [persona],

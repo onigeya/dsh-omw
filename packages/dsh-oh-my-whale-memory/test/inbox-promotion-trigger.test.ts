@@ -58,10 +58,10 @@ describe('createPromotionTracker：累计与触发信号', () => {
   it('会话结束时同 kind 满 5 条触发，判完清空该会话计数', () => {
     const triggers: PromotionTrigger[] = []
     const tracker = createPromotionTracker({ onTrigger: (trigger) => triggers.push(trigger) })
-    for (let i = 0; i < 5; i += 1) tracker.recordL1({ sessionId: 's1', kind: 'persona' })
+    for (let i = 0; i < 5; i += 1) tracker.recordL1({ sessionId: 's1', kind: 'user_portrait' })
     tracker.recordSessionEnd({ sessionId: 's1' })
     expect(triggers).toHaveLength(1)
-    expect(triggers[0]).toMatchObject({ reason: 'session-end-same-kind', sessionId: 's1', kind: 'persona', sessionKindCount: 5 })
+    expect(triggers[0]).toMatchObject({ reason: 'session-end-same-kind', sessionId: 's1', kind: 'user_portrait', sessionKindCount: 5 })
     expect(tracker.pendingFor('s1')).toEqual({ total: 0, byKind: {} })
   })
 

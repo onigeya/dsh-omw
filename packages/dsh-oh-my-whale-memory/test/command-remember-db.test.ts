@@ -157,6 +157,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
   })
 
   it('remember 支持 --kind / --priority 旗标并落库（Story 1.11 / AC2：手动路径也能产出分类）', async () => {
+    // Story 11.4 / 矩阵行 4：旧输入 `--kind=persona` 在输入边界归一化，落库不出现旧值。
     const result = await registered?.handler({
       rawInput: ' remember --kind=persona --priority=-1 我偏好先看证据再下结论',
     })
@@ -167,7 +168,7 @@ describe('/memory remember 命令注册与执行（真实库 dim=4）', () => {
       "MATCH (m:memory {layer: 'L1'}) WHERE m.text = '我偏好先看证据再下结论' RETURN m.kind AS kind, m.priority AS priority",
     )
     expect(rows).toHaveLength(1)
-    expect(rows[0]!['kind']).toBe('persona')
+    expect(rows[0]!['kind']).toBe('user_portrait')
     // priority=-1 不得被缺省值 0 吞掉（AC1 的硬要求）。
     expect(Number(rows[0]!['priority'])).toBe(-1)
   })

@@ -200,11 +200,11 @@ describe('hydrate 成功（AC：按 seq 读回 → renderMessage → 多源证�
       { seq: 0, type: 'user/message', message: { role: 'user', content: [{ type: 'text', text: '我偏好中文回复' }] } },
       { seq: 1, type: 'assistant/message', message: { role: 'assistant', content: '已记住' } },
     ])
-    const { llm, calls } = scriptedLlm([{ text: '用户偏好中文回复', kind: 'persona', priority: 2 }])
+    const { llm, calls } = scriptedLlm([{ text: '用户偏好中文回复', kind: 'user_portrait', priority: 2 }])
 
     const result = await makeProcessor(llm, { hostLog })(item)
 
-    expect(result).toEqual({ completed: true, kinds: ['persona'] })
+    expect(result).toEqual({ completed: true, kinds: ['user_portrait'] })
     expect(hostLog.opens).toBe(1)
     expect(promptOf(calls[0])).toContain('user: 我偏好中文回复')
     expect(promptOf(calls[0])).toContain('assistant: 已记住')

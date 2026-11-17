@@ -98,7 +98,7 @@ describe('createSessionEventHandler：turn/start 进窗、turn/end 出窗', () =
     })
 
     handle({ id: 's1' }, { type: 'turn/start', turn: 1 })
-    promotion.recordL1({ sessionId: 's1', kind: 'persona' })
+    promotion.recordL1({ sessionId: 's1', kind: 'user_portrait' })
     expect(gate.isIdle()).toBe(false)
     expect(promotion.pendingFor('s1').total).toBe(1)
 

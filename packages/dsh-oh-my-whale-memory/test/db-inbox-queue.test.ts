@@ -345,7 +345,7 @@ describe('P9-⑤：enqueueInboxItem 同 id 幂等', () => {
       id, payload: '第一次', kind: 'work_fact', sessionId: 's1', now: at(800),
     })
     await enqueueInboxItem(store.connection, {
-      id, payload: '第二次', kind: 'persona', sessionId: 's2', now: at(801),
+      id, payload: '第二次', kind: 'user_portrait', sessionId: 's2', now: at(801),
     })
 
     const row = await readRow(id)

@@ -78,7 +78,7 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
         },
         {
           id: 'i-fresh',
-          kind: 'persona',
+          kind: 'user_portrait',
           attempts: 4,
           lastError: null,
           updatedAt: '2026-11-11T00:00:00.000Z',
@@ -104,7 +104,7 @@ describe('AC4 渲染层：无死信时既有输出逐字不变', () => {
       '- i-stale kind=work_fact attempts=4 stale updated_at=2026-11-10T00:00:00.000Z error=boom\\nline2',
     )
     expect(lines[12]).toBe(
-      '- i-fresh kind=persona attempts=4 updated_at=2026-11-11T00:00:00.000Z error=(空)',
+      '- i-fresh kind=user_portrait attempts=4 updated_at=2026-11-11T00:00:00.000Z error=(空)',
     )
     expect(lines).toHaveLength(14) // 10 基准 + failed 头 + 2 条明细 + Story 3.3 注入行
   })
@@ -192,7 +192,7 @@ describe('AC4 集成：真库死信进入 status', () => {
     const fresh = 'status-dead-fresh'
     const staleNow = new Date(Date.now() - 25 * 60 * 60 * 1000)
     await makeDeadLetter(store.connection, stale, 'work_fact', staleNow, '老账失败')
-    await makeDeadLetter(store.connection, fresh, 'persona', new Date(), '人格失败')
+    await makeDeadLetter(store.connection, fresh, 'user_portrait', new Date(), '人格失败')
     await store.close()
 
     await plugin.apply(makeCtx(dir, registeredDefs, onEvents), EMBEDDING_CONFIG)
@@ -213,7 +213,7 @@ describe('AC4 集成：真库死信进入 status', () => {
     expect(staleLine).toBeDefined()
     expect(freshLine).toBeDefined()
     expect(staleLine).toMatch(/^\- status-dead-stale kind=work_fact attempts=4 stale updated_at=\d{4}-.* error=老账失败$/)
-    expect(freshLine).toMatch(/^- status-dead-fresh kind=persona attempts=4 updated_at=\d{4}-.* error=人格失败$/)
+    expect(freshLine).toMatch(/^- status-dead-fresh kind=user_portrait attempts=4 updated_at=\d{4}-.* error=人格失败$/)
     expect(freshLine).not.toContain('stale')
     expect(result.text).not.toContain('attempts=3')
     expect(result.text.indexOf(fresh)).toBeLessThan(result.text.indexOf(stale))

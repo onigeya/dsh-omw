@@ -25,7 +25,7 @@ import {
   MEMORY_KINDS,
   MEMORY_PRIORITY_MAX,
   MEMORY_PRIORITY_MIN,
-  isMemoryKind,
+  normalizeMemoryKind,
   isMemoryPriority,
 } from './shared/memory-vocab.js'
 import { summarizeMemoryText } from './shared/summarize.js'
@@ -126,7 +126,7 @@ export const MEMORY_STRATEGY_USAGE = [
 export const MEMORY_RESOLVE_USAGE = [
   '用法：/memory resolve <待裁决 id> --accept | --keep',
   '',
-  '裁决一条 persona 冲突：--accept 接受新值（旧值作废），--keep 保留并存。',
+  '裁决一条用户画像（user_portrait）冲突：--accept 接受新值（旧值作废），--keep 保留并存。',
   'id 取自 /memory status 的 pending_conflicts 清单。示例：/memory resolve <id> --accept',
 ].join('\n')
 
@@ -394,6 +394,16 @@ export interface MemoryStatusSnapshot {
    *（既有逐行输出逐字不变）。数据来源是 `db/database.ts` 的 `memoryDatabaseBackendKind`。
    */
   readonly backend?: 'native' | 'wasm'
+  /**
+   * Story 11.4 / AD-34 / T5：只读实例打开**未迁移旧 schema** 时的版本差异。
+   * 缺省 = 版本一致（不追加行，既有逐行输出逐字不变）。
+   */
+  readonly schemaVersionMismatch?: {
+    /** 库内声明版本；null = 没有版本记录（极旧库），渲染成「未知」。 */
+    readonly actual: string | null
+    /** 本插件目标 schema 版本（`SCHEMA_VERSION`）。 */
+    readonly expected: string
+  }
 }
 
 /**
@@ -517,7 +527,7 @@ const MEMORY_REMEMBER_PRIORITY_FLAG = '--priority='
 
 /**
  * 旗标值的结束偏移：`flag` 之后首个空白字符（空格与制表符同等对待，与子命令切分
- * 用的 `\s+` 保持一致）；-1 表示旗标一直延伸到串尾（如 `--kind=persona` 无正文）。
+ * 用的 `\s+` 保持一致）；-1 表示旗标一直延伸到串尾（如 `--kind=user_portrait` 无正文）。
  */
 function flagValueEnd(rest: string, flag: string): number {
   const whitespace = rest.slice(flag.length).search(/\s/)
@@ -539,8 +549,11 @@ function parseRememberPayload(payload: string): MemoryCommandParseResult {
       const end = flagValueEnd(rest, MEMORY_REMEMBER_KIND_FLAG)
       const value = (end === -1 ? rest.slice(MEMORY_REMEMBER_KIND_FLAG.length) : rest.slice(MEMORY_REMEMBER_KIND_FLAG.length, end)).trim()
       // 非法分类值拒绝：usage 明说 kind 取七类之一，不能把任意串静默写进库。
-      if (!isMemoryKind(value)) return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
-      kind = value
+      // Story 11.4：兼容期旧输入 `persona` 在输入边界归一化为 `user_portrait`，
+      // usage 只宣传规范值（MEMORY_KINDS），旧别名不回到合法值清单。
+      const normalizedKind = normalizeMemoryKind(value)
+      if (normalizedKind === '') return { kind: 'invalid', usage: MEMORY_REMEMBER_USAGE }
+      kind = normalizedKind
       rest = end === -1 ? '' : rest.slice(end).trim()
       continue
     }
@@ -948,6 +961,14 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   // 缺省（未传）时不追加，既有钉死块与 4.3 的五行顺序逐字不变（矩阵行 8）。
   if (snapshot.backend !== undefined) {
     lines.push(`backend: ${snapshot.backend}`)
+  }
+  // Story 11.4 / T5：只读实例打开未迁移旧 schema 的可见差异（逐字含 schema_version_mismatch）。
+  // 版本一致时不追加该行，既有钉死块逐字不变。
+  if (snapshot.schemaVersionMismatch !== undefined) {
+    lines.push(
+      `schema_version_mismatch: 库=${snapshot.schemaVersionMismatch.actual ?? '未知'} ` +
+      `插件=${snapshot.schemaVersionMismatch.expected}（只读实例不迁移；legacy kind 按只读别名读取）`,
+    )
   }
   return lines.join('\n')
 }

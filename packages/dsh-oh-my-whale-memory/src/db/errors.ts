@@ -35,6 +35,8 @@ export type MemoryDbErrorCode =
   | 'invalid_query'
   /** 写入参数无效（priority 越界等；仅作返回值码）。 */
   | 'invalid_priority'
+  /** 写入参数无效（kind 既不是规范值也不是已知 legacy 别名；仅作返回值码，Story 11.4）。 */
+  | 'invalid_kind'
   | 'audit_record_missing'
   /** 存储后端模块装载失败（native 在 Electron 下不可用、wasm 包缺失等，AD-32）。 */
   | 'db_backend_unavailable'

@@ -51,7 +51,8 @@ import {
 } from './audit.js'
 import { MemoryDbError } from './errors.js'
 import { memoryNodeId } from './id.js'
-import { insertPendingDecision, PERSONA_CONFLICT_POLICY } from './pending.js'
+import { findEquivalentPendingDecision, insertPendingDecision, USER_PORTRAIT_CONFLICT_POLICY } from './pending.js'
+import { canonicalizeMemoryKind, isUserPortraitKind } from '../shared/memory-vocab.js'
 import {
   DEFAULT_MEMORY_KIND,
   DEFAULT_MEMORY_PRIORITY,
@@ -264,13 +265,18 @@ async function findSemanticCandidates(
 }
 
 /**
- * Story 7.1：人设记忆的冲突路由——不自动覆盖，落一条 await-confirmation 的 keyed 裁决 + 一条待裁决行。
+ * Story 7.1 / Story 11.4：User Portrait 记忆的冲突路由——不自动覆盖，落一条 await-confirmation
+ * 的 keyed 裁决 + 一条待裁决行。
  *
- * 判据（spec D-2）：命中的人设节点是 `kind='persona'` 或 `priority=-1`。真正的「逻辑不相容」需要极性/本体
+ * 判据（spec D-2）：命中的画像节点是 `kind = 'user_portrait'`（旧库只读时是别名 `persona`，
+ * 见 {@link isUserPortraitKind}）或 `priority = -1`。真正的「逻辑不相容」需要极性/本体
  *（v2 / Epic 9），这里用「同一话题的语义近邻」作为可实施的最小判据：误判的代价是多一条待裁决记录，
  * 用户 `--keep` 即可，不会丢数据。
+ *
+ * 幂等（AC:2393）：同一 (old,new) 冲突若已在待裁决集（含历史 `persona-conflict` 行），
+ * 直接返回、不重复落账——历史 key 与 policy 原值保留。
  */
-async function routePersonaConflict(
+async function routeUserPortraitConflict(
   connection: MemoryConnection,
   input: UpsertMemoryInput,
   target: DedupCandidate,
@@ -279,16 +285,21 @@ async function routePersonaConflict(
 ): Promise<DedupWriteResult> {
   const layer = input.layer.trim()
   const newId = memoryNodeId(layer, input.text)
-  const judgeKey = buildJudgeKey(PERSONA_CONFLICT_POLICY, 'await-confirmation', target.id, newId)
+  const equivalent = await findEquivalentPendingDecision(connection, target.id, newId)
+  if (equivalent !== null) {
+    // 回放 / 重复观测：同一逻辑冲突已经等用户裁决，不再写第二条 pending 行、也不把旧 key 翻新。
+    return { id: newId, recordedAt: nowIso, outcome: 'await-confirmation' }
+  }
+  const judgeKey = buildJudgeKey(USER_PORTRAIT_CONFLICT_POLICY, 'await-confirmation', target.id, newId)
   await insertKeyedDecision(connection, {
     judgeKey,
     newId,
     oldId: target.id,
     action: 'await-confirmation',
-    policy: PERSONA_CONFLICT_POLICY,
+    policy: USER_PORTRAIT_CONFLICT_POLICY,
     l0Refs: sourceRefs,
     resolutionSource: 'auto',
-    // 不写 `write_pending: true`：persona 冲突**没有发布点**（本次不写节点），
+    // 不写 `write_pending: true`：画像冲突**没有发布点**（本次不写节点），
     // 该标记找不到任何会把它翻回 false 的路径，写 true 只会在恢复消费者上线后被当成「待重放」（评审 R71）。
     ts: nowIso,
   })
@@ -306,19 +317,22 @@ async function routePersonaConflict(
     recordedAt: nowIso,
     actor: input.actor ?? 'system',
     kind: CAPTURE_KIND,
-    policy: PERSONA_CONFLICT_POLICY,
+    policy: USER_PORTRAIT_CONFLICT_POLICY,
     l0Refs: sourceRefs,
   })({
     action: AWAIT_CONFIRMATION_ACTION,
     outcome: 'uncertain',
-    reason: `persona-conflict old=${target.id} pending=${judgeKey}`,
+    reason: `user-portrait-conflict old=${target.id} pending=${judgeKey}`,
   })
   return { id: newId, recordedAt: nowIso, outcome: 'await-confirmation' }
 }
 
-/** 人设守卫：`kind='persona'` 或 `priority=-1`（FR-20 的恒置顶两类）。 */
-function isPersonaCandidate(candidate: DedupCandidate): boolean {
-  return candidate.kind === 'persona' || candidate.priority === -1
+/**
+ * 画像守卫：`kind` 是 User Portrait（规范值或旧库只读别名 `persona`）或 `priority = -1`
+ * （FR-20 的恒置顶两类）。
+ */
+function isUserPortraitCandidate(candidate: DedupCandidate): boolean {
+  return isUserPortraitKind(candidate.kind) || candidate.priority === -1
 }
 
 /** 两条 source_refs 是否有非空交集（U2 的亲缘判据②）。 */
@@ -397,7 +411,7 @@ async function resurrectMemoryNode(
     id: input.id,
     valid_at: input.validAt,
     source_refs: [...input.sourceRefs],
-    kind: input.kind ?? DEFAULT_MEMORY_KIND,
+    kind: canonicalizeMemoryKind(input.kind ?? DEFAULT_MEMORY_KIND),
     priority: Math.trunc(input.priority ?? DEFAULT_MEMORY_PRIORITY),
     recorded_at: input.recordedAt,
   })
@@ -537,8 +551,8 @@ export async function writeDeduplicatedMemory(
       : duplicates.reduce((best, candidate) => (candidate.similarity > best.similarity ? candidate : best))
   if (duplicate !== undefined) {
     // Story 7.1：命中人设记忆 ⇒ 转待裁决，不自动合并。
-    if (isPersonaCandidate(duplicate)) {
-      return await routePersonaConflict(connection, input, duplicate, sourceRefs, nowIso)
+    if (isUserPortraitCandidate(duplicate)) {
+      return await routeUserPortraitConflict(connection, input, duplicate, sourceRefs, nowIso)
     }
     await audit(
       MERGE_SEMANTIC_ACTION,
@@ -565,8 +579,8 @@ export async function writeDeduplicatedMemory(
   const oldVersion = versionHits[0]
   if (oldVersion !== undefined) {
     // Story 7.1：旧版本是人设记忆 ⇒ 转待裁决（用户确认前旧值保持有效）。
-    if (isPersonaCandidate(oldVersion)) {
-      return await routePersonaConflict(connection, input, oldVersion, sourceRefs, nowIso)
+    if (isUserPortraitCandidate(oldVersion)) {
+      return await routeUserPortraitConflict(connection, input, oldVersion, sourceRefs, nowIso)
     }
     // X4（评审 P3）：候选谓词已排除 invalid_at / expired_at 非空的节点，旧版本此刻必无上界区间，
     // 所以 invalid_at 对齐触发事实的 valid_at；同时绝不早于旧节点自身 valid_at（EC-2 的

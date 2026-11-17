@@ -71,7 +71,7 @@ describe('prompt 与 schema 同文件（AC:573）', () => {
 describe('一次尝试 = 一次 llm.stream（R2）', () => {
   it('成功路径只调用一次，并透传 provider/model/maxTokens', async () => {
     const { llm, calls } = scriptedLlm([
-      delta(jsonFacts([{ text: '用户偏好中文', kind: 'persona', priority: 5 }])),
+      delta(jsonFacts([{ text: '用户偏好中文', kind: 'user_portrait', priority: 5 }])),
       finish({ kind: 'stop' }),
     ])
     const result = await refineTranscript({
@@ -84,7 +84,7 @@ describe('一次尝试 = 一次 llm.stream（R2）', () => {
     expect(calls[0]).toMatchObject({ provider: 'test-provider', model: 'test-model', maxTokens: REFINE_MAX_OUTPUT_TOKENS })
     expect(result.ok).toBe(true)
     if (result.ok) {
-      expect(result.facts).toEqual([{ text: '用户偏好中文', kind: 'persona', priority: 5, coerced: false }])
+      expect(result.facts).toEqual([{ text: '用户偏好中文', kind: 'user_portrait', priority: 5, coerced: false }])
     }
   })
 })
@@ -94,14 +94,34 @@ describe('输出收敛（AC:572 / N10）', () => {
     const facts = parseRefineOutput(jsonFacts([
       { text: '合法', kind: 'work_fact', priority: 7 },
       { text: '非法 kind', kind: 'not-a-kind', priority: 7 },
-      { text: '越界 priority', kind: 'persona', priority: 999 },
+      { text: '越界 priority', kind: 'user_portrait', priority: 999 },
       { text: '缺字段' },
     ]))
     expect(facts).not.toBeNull()
     expect(facts![0]).toEqual({ text: '合法', kind: 'work_fact', priority: 7, coerced: false })
     expect(facts![1]).toMatchObject({ kind: DEFAULT_MEMORY_KIND, coerced: true })
-    expect(facts![2]).toMatchObject({ kind: 'persona', priority: DEFAULT_MEMORY_PRIORITY, coerced: true })
+    expect(facts![2]).toMatchObject({ kind: 'user_portrait', priority: DEFAULT_MEMORY_PRIORITY, coerced: true })
     expect(facts![3]).toMatchObject({ kind: DEFAULT_MEMORY_KIND, priority: DEFAULT_MEMORY_PRIORITY, coerced: true })
+  })
+
+  it('Story 11.4 / 矩阵行 5：模型输出 legacy 别名 persona ⇒ 边界归一化并打 legacyKindAlias', () => {
+    const facts = parseRefineOutput(jsonFacts([{ text: '旧别名事实', kind: 'persona', priority: 1 }]))
+    expect(facts).not.toBeNull()
+    expect(facts![0]).toEqual({
+      text: '旧别名事实',
+      kind: 'user_portrait',
+      priority: 1,
+      coerced: false,
+      legacyKindAlias: true,
+    })
+  })
+
+  it('Story 11.4：输出 schema 与指令只宣传规范值，legacy 别名不出现在合法值域里', () => {
+    expect(REFINE_OUTPUT_SCHEMA).toContain('user_portrait')
+    expect(REFINE_OUTPUT_SCHEMA).not.toContain('persona')
+    const messages = buildRefineMessages('原文')
+    const text = (messages[0]!.content as readonly { type: string; text: string }[])[0]!.text
+    expect(text).not.toContain('persona')
   })
 
   it('超预算的单条事实按 ≤150 token 切分，且拼接后与原文一致', () => {
@@ -119,8 +139,8 @@ describe('输出收敛（AC:572 / N10）', () => {
 
   it('评审 T4：归一化后为空的 fact（纯标点）被丢弃，正常 fact 照常留下', () => {
     const facts = parseRefineOutput(jsonFacts([
-      { text: '!!!', kind: 'persona', priority: 1 },
-      { text: '正常事实', kind: 'persona', priority: 1 },
+      { text: '!!!', kind: 'user_portrait', priority: 1 },
+      { text: '正常事实', kind: 'user_portrait', priority: 1 },
       { text: '。。。' },
       { text: '   ' },
     ]))

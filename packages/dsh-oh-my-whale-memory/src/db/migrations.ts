@@ -24,6 +24,7 @@ import { MIGRATION_0006 } from './migrations/0006-strategy-candidate.js'
 import { MIGRATION_0007 } from './migrations/0007-compaction-run.js'
 import { MIGRATION_0008 } from './migrations/0008-tier-threshold.js'
 import { MIGRATION_0009 } from './migrations/0009-l0-pointer.js'
+import { MIGRATION_0010 } from './migrations/0010-user-portrait-kind.js'
 
 export interface MigrationStatement {
   /** 目标节点表名（只能是本仓导出的常量，绝不接受外部输入）。 */
@@ -40,7 +41,21 @@ export interface MigrationStatement {
  * 那是数据变换，SQL 表达不了（键是 `uuid5`）。`run` 在同一事务内、所有 `statements` 之后执行，
  * 必须自己保证幂等（重放的第二次要 no-op）。
  */
-export type MigrationDataStep = (connection: import('@ladybugdb/core').Connection) => Promise<void>
+export type MigrationDataStep = (
+  connection: import('@ladybugdb/core').Connection,
+  prepared?: unknown,
+) => Promise<void>
+
+/**
+ * 事务**前**的探测步骤（Story 11.4）：返回的值原样传给同一条迁移的 `run`。
+ *
+ * 为什么需要它：在事务内对缺失表执行 `CALL table_info` 会让 LadybugDB 的事务进入
+ * 不可用状态（后续 `recordMigration` 报 `Table schema_migration does not exist`）。
+ * 任何需要「按表是否存在分流」的数据迁移都应把探测放这里。
+ */
+export type MigrationPrepareStep = (
+  connection: import('@ladybugdb/core').Connection,
+) => Promise<unknown>
 
 export interface Migration {
   /** 单调递增的十进制迁移号，与文件名前缀一致（0002 → 2）。 */
@@ -49,10 +64,13 @@ export interface Migration {
   readonly statements: readonly MigrationStatement[]
   /** 可选的数据改写步骤；缺省 = 纯 DDL 迁移。 */
   readonly run?: MigrationDataStep
+  /** 可选的事务前探测步骤；缺省 = 无。 */
+  readonly prepare?: MigrationPrepareStep
 }
 
 /** 全部迁移，按 version 升序（运行器按此顺序逐条应用）。 */
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005, MIGRATION_0006, MIGRATION_0007, MIGRATION_0008, MIGRATION_0009]
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005, MIGRATION_0006, MIGRATION_0007, MIGRATION_0008, MIGRATION_0009, MIGRATION_0010]
 
 /** 目标版本（number 形态，便于与迁移号比较）。 */
 export const TARGET_SCHEMA_VERSION = Number(SCHEMA_VERSION)
+

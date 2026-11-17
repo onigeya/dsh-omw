@@ -9,11 +9,34 @@
  */
 
 /**
+ * User Portrait 分类的规范值（AD-38 / Story 11.4）。
+ *
+ * 语义是「用户画像」，与 Agent Persona Spec（`src/persona/contract.ts` 的
+ * `omw-persona` section）不是同一件事：后者是 Agent 的自我身份，前者是用户是谁。
+ * 分类值必须能一眼区分这两者，故规范值取 `user_portrait`。
+ */
+export const USER_PORTRAIT_KIND = 'user_portrait'
+
+/**
+ * 旧持久化值 / 旧输入别名（AD-38 legacy alias，Story 11.4）。
+ *
+ * 只允许出现在两个位置：
+ * - **输入边界**：旧 CLI `--kind=persona`、旧工具/API 调用、旧模型输出，经
+ *   {@link normalizeMemoryKind} 归一化为 {@link USER_PORTRAIT_KIND} 后才落库；
+ * - **旧库只读**：未迁移的库（只读实例不迁移，AD-12）里的 `persona` 经
+ *   {@link canonicalizeMemoryKind} 当作 `user_portrait` 读取。
+ *
+ * 不得作为新的分类值写回库。弃用截止版本与 semver 策略见
+ * `_bmad-output/implementation-artifacts/adr-11-4-legacy-alias.md`（v2.0 移除）。
+ */
+export const LEGACY_USER_PORTRAIT_KIND = 'persona'
+
+/**
  * 七类记忆分类。写路径（工具参数 / 命令旗标 / 精炼输出）的合法 kind 取值就是这个集合；
  * 缺省为空串（见 db/memory.ts 的 DEFAULT_MEMORY_KIND）。
  */
 export const MEMORY_KINDS = [
-  'persona',
+  USER_PORTRAIT_KIND,
   'episodic',
   'instruction',
   'work_fact',
@@ -24,9 +47,48 @@ export const MEMORY_KINDS = [
 
 export type MemoryKind = (typeof MEMORY_KINDS)[number]
 
-/** 是否是七类分类之一（写路径参数 / 命令旗标的单一判据）。 */
+/**
+ * 是否是七类**规范值**之一（写路径参数 / 命令旗标的单一判据）。
+ *
+ * legacy 别名 `persona` 不算：输入边界必须先经 {@link normalizeMemoryKind}，
+ * 否则「旧值也能通过校验」会让旧值重新变成合法分类（AD-38）。
+ */
 export function isMemoryKind(value: unknown): value is MemoryKind {
   return typeof value === 'string' && (MEMORY_KINDS as readonly string[]).includes(value)
+}
+
+/**
+ * 输入边界的分类归一化（Story 11.4 / T1）：
+ * - legacy `persona` → `user_portrait`（兼容期旧 CLI/API/模型输出）；
+ * - 规范值原样返回；
+ * - 其它（含缺省 / 空串 / 未知串）→ 空串，表示「未分类」，与既有缺省语义一致。
+ *
+ * 调用方拿空串时按各自语义处理：写路径落库空串（未分类），CLI/tool 视为参数错误。
+ */
+export function normalizeMemoryKind(value: unknown): MemoryKind | '' {
+  if (value === LEGACY_USER_PORTRAIT_KIND) return USER_PORTRAIT_KIND
+  return isMemoryKind(value) ? value : ''
+}
+
+/**
+ * 存量值的归一：只把 legacy `persona` 改写成 `user_portrait`，其它字符串原样返回。
+ *
+ * 与 {@link normalizeMemoryKind} 的分工：本函数用于**写库前最后一道**与**读路径**。
+ * `memory.kind` 还承载 `handle` 等非七类值（摘要句柄，见 context/handles.ts），
+ * 那些值必须原样保留，不能像输入边界那样把未知值抹成空串。
+ */
+export function canonicalizeMemoryKind(value: string): string {
+  return value === LEGACY_USER_PORTRAIT_KIND ? USER_PORTRAIT_KIND : value
+}
+
+/**
+ * 逻辑身份判定：是否是 User Portrait 分类（规范值或 legacy 别名）。
+ *
+ * 用途是**读路径与冲突守卫**（旧库只读时持久化值仍是 `persona`），
+ * 不能用于校验新输入——新输入用 {@link isMemoryKind}。
+ */
+export function isUserPortraitKind(value: unknown): boolean {
+  return value === USER_PORTRAIT_KIND || value === LEGACY_USER_PORTRAIT_KIND
 }
 
 /**
