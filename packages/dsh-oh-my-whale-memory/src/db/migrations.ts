@@ -22,6 +22,7 @@ import { MIGRATION_0004 } from './migrations/0004-pending-decision.js'
 import { MIGRATION_0005 } from './migrations/0005-slow-task.js'
 import { MIGRATION_0006 } from './migrations/0006-strategy-candidate.js'
 import { MIGRATION_0007 } from './migrations/0007-compaction-run.js'
+import { MIGRATION_0008 } from './migrations/0008-tier-threshold.js'
 
 export interface MigrationStatement {
   /** 目标节点表名（只能是本仓导出的常量，绝不接受外部输入）。 */
@@ -50,7 +51,7 @@ export interface Migration {
 }
 
 /** 全部迁移，按 version 升序（运行器按此顺序逐条应用）。 */
-export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005, MIGRATION_0006, MIGRATION_0007]
+export const MIGRATIONS: readonly Migration[] = [MIGRATION_0002, MIGRATION_0003, MIGRATION_0004, MIGRATION_0005, MIGRATION_0006, MIGRATION_0007, MIGRATION_0008]
 
 /** 目标版本（number 形态，便于与迁移号比较）。 */
 export const TARGET_SCHEMA_VERSION = Number(SCHEMA_VERSION)
