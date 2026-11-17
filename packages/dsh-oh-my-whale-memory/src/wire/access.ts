@@ -15,6 +15,7 @@ import { countPendingDecisions, listPendingDecisions, resolvePendingDecision as 
 import { slowQueueStats } from '../strategy/slow-queue.js'
 import { expireStrategyCandidates, strategyStats } from '../strategy/candidates.js'
 import { readCompactionStatus, type AttributionSnapshot } from '../context/status.js'
+import { compactionModeLabel, resolveCompactionMode } from '../context/compaction-delegate.js'
 import type { MemoryContextLedgerView, MemoryReflectionView } from '../command.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import {
@@ -194,6 +195,11 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
           runs: status.compactionRuns,
           lastCompactionId: status.lastCompaction?.compactionId ?? null,
           lastStartedAt: status.lastCompaction?.startedAt ?? null,
+          // Story 8.3 / AC:1683：只读实例的引擎委托 stock（零写），status 必须显式标出来。
+          // 写者实例暂不渲染（我们的引擎尚未装配，写 'own' 会是不诚实的）。
+          ...(readConnection().readonly
+            ? { mode: compactionModeLabel(resolveCompactionMode({ readonly: true, engineInstalled: true })) }
+            : {}),
         }))
         .catch(() => null),
       // Story 5.1 / AC:1171：存储后端可见（native = 纯 Node，wasm = Electron 宿主，AD-32）。

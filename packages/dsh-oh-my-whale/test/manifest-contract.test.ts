@@ -38,10 +38,26 @@ describe('bundle 命名契约（AD-2：发布名永不重命名）', () => {
 })
 
 describe('patch 行与 MEMORY_PLUGIN_MODULE 的一致性', () => {
-  it('patch 的 name 全部 === MEMORY_PLUGIN_MODULE（按模块名字符串注册 memory）', () => {
+  // Story 8.3：patch 现在有两类行 —— function 插件本体（memory）与压缩 provider 子路径入口。
+  const memoryPkg = JSON.parse(
+    readFileSync(resolve(pkgDir, '../dsh-oh-my-whale-memory/package.json'), 'utf8'),
+  ) as { name: string, exports: Record<string, { default?: string }> }
+  const providerEntry = (memoryPkg.exports['./compaction']?.default ?? '')
+    .replace(/^\.\/lib\//, '')
+    .replace(/\.js$/, '')
+  const providerRowName = memoryPkg.name + '/' + providerEntry
+
+  it('function 插件行的 name === MEMORY_PLUGIN_MODULE（按模块名字符串注册 memory）', () => {
     expect(patchNames.length).toBeGreaterThan(0)
+    expect(patchNames).toContain(MEMORY_PLUGIN_MODULE)
+  })
+
+  it('provider 行的 name === memory 包声明的子路径入口（AD-2：发布名 + 子路径，不另起包名）', () => {
+    expect(providerRowName).toBe('dsh-oh-my-whale-memory/compaction')
+    expect(patchNames).toContain(providerRowName)
+    // 除这两类外不允许出现别的行（防止随手加一条不存在的模块名）。
     for (const name of patchNames) {
-      expect(name).toBe(MEMORY_PLUGIN_MODULE)
+      expect([MEMORY_PLUGIN_MODULE, providerRowName]).toContain(name)
     }
   })
 

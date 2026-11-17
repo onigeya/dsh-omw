@@ -13,8 +13,9 @@
     "constraints": "node scripts/constraints.mjs",
     "check:deps": "node scripts/check-deps.mjs",
     "check:migrations": "node scripts/check-migrations.mjs",
+    "check:surface": "node scripts/check-compaction-surface.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
-    "verify": "pnpm constraints && pnpm typecheck && pnpm check:deps && pnpm check:migrations && pnpm test",
+    "verify": "pnpm constraints && pnpm typecheck && pnpm check:deps && pnpm check:migrations && pnpm check:surface && pnpm test",
     "test:coverage": "vitest run --coverage",
     "test:security": "vitest run packages/dsh-oh-my-whale-memory/test/config-schema.test.ts packages/dsh-oh-my-whale-memory/test/db-redact.test.ts packages/dsh-oh-my-whale-memory/test/db-readonly.test.ts",
     "check:coverage": "node scripts/coverage-gate.mjs"

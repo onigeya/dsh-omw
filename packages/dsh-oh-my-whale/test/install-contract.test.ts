@@ -60,14 +60,23 @@ describe('patch 清单契约（cordis.patch.yml）', () => {
     expect(insertRows.length).toBeGreaterThan(0)
   })
 
-  it('insert 行的 id 与 name 都等于 cordis 模块名', () => {
+  it('insert 行按类别断言：function 插件行 = 模块名，provider 行 = 模块名 + 子路径', () => {
     // id 是宿主配置行的 key：用户按 id 写 override、--dump-config 按 id 显示。
-    // 本包 AC 要求 settings namespace = 模块名，故此处 id 与 name 恰好同值；
-    // 断言各自等于常量而非彼此相等（真实 bundle 里二者常不同）。
-    for (const row of insertRows) {
-      expect(row.id).toBe(MEMORY_PLUGIN_MODULE)
-      expect(row.name).toBe(MEMORY_PLUGIN_MODULE)
+    // Story 8.3 起 insert 有两类行：
+    //   - function 插件本体：id 与 name 都等于 cordis 模块名（settings namespace 也等于它）；
+    //   - 压缩 provider：走子路径入口（AC:1707 要求 default export 只在子路径里），
+    //     因此 name = '<模块名>/compaction'，id 是独立行 key。
+    const pluginRows = insertRows.filter((row) => row.name === MEMORY_PLUGIN_MODULE)
+    const providerRows = insertRows.filter((row) => row.name.startsWith(MEMORY_PLUGIN_MODULE + '/'))
+    expect(pluginRows.length).toBe(1)
+    expect(pluginRows[0]?.id).toBe(MEMORY_PLUGIN_MODULE)
+    for (const row of providerRows) {
+      // 子路径必须是 memory 包 exports 里真实声明过的入口。
+      expect(Object.keys(memoryPkg.exports ?? {})).toContain('./' + row.name.slice(MEMORY_PLUGIN_MODULE.length + 1))
+      expect(String(row.id).length).toBeGreaterThan(0)
     }
+    // 除这两类外不允许出现别的行（防止随手引一个不存在的模块名）。
+    expect(pluginRows.length + providerRows.length).toBe(insertRows.length)
   })
 
   it('insert 行不硬编码 config（否则盖掉用户 /settings 的选择）', () => {
@@ -120,7 +129,8 @@ describe('发布 files 契约', () => {
     expect(pkg.files).toEqual(expect.arrayContaining(['cordis.patch.yml', 'lib/index.js', 'lib/**/*.d.ts']))
   })
 
-  it('memory 包 files 恰含 lib/index.js 与 lib/types', () => {
-    expect(memoryPkg.files).toEqual(['lib/index.js', 'lib/types'])
+  it('memory 包 files 恰含两个入口产物与 lib/types（AD-35 白名单）', () => {
+    // Story 8.3：多了压缩 provider 的子路径入口产物 lib/compaction.js。
+    expect(memoryPkg.files).toEqual(['lib/index.js', 'lib/compaction.js', 'lib/types'])
   })
 })
