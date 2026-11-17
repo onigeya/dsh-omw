@@ -257,6 +257,12 @@ export async function apply(
     recallStore: retrieval.recallStore,
     relatedStore: retrieval.relatedStore,
     quota: retrieval.quota,
+    logger: ctx.logger,
+    // Story 8.4 / FR-29：句柄展开超阈（默认 expandCount ≥2 或 chainDepth ≥2）判为不合格。
+    expandThresholds: {
+      expandCountThreshold: resolved.expandCountThreshold,
+      chainDepthThreshold: resolved.chainDepthThreshold,
+    },
     // Story 8.2：`memory_related` 结果超阈值 ⇒ 折成句柄（全文入图，表面只留句柄）。
     fold: {
       thresholdTokens: resolved.foldThresholdTokens,

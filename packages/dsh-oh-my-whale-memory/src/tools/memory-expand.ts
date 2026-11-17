@@ -13,6 +13,7 @@
 import { defineTool, type ParameterSchemaSpec, type ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
 import type { MemoryDatabase } from '../db/database.js'
 import { resolveHandleInput } from '../context/handle.js'
+import { recordHandleExpand } from '../context/handle-stats.js'
 import { classifyHandle, readHandle } from '../context/handles.js'
 import { expandFailure, expandSuccess, type ExpandResult } from '../context/expand-result.js'
 import { quotaOwnerOf } from './recall-shared.js'
@@ -81,7 +82,17 @@ export interface MemoryExpandOptions {
   readonly getDb: () => MemoryDatabase | undefined
   /** 与 recall / related 共享的每轮配额。 */
   readonly quota: RecallQuota
-
+  /**
+   * Story 8.4 / FR-29：展开计数与重写阈值（来自 Config）。
+   * 缺省 = 不计数（无 Config 的纯单测/未装配场景）；只读实例即使传了也不写（INV-7）。
+   */
+  readonly expandThresholds?: {
+    readonly expandCountThreshold: number
+    readonly chainDepthThreshold: number
+  }
+  /** 测试接缝：时钟（`last_expanded_at`）。 */
+  readonly now?: () => Date
+  readonly logger?: { warn(message: string): void }
 }
 
 export function createMemoryExpandTool(options: MemoryExpandOptions) {
@@ -128,8 +139,28 @@ export function createMemoryExpandTool(options: MemoryExpandOptions) {
       // 会话键取自**当次调用**（与配额同源；装配期静态 id 在多会话下是错的）。
       const record = await readHandle(database.connection, handle)
       const verdict = classifyHandle(record, owner)
-      if (verdict.ok) return expandSuccess(verdict.record)
-      return expandFailure(verdict.failure)
+      if (!verdict.ok) return expandFailure(verdict.failure)
+
+      // ⑤ Story 8.4 / FR-29：成功展开后记一次计数（达阈则幂等入队「摘要重写」）。
+      // 只读实例零写（INV-7）；计数失败不改还原结果（句柄正文已拿到，INV-3 fail-open）。
+      let expandCount = verdict.record.expandCount
+      if (database.readonly !== true && options.expandThresholds !== undefined) {
+        try {
+          const now = (options.now ?? (() => new Date()))()
+          const stats = await recordHandleExpand(database.connection, {
+            handleId: verdict.record.id,
+            // 条目归属会话与配额同源（装配期静态 id 在多会话下是错的）。
+            sessionId: owner !== '' ? owner : verdict.record.sessionId,
+            now,
+            expandCountThreshold: options.expandThresholds.expandCountThreshold,
+            chainDepthThreshold: options.expandThresholds.chainDepthThreshold,
+          })
+          expandCount = stats.expandCount
+        } catch (error) {
+          options.logger?.warn('句柄展开计数失败（还原照常返回）：' + String(error))
+        }
+      }
+      return expandSuccess(verdict.record, { expandCount })
     },
   })
 }

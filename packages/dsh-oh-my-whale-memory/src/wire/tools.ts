@@ -36,6 +36,12 @@ export interface MemoryToolsOptions {
     }) => Promise<{ readonly id: string }>
     readonly logger?: { warn(message: string): void }
   }
+  /** Story 8.4 / FR-29：句柄展开计数与重写阈值（缺省 = 不计数）。 */
+  readonly expandThresholds?: {
+    readonly expandCountThreshold: number
+    readonly chainDepthThreshold: number
+  }
+  readonly logger?: { warn(message: string): void }
 }
 
 export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void {
@@ -70,8 +76,11 @@ export function wireMemoryTools(ctx: Context, options: MemoryToolsOptions): void
   }))
   // Story 8.2：`memory_expand` 与 recall / related 共享同一配额实例（FR-10 合计 ≤3/轮）。
   // 只读实例照常可用：它只读句柄节点，不写任何东西（INV-7）。
+  // Story 8.4 / FR-29：成功展开记一次计数（只读实例由工具按 database.readonly 跳过）。
   ctx.tools.register(createMemoryExpandTool({
     getDb: () => getDb(),
     quota: options.quota,
+    expandThresholds: options.expandThresholds,
+    logger: options.logger,
   }))
 }
