@@ -20,6 +20,7 @@
  * 用 Getter<T> 读取，兼容普通值与 volatile 节点（便于纯单测传 plain object）。
  */
 import type { Context } from '@deepseek-ai/cordis'
+import type { MemorySituatedRecallView } from './command.js'
 import { resolveRuntimeConfig } from './config.js'
 import { resolveEmbeddingProfile } from './db/embedding-profile.js'
 import { resolveMemoryDbPath, ensureMemoryDbDirectory } from './db/paths.js'
@@ -221,11 +222,17 @@ export async function apply(
     readonly loadReason?: string
     readonly reextractHint?: boolean
   }) | null = null
+  // Story 9.3 / T7、AD-16：处境条件化召回的进程内指标视图。retrieval 装配在 access 之后，
+  // 故先用可变占位，retrieval 建好后赋给 `retrieval.situatedRecallView`（与 capture/ontology 同款）。
+  let situatedRecallView: (() => MemorySituatedRecallView) | null = null
   const access = createMemoryAccess({
     getDb,
     resolved,
     readonlyState: () => instance,
     getSystemOneClient: () => slots.systemOneClient,
+    // Story 9.3 / T7：status 的 situated_recall 行数据源（进程内指标）。
+    // 开关关闭时 access 侧不取值 ⇒ 该行不渲染（v1 的 `/memory status` 逐行输出逐字不变）。
+    situatedRecallView: () => situatedRecallView?.(),
     // Story 10.1：采集模式（tokens / steps(degraded)；指针持久化是否可用）。
     captureModeView: () => captureModeView?.() ?? null,
     // Story 9.2：本体加载/渲染视图（未配置/不可用 → null 或 loadReason）。
@@ -253,6 +260,8 @@ export async function apply(
     readConnection: access.readConnection,
     resolved,
   })
+  // Story 9.3 / T7：status 的 situated_recall 行数据源接通（retrieval 装配在 access 之后）。
+  situatedRecallView = retrieval.situatedRecallView
 
   // Story 1.6 / 1.7：命令与工具都在 profileContext 早退之前无条件注册（注册是 effect，
   // 自动挂 disposer），共用同一个闭包库句柄，库未就绪时命令给出明确错误、工具给出

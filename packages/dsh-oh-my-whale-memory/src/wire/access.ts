@@ -16,7 +16,7 @@ import { slowQueueStats } from '../strategy/slow-queue.js'
 import { expireStrategyCandidates, strategyStats } from '../strategy/candidates.js'
 import { readCompactionStatus, type AttributionSnapshot } from '../context/status.js'
 import { compactionModeLabel, resolveCompactionMode } from '../context/compaction-delegate.js'
-import type { MemoryContextLedgerView, MemoryReflectionView } from '../command.js'
+import type { MemoryContextLedgerView, MemoryReflectionView, MemorySituatedRecallView } from '../command.js'
 import { countOntologyDrops } from '../ontology/ledger.js'
 import { countEvidenceDegraded } from '../db/redact.js'
 import { readDeclaredSchemaVersion } from '../db/migrate.js'
@@ -59,6 +59,11 @@ export interface MemoryAccessOptions {
   } | null
   /** 惰性取库句柄（建库之前为 undefined）。 */
   readonly getDb: () => MemoryDatabase | undefined
+  /**
+   * Story 9.3 / T7、AD-16：处境条件化召回的进程内指标视图（开关 / 重排模式 / P50·P95 /
+   * 降级率）。缺省或返回 undefined ⇒ 不渲染 `situated_recall:` 行（既有逐行输出逐字不变）。
+   */
+  readonly situatedRecallView?: () => MemorySituatedRecallView | undefined
   /** apply 时 resolve 的配置（status 的 embeddingMode 与 System One 开关）。 */
   readonly resolved: RuntimeConfig
   /** 本实例自身的只读态（模块级 runtimeState 可能属于另一次 apply，不能读它）。 */
@@ -251,6 +256,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       })(),
       // Story 8.1：上下文归因（进程内快照）与压缩运行（落库）。
       contextLedger: mapContextLedger(options.contextLedgerView?.() ?? null),
+      // Story 9.3 / T7、AD-16：处境条件化召回行（开关 / 重排模式 / P50·P95 / 降级率）。
+      // 开关关闭（默认）或缺省提供者 ⇒ 不渲染该行（v1 的 `/memory status` 逐行输出逐字不变）。
+      situatedRecall: options.resolved.situatedRecallEnabled ? options.situatedRecallView?.() : undefined,
       compaction: await readCompactionStatus(connection)
         .then((status) => ({
           runs: status.compactionRuns,

@@ -1,120 +1,138 @@
 /**
- * A/B 评估测试（Story 9.3 / T8、AC:2020-2024、I/O 矩阵 20–21）。
+ * 处境条件化召回的 A/B 评估测试（Story 9.3 / T8、spec I/O 矩阵 20–21）。
  *
- * 20. 无对照组 ⇒ lift=null + reason，不得声称有效；
- * 21. 有对照组 ⇒ lift 可复算并记录（记录只含 id 与数值，可检视、无正文）。
+ * 断言对象是 `src/recall/situated-eval.ts` 的实际契约（AC:2022）：
+ * - 矩阵 20：**无对照组不得给 lift**（`lift: null` + 封闭 reason），防自证有效；
+ * - 矩阵 21：有对照组 ⇒ `lift = 处境命中率 / embedding-only 命中率`，可复算，且
+ *   评估记录只含 id 与数值（不含记忆正文 / 查询文本 / 凭据）。
  *
- * 纯函数：输入两个命中集与真值集，不读库、不看时钟。
+ * 纯函数、无库、无时钟、无网络。
  */
 import { describe, expect, it } from 'vitest'
 import {
   SITUATED_EVAL_ACTION,
+  SITUATED_EVAL_KIND,
   computeHitRate,
   evaluateSituatedRecall,
   situatedEvalLogDetail,
+  type SituatedHitSet,
 } from '../src/recall/situated-eval'
 
-describe('computeHitRate（命中率口径）', () => {
-  it('去重 + 稳定序；命中率 = |hits ∩ relevant| / |relevant|', () => {
-    const rate = computeHitRate({ hits: ['b', 'a', 'a'], relevant: ['a', 'c', 'a'] })
-    expect(rate).toMatchObject({ hits: 2, relevant: 2, hitRate: 0.5 })
-    expect(rate.hitIds).toEqual(['a', 'b'])
-  })
+/** 一组固定的真值：四条相关记忆（`|relevant| = 4`）。 */
+const RELEVANT = ['m1', 'm2', 'm3', 'm4']
 
-  it('真值集为空 ⇒ hitRate null（不静默按 0 计）', () => {
-    const rate = computeHitRate({ hits: ['a'], relevant: [] })
-    expect(rate.hitRate).toBeNull()
-    expect(rate.relevant).toBe(0)
-  })
-})
+function hitSet(hits: readonly string[], relevant: readonly string[] = RELEVANT): SituatedHitSet {
+  return { hits, relevant }
+}
 
-describe('矩阵 20：无对照组（边界 ⇒ 不得声称有效）', () => {
-  it('control 缺失 / null ⇒ lift null + reason=no-control', () => {
+describe('矩阵 20：无对照组 ⇒ lift=null + reason（不得声称有效）', () => {
+  it('control 缺省 / null ⇒ lift 必为 null（即使处境侧命中率很好）', () => {
+    const situated = hitSet(['m1', 'm2', 'm3', 'm4']) // 命中率 1.0，最容易「自证有效」
     for (const control of [undefined, null]) {
-      const result = evaluateSituatedRecall({
-        situated: { hits: ['a', 'b'], relevant: ['a', 'b'] },
-        ...(control === undefined ? {} : { control }),
-      })
+      const result = evaluateSituatedRecall({ situated, control })
       expect(result.lift).toBeNull()
       expect(result.reason).toBe('no-control')
       expect(result.control).toBeNull()
-      // 处境侧命中率照算（可检视），但「提升」不成立。
+      // 自身命中率照报（不隐藏数据），只是不给 lift。
       expect(result.situated.hitRate).toBe(1)
     }
   })
 
-  it('对照组真值集为空 ⇒ control-empty；为零 ⇒ control-zero（除零不产生无限提升）', () => {
-    const emptyControl = evaluateSituatedRecall({
-      situated: { hits: ['a'], relevant: ['a'] },
-      control: { hits: ['a'], relevant: [] },
-    })
-    expect(emptyControl).toMatchObject({ lift: null, reason: 'control-empty' })
-
-    const zeroControl = evaluateSituatedRecall({
-      situated: { hits: ['a'], relevant: ['a'] },
-      // 对照组有真值但一条都没命中 ⇒ 命中率 0（不是「无真值」）。
-      control: { hits: ['z'], relevant: ['y'] },
-    })
-    expect(zeroControl).toMatchObject({ lift: null, reason: 'control-zero' })
+  it('对照组真值集为空 ⇒ lift=null + control-empty（比率无定义，不按 0 计）', () => {
+    const result = evaluateSituatedRecall({ situated: hitSet(['m1']), control: hitSet(['m1'], []) })
+    expect(result.lift).toBeNull()
+    expect(result.reason).toBe('control-empty')
+    expect(result.control?.hitRate).toBeNull()
   })
 
-  it('处境侧真值集为空 ⇒ situated-empty（宁可 null，不给伪 lift）', () => {
-    const result = evaluateSituatedRecall({
-      situated: { hits: ['a'], relevant: [] },
-      control: { hits: ['a'], relevant: ['a'] },
-    })
-    expect(result).toMatchObject({ lift: null, reason: 'situated-empty' })
+  it('对照组命中率为 0 ⇒ lift=null + control-zero（除零不产生「无限提升」）', () => {
+    const result = evaluateSituatedRecall({ situated: hitSet(['m1']), control: hitSet(['mx', 'my']) })
+    expect(result.lift).toBeNull()
+    expect(result.reason).toBe('control-zero')
+    expect(result.control?.hitRate).toBe(0)
   })
 
-  it('评估记录（detail）在 lift=null 时如实记 null 与 reason，不写「有效」结论', () => {
-    const result = evaluateSituatedRecall({ situated: { hits: ['a'], relevant: ['a'] } })
-    const detail = situatedEvalLogDetail(result)
-    const parsed = JSON.parse(detail) as Record<string, any>
-    expect(parsed.lift).toBeNull()
-    expect(parsed.reason).toBe('no-control')
-    expect(detail).not.toContain('valid')
-    expect(detail).not.toContain('有效')
+  it('处境侧真值集为空 ⇒ lift=null + situated-empty（对照组有值也不硬比）', () => {
+    const result = evaluateSituatedRecall({ situated: hitSet(['m1'], []), control: hitSet(['m1']) })
+    expect(result.lift).toBeNull()
+    expect(result.reason).toBe('situated-empty')
+  })
+
+  it('reason 是封闭词表（四种取值之一），不含自由文本', () => {
+    const cases = evaluateSituatedRecall({ situated: hitSet([]), control: hitSet(['mx']) })
+    expect(['no-control', 'control-empty', 'control-zero', 'situated-empty']).toContain(cases.reason)
   })
 })
 
-describe('矩阵 21：有对照组（lift 可复算并记录）', () => {
-  it('lift = 处境命中率 / 对照组命中率', () => {
+describe('矩阵 21：有对照组 ⇒ lift = 命中率比，可复算', () => {
+  it('处境 2/4、对照 1/4 ⇒ lift = 2.0', () => {
     const result = evaluateSituatedRecall({
-      situated: { hits: ['a', 'b', 'c'], relevant: ['a', 'b'] },
-      control: { hits: ['a'], relevant: ['a', 'b', 'c', 'd'] },
+      situated: hitSet(['m1', 'm2', 'noise']),
+      control: hitSet(['m1', 'noise2']),
     })
-    // 处境 2/2=1；对照 1/4=0.25 → lift 4。
-    expect(result.situated.hitRate).toBe(1)
+    expect(result.situated.hitRate).toBe(0.5)
     expect(result.control?.hitRate).toBe(0.25)
-    expect(result.lift).toBeCloseTo(4, 10)
-    // 可复算：拿两项命中率再除一遍得到同一数。
-    expect(result.lift).toBeCloseTo(result.situated.hitRate! / result.control!.hitRate!, 10)
+    expect(result.lift).toBe(2)
+    expect(result.reason).toBeUndefined()
   })
 
-  it('lift < 1（处境侧更差）也要如实报（评估不是营销）', () => {
+  it('lift 可由两侧 hitRate 复算（记录可检视，不是黑箱）', () => {
     const result = evaluateSituatedRecall({
-      situated: { hits: ['a'], relevant: ['a', 'b', 'c', 'd'] },
-      control: { hits: ['a', 'b'], relevant: ['a', 'b', 'c', 'd'] },
+      situated: hitSet(['m1', 'm2', 'm3']),   // 3/4
+      control: hitSet(['m1', 'm2']),          // 2/4
     })
-    expect(result.lift).toBeCloseTo(0.5, 10)
+    expect(result.situated.hitRate).toBe(0.75)
+    expect(result.control?.hitRate).toBe(0.5)
+    expect(result.lift).toBeCloseTo(1.5, 12)
+    expect(result.lift).toBe((result.situated.hitRate ?? 0) / (result.control?.hitRate ?? 1))
   })
 
-  it('detail 记录 lift 与两侧计数 / id（可检视）；命中 id 截到 20 条', () => {
-    const many = Array.from({ length: 25 }, (_, index) => `id-${index}`)
+  it('处境更差时 lift < 1（不隐瞒劣化）', () => {
     const result = evaluateSituatedRecall({
-      situated: { hits: many, relevant: many },
-      control: { hits: many.slice(0, 5), relevant: many },
+      situated: hitSet(['m1']),
+      control: hitSet(['m1', 'm2', 'm3', 'm4']),
     })
-    const parsed = JSON.parse(situatedEvalLogDetail(result)) as Record<string, any>
-    expect(parsed.lift).toBe(5)
-    expect(parsed.situated).toMatchObject({ hits: 25, relevant: 25, hitRate: 1 })
-    expect(parsed.control).toMatchObject({ hits: 5, relevant: 25, hitRate: 0.2 })
-    // 只留 id 与数值：截 20 条，且不含正文 / 查询文本。
-    expect(parsed.situated.hitIds).toHaveLength(20)
-    expect(parsed.control.hitIds).toHaveLength(5)
+    expect(result.lift).toBe(0.25)
   })
 
-  it('评估记录的 action 是封闭值（按它筛 generation_log）', () => {
+  it('computeHitRate：去重 + 升序 + 命中 id 可检视；超集真值不虚增', () => {
+    const rate = computeHitRate(hitSet(['m2', 'm1', 'm2', 'noise']))
+    expect(rate).toEqual({ hits: 3, relevant: 4, hitRate: 0.5, hitIds: ['m1', 'm2', 'noise'] })
+  })
+
+  it('评估记录只含 id 与数值：不含记忆正文 / 查询文本 / 凭据（NFR9）', () => {
+    const result = evaluateSituatedRecall({
+      situated: hitSet(['m1', 'm2']),
+      control: hitSet(['m1']),
+    })
+    const detail = situatedEvalLogDetail(result)
+    const parsed = JSON.parse(detail) as Record<string, unknown>
+    expect(Object.keys(parsed).sort()).toEqual(['control', 'lift', 'situated'])
+    expect(Object.keys(parsed.situated as object).sort()).toEqual(['hitIds', 'hitRate', 'hits', 'relevant'])
+    expect(parsed.lift).toBe(2)
+    expect(detail).not.toContain('纯文本')
+    expect(detail).not.toContain('token')
+    // 审计行的 kind/action 是封闭常量（写 generation_log 时按它筛）。
+    expect(SITUATED_EVAL_KIND).toBe('recall')
     expect(SITUATED_EVAL_ACTION).toBe('situated_eval')
+  })
+
+  it('lift=null 时 detail 带 reason，control 为 null（不编造对照组）', () => {
+    const detail = situatedEvalLogDetail(evaluateSituatedRecall({ situated: hitSet(['m1']) }))
+    const parsed = JSON.parse(detail) as { lift: unknown; reason: string; control: unknown }
+    expect(parsed.lift).toBeNull()
+    expect(parsed.reason).toBe('no-control')
+    expect(parsed.control).toBeNull()
+  })
+
+  it('命中 id 超过 20 条时 detail 截断（不膨胀日志）', () => {
+    const many = Array.from({ length: 30 }, (_, index) => 'm' + String(index).padStart(2, '0'))
+    const detail = situatedEvalLogDetail(evaluateSituatedRecall({
+      situated: hitSet(many, many),
+      control: hitSet(many, many),
+    }))
+    const parsed = JSON.parse(detail) as { situated: { hits: number; hitIds: string[] } }
+    expect(parsed.situated.hits).toBe(30)
+    expect(parsed.situated.hitIds).toHaveLength(20)
   })
 })

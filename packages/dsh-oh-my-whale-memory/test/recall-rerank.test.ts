@@ -141,9 +141,10 @@ describe('矩阵 16：System One 失败 ⇒ 降级 reranker-only', () => {
       now: () => 0,
     })
     expect(result.mode).toBe('reranker-only')
-    // 配置显式关闭不是质量失败 ⇒ degraded 由第一段是否成功决定（这里成功，故 false）。
+    // 配置显式关闭不是质量失败 ⇒ degraded 由第一段是否成功决定（这里成功，故 false）；
+    // 但原因仍可见（`systemone-disabled`），便于审计「为什么只有一段」。
     expect(result.degraded).toBe(false)
-    expect(result.degradedReason).toBeUndefined()
+    expect(result.degradedReason).toBe('systemone-disabled')
   })
 
   it('System One 要求开但没给端口 ⇒ systemone:no-port，降级可见', async () => {
@@ -163,9 +164,10 @@ describe('矩阵 16：System One 失败 ⇒ 降级 reranker-only', () => {
 
 describe('矩阵 17：documents 必须是 string[]（20015 防回归）', () => {
   it('客户端构造时强制 String(doc)，绝不传 { text } 对象数组', async () => {
-    const captured: Array<{ documents: unknown; topN: number; query: string }> = []
+    const captured: Array<{ documents: unknown; topN: number; query: string; headers: Record<string, string> }> = []
     const fetchImpl = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
-      captured.push(JSON.parse(String(init?.body)) as { documents: unknown; topN: number; query: string })
+      const parsed = JSON.parse(String(init?.body)) as { documents: unknown; topN: number; query: string }
+      captured.push({ ...parsed, headers: (init?.headers ?? {}) as Record<string, string> })
       return new Response(JSON.stringify({
         results: [{ index: 0, relevance_score: 0.9 }, { index: 1, relevance_score: 0.8 }],
       }), { status: 200, headers: { 'Content-Type': 'application/json' } })
@@ -191,8 +193,7 @@ describe('矩阵 17：documents 必须是 string[]（20015 防回归）', () => 
     expect(captured[0]?.documents).toEqual(['纯文本', '42', '', '[object Object]'])
     for (const doc of captured[0]?.documents ?? []) expect(typeof doc).toBe('string')
     // token 进 Authorization 头（凭据在调用期使用，不进返回/日志）。
-    const auth = (fetchImpl.mock.calls[0]?.[1] as RequestInit | undefined)?.headers
-    expect(auth).toContain('Bearer sk-secret')
+    expect(captured[0]?.headers.Authorization).toBe('Bearer sk-secret')
   })
 
   it('readRerankScores 按 index 对齐文档位置，兼容 relevance_score / score 两种字段', () => {
@@ -206,7 +207,11 @@ describe('矩阵 17：documents 必须是 string[]（20015 防回归）', () => 
   })
 
   it('normalizeScores min-max 归一化到 [0,1]；非有限项按 0（不参与排序）', () => {
-    expect(normalizeScores([0.2, 0.8, 0.5])).toEqual([0, 1, 0.5])
+    // 浮点除法不保证精确 .5，逐项用 closeTo 钉值。
+    const normalized = normalizeScores([0.2, 0.8, 0.5])
+    expect(normalized[0]).toBe(0)
+    expect(normalized[1]).toBe(1)
+    expect(normalized[2]).toBeCloseTo(0.5, 12)
     expect(normalizeScores([Number.NaN, 0.5, 0.5])).toEqual([0, 1, 1])
     expect(normalizeScores([0.7, 0.7])).toEqual([1, 1]) // span=0 全为 1
     expect(normalizeScores([])).toEqual([])
