@@ -544,3 +544,41 @@ describe('Story 9.3 / T7：situated_recall: 状态行（AD-16 可观测）', () 
   })
 })
 
+/**
+ * Story 3.4 / T5、AD-39：`always_on:` 行（常驻人设层可见性）。
+ *
+ * - 缺省（未提供 alwaysOnEnabled）⇒ 不渲染该行，既有钉死块逐字不变（由上方 STATUS_BASE 用例保证）；
+ * - 关闭 ⇒ 只输出 `always_on: disabled`；
+ * - 开启 ⇒ `enabled=true` + 可用计数（`kept` / `keptInviolable` / `overBudget` / `truncated` / `tokens`）；
+ * - 开启但尚未组装 ⇒ 只打 `enabled=true`（缺项不打印，不编造 0）。
+ */
+describe('renderMemoryStatus / Story 3.4 T5：always_on 行', () => {
+  it('alwaysOnEnabled=false ⇒ 只输出 always_on: disabled（其余既有行逐字不变）', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, alwaysOnEnabled: false })
+    expect(text).toContain('always_on: disabled')
+    expect(text).not.toContain('always_on: enabled')
+    // 既有行仍在（其余行逐字不变）。
+    expect(text).toContain('injection: 未知（本实例尚未触发开局注入）')
+    expect(text).toContain('readonly: false')
+  })
+
+  it('开启且有渲染观测 ⇒ enabled + 全部计数（矩阵 2/3 的可见口径）', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      alwaysOnEnabled: true,
+      alwaysOn: { kept: 2, keptInviolable: 1, overBudget: true, truncated: false, tokens: 120 },
+    })
+    expect(text).toContain('always_on: enabled=true kept=2 keptInviolable=1 overBudget=true truncated=false tokens=120')
+  })
+
+  it('开启但尚未组装 ⇒ 只打 enabled=true（缺项不打印）', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, alwaysOnEnabled: true, alwaysOn: null })
+    expect(text).toContain('always_on: enabled=true')
+    expect(text).not.toContain('kept=')
+  })
+
+  it('未提供 alwaysOnEnabled ⇒ 不渲染该行（既有钉死输出逐字不变）', () => {
+    expect(renderMemoryStatus(STATUS_BASE)).not.toContain('always_on:')
+  })
+})
+

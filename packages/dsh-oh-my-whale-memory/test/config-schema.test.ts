@@ -37,7 +37,7 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(missing).toEqual([])
     // 顶层字段数量锁定 FR-18 全字段，防止后续误删
     expect(Object.keys(dict).sort()).toEqual([
-      'alwaysOnTokenCap', 'captureMaxTokens', 'captureMinTokens', 'captureSteps', 'captureTokens',
+      'alwaysOnEnabled', 'alwaysOnTokenCap', 'captureMaxTokens', 'captureMinTokens', 'captureSteps', 'captureTokens',
       'chainDepthThreshold', 'compactionLengthMin',
       'compactionOrphanTimeoutMs', 'compactionSelfTuneEnabled', 'compactionT3Threshold', 'embedding',
       'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
@@ -97,6 +97,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.captureSteps.get()).toBe(50)
     expect(resolved.inboxRefineConcurrency.get()).toBe(4)
     expect(resolved.injectOnNewSession.get()).toBe(true)
+    // Story 3.4 / T1、AD-39：常驻人设层默认开启（缺省不改既有行为）；运行期可关。
+    expect(resolved.alwaysOnEnabled.get()).toBe(true)
     expect(resolved.rrfK.get()).toBe(60)
     expect(resolved.retrievalTopK.get()).toBe(50)
     expect(resolved.layerWeights.get()).toEqual({ l2: 0.7, l1: 0.4 })
@@ -147,6 +149,21 @@ describe('GC 正常配置（I/O 矩阵第 1 行）', () => {
     expect(resolved.rrfK).toBe(60)
     expect(resolved.layerWeights).toEqual({ l2: 0.7, l1: 0.4 })
     expect(resolved.priorityWeight).toBe(0.5)
+  })
+})
+
+describe('Story 3.4 / T1：常驻人设层开关投影（FR-18）', () => {
+  it('默认 true；显式关闭生效，且与 injectOnNewSession 互不联动', () => {
+    const base = resolveRuntimeConfig(validConfig())
+    expect(base.alwaysOnEnabled).toBe(true)
+    // 关闭常驻层不影响可选层摘要开关。
+    const closed = resolveRuntimeConfig({ ...validConfig(), alwaysOnEnabled: false, injectOnNewSession: true })
+    expect(closed.alwaysOnEnabled).toBe(false)
+    expect(closed.injectOnNewSession).toBe(true)
+    // 关闭可选层摘要不影响常驻层。
+    const optionalClosed = resolveRuntimeConfig({ ...validConfig(), alwaysOnEnabled: true, injectOnNewSession: false })
+    expect(optionalClosed.alwaysOnEnabled).toBe(true)
+    expect(optionalClosed.injectOnNewSession).toBe(false)
   })
 })
 

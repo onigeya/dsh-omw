@@ -220,6 +220,9 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // Story 3.3 / B4：注入可见性，进程内 lastInjection（null=未知）+ Config 开关。
       injection: options.injectionStore.readLastInjection() ?? null,
       injectionEnabled: options.resolved.injectOnNewSession,
+      // Story 3.4 / T5、AD-39：常驻人设层的开关与最近一次渲染计数（`always_on:` 行）。
+      alwaysOnEnabled: options.resolved.alwaysOnEnabled,
+      alwaysOn: options.injectionStore.readLastAlwaysOn() ?? null,
       // Story 11.2 / T5：Persona Spec 状态（配置开关 + 批准门 + 空正文判据的同一纯函数结果）。
       // null = 未启用 / 未批准 / 空正文 ⇒ status 渲染 disabled(awaiting-approval)。
       persona: personaStatusOf({

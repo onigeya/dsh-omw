@@ -141,6 +141,8 @@ function statusText(
   else if (relatedSkipped > 0) lines.push(`related_skipped: ${relatedSkipped}`)
   // Story 3.3 / B4：注入状态行恒打印（这些用例未触发注入，未知）。
   lines.push('injection: 未知（本实例尚未触发开局注入）')
+  // Story 3.4 / T5：常驻人设层开关默认开、本夹具未组装 ⇒ 只打 enabled=true。
+  lines.push('always_on: enabled=true')
   // Story 11.2 / T5：Persona Spec 批准门默认关闭 ⇒ 恒打印 disabled(awaiting-approval)。
   lines.push('persona: disabled(awaiting-approval)')
   // Story 11.3 / T6：Self-Knowledge 计数行（写者夹具已迁移 0011 ⇒ 表在、计数全 0）。
@@ -488,6 +490,8 @@ describe('AC3：只读实例下 status 标注 readonly 与逐字原因，计数�
         'uncertain: 未知（审计表缺失）',
         // Story 3.3 / B4：只读夹具未触发开局注入，末行「未知」（恒打印，便于断言三态）。
         'injection: 未知（本实例尚未触发开局注入）',
+        // Story 3.4 / T5：常驻人设层开关默认开、只读实例未组装 ⇒ 只打 enabled=true。
+        'always_on: enabled=true',
         // Story 11.2 / T5：只读实例同样只读配置态；批准门关闭 ⇒ disabled(awaiting-approval)。
         'persona: disabled(awaiting-approval)',
         // Story 11.3 / T6：只读夹具是未迁移旧库（不建 agent_self_knowledge）⇒ 自省面「未知」。

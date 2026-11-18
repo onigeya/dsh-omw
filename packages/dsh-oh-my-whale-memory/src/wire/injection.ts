@@ -104,7 +104,9 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
   }
   // Story 8.5 / T3：骨架每次命题刷新一次（压缩移除后下一请求自动补回，AC:1823）。
   // 没有 systemPrompt 面时骨架无处消费，不刷新（裸 ctx 不产生无用读库）。
-  const refreshSkeleton = options.skeleton === undefined || systemPromptHost === undefined
+  // Story 3.4 / T1：`alwaysOnEnabled=false` ⇒ 不构造 refresher ⇒ 零查库、零注入（矩阵 1）。
+  const alwaysOnEnabled = options.resolved.alwaysOnEnabled !== false
+  const refreshSkeleton = options.skeleton === undefined || systemPromptHost === undefined || !alwaysOnEnabled
     ? undefined
     : createSkeletonRefresher({
       store: skeletonStore,
@@ -114,6 +116,16 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
       capTokens: options.skeleton.capTokens,
       // Story 8.6 / T4：注入口（FR-25 回注前）净化开关。
       purifyOptions: () => options.resolved.purify,
+      // Story 3.4 / T5：渲染计数供 `/memory status` 的 `always_on:` 行读取。
+      onRendered: (render) => {
+        options.store.setLastAlwaysOn({
+          kept: render.kept,
+          keptInviolable: render.keptInviolable,
+          overBudget: render.overBudget,
+          truncated: render.truncated,
+          tokens: render.tokens,
+        })
+      },
       logger: ctx.logger,
     })
 
@@ -137,6 +149,9 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
     budgetMs,
     // Story 8.6 / T4：注入口净化开关（注入副本，不留痕到库）。
     purify: options.resolved.purify,
+    // Story 3.4 / T4、AD-39：可选层排除常驻层已收集的 id（骨架事实 + accepted 自省）。
+    // 常驻层关闭（不刷新）⇒ store.idsFor 恒为空集 ⇒ 可选层照旧不排除任何候选（矩阵 4）。
+    excludeAlwaysOnIds: (key) => skeletonStore.idsFor(key),
     // Story 8.5 / T2：注入预算改读 T1 的 tokens 公式（窗口/压力缺席即退回绝对上限）。
     resolveBudget: (session) => {
       const pressure = options.contextPressure?.(session)
@@ -153,19 +168,23 @@ export function wireInjection(ctx: Context, options: InjectionWiringOptions): vo
   const host = ctx as unknown as AgentPreStepHost
   host.on?.('agent/pre-step', async (payload, next) => {
     const preStep = payload as OpenstartPreStepPayload
-    const generation = generator(preStep).catch(() => {
-      // 生成失败/超时/异常只在注入面降级，不影响宿主决策。
-    })
-    // 骨架刷新与生成并行；两者都必须在本预算内交回决策（骨架刷新失败已在 refresher 内收敛）。
-    const skeleton = refreshSkeleton === undefined
-      ? Promise.resolve()
-      : refreshSkeleton(inboxSessionKey(preStep.agent?.session))
     let timer: ReturnType<typeof setTimeout> | undefined
     const budget = new Promise<void>((resolve) => {
       timer = setTimeout(resolve, budgetMs)
     })
+    // Story 3.4 / T4、AD-39：先收集常驻层（纯读；id 集供可选层按 id 去重），再生成可选层
+    // `recall(top-8)`。两步都必须在同一硬预算内向宿主交回决策（骨架刷新失败已在 refresher
+    // 内收敛，生成失败/超时/异常只降级注入面）。
+    const work = (async () => {
+      if (refreshSkeleton !== undefined) {
+        await refreshSkeleton(inboxSessionKey(preStep.agent?.session))
+      }
+      await generator(preStep).catch(() => {
+        // 生成失败/超时/异常只在注入面降级，不影响宿主决策。
+      })
+    })()
     try {
-      await Promise.race([Promise.allSettled([generation, skeleton]), budget])
+      await Promise.race([work, budget])
     } finally {
       if (timer !== undefined) clearTimeout(timer)
     }

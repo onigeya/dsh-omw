@@ -337,3 +337,181 @@ describe('wireInjection / 动态骨架（T3）', () => {
     expect((provider as (context: unknown) => string)({ agent: { session: { id: 's-x' } } })).toBe('')
   })
 })
+
+/**
+ * Story 3.4 / T1：`alwaysOnEnabled=false` ⇒ 跳过常驻层收集与渲染，零查库、零注入；
+ * `injectOnNewSession` 只控制可选层摘要，两者互不联动（FR-18 / 矩阵 1）。
+ */
+describe('wireInjection / Story 3.4 T1：常驻层关闭', () => {
+  it('关闭常驻层 ⇒ readFacts/readAccepted 从未被调用、动态骨架恒为空；可选层摘要照常注入', async () => {
+    const host = makeHost()
+    const store = createInjectionStore()
+    const readFacts = vi.fn(async (): Promise<readonly SkeletonFact[]> => {
+      throw new Error('不应查库')
+    })
+    const readAccepted = vi.fn(async () => {
+      throw new Error('不应查库')
+    })
+    wireInjection(host.ctx, {
+      store,
+      recallStore: makeRecall(),
+      resolved: { ...RESOLVED, alwaysOnEnabled: false } as unknown as RuntimeConfig,
+      skeleton: { readFacts, readAccepted, capTokens: () => 2000 },
+    })
+    const listener = host.listeners.find((entry) => entry.event === 'agent/pre-step')!.listener
+    const next = vi.fn(async () => DEFAULT_DECISION)
+
+    await listener(PAYLOAD, next)
+
+    expect(readFacts).not.toHaveBeenCalled()
+    expect(readAccepted).not.toHaveBeenCalled()
+    const dynamic = host.contexts.find((entry) => entry.name === 'omw-memory-dynamic')!.text
+    expect((dynamic as (context: unknown) => string)({ agent: { session: { id: 's-f01' } } })).toBe('')
+    // 可选层不受影响（injectOnNewSession 仍为 true）。
+    expect(store.read('s-f01')?.status).toBe('ready')
+    const recallProvider = host.contexts.find((entry) => entry.name === 'omw-memory:recall')!.text
+    expect((recallProvider as (context: unknown) => string)({ agent: { session: { id: 's-f01' } } }))
+      .toContain('相关记忆（开局注入）')
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+})
+
+/**
+ * Story 3.4 / T4：可选层按 id 排除常驻层成员——同 id 只出现在常驻层，不重复注入（矩阵 7）。
+ */
+describe('wireInjection / Story 3.4 T4：常驻层与可选层去重', () => {
+  const DUPLICATE: RecallResultItem = {
+    id: 'dup-1', layer: 'L1', kind: 'work_fact', priority: 0, text: '常驻与召回重叠的正文',
+  }
+  const ONLY_OPTIONAL: RecallResultItem = {
+    id: 'opt-2', layer: 'L1', kind: 'work_fact', priority: 0, text: '只属可选层的正文',
+  }
+
+  function wireOverlap(readFacts: () => Promise<readonly SkeletonFact[]>) {
+    const host = makeHost()
+    const store = createInjectionStore()
+    const recall = {
+      embeddingEnabled: false,
+      embedQuery: async () => null,
+      async recall(): Promise<RecallCoreResult> {
+        return { total: 2, results: [DUPLICATE, ONLY_OPTIONAL], degraded: true, hint: '' }
+      },
+    } as unknown as MemoryRecallStore
+    wireInjection(host.ctx, {
+      store,
+      recallStore: recall,
+      resolved: RESOLVED,
+      skeleton: { readFacts, capTokens: () => 2000 },
+    })
+    const listener = host.listeners.find((entry) => entry.event === 'agent/pre-step')!.listener
+    return { host, store, listener }
+  }
+
+  function providerText(host: ReturnType<typeof makeHost>, name: string): string {
+    const entry = host.contexts.find((context) => context.name === name)
+    if (typeof entry?.text !== 'function') throw new Error(`未注册 context: ${name}`)
+    return (entry.text as (context: unknown) => string)({ agent: { session: { id: 's-f01' } } })
+  }
+
+  it('重叠 id 只出现在常驻层；可选层只注入非成员', async () => {
+    const { host, listener } = wireOverlap(async () => [{
+      id: 'dup-1',
+      layer: 'L1',
+      kind: 'work_fact',
+      priority: -1,
+      text: '常驻层里的同 id 事实',
+      recordedAt: '2026-11-17T00:00:00.000Z',
+    }])
+    const next = vi.fn(async () => DEFAULT_DECISION)
+
+    await listener(PAYLOAD, next)
+
+    // 常驻层注入的是骨架事实。
+    expect(providerText(host, 'omw-memory-dynamic')).toContain('常驻层里的同 id 事实')
+    // 可选层只保留非成员 id。
+    const optional = providerText(host, 'omw-memory:recall')
+    expect(optional).toContain('只属可选层的正文')
+    expect(optional).not.toContain('常驻与召回重叠的正文')
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
+  it('常驻层为空 ⇒ 可选层逐字保留全部命中（矩阵 4 现状不变）', async () => {
+    const { host, listener } = wireOverlap(async () => [])
+    const next = vi.fn(async () => DEFAULT_DECISION)
+
+    await listener(PAYLOAD, next)
+
+    expect(providerText(host, 'omw-memory-dynamic')).toBe('')
+    const optional = providerText(host, 'omw-memory:recall')
+    expect(optional).toContain('常驻与召回重叠的正文')
+    expect(optional).toContain('只属可选层的正文')
+  })
+
+  it('矩阵 5：常驻层非空、可选层零命中 ⇒ 仍注入常驻层（FR-9 / AD-8）', async () => {
+    const host = makeHost()
+    const store = createInjectionStore()
+    const recall = {
+      embeddingEnabled: false,
+      embedQuery: async () => null,
+      async recall(): Promise<RecallCoreResult> {
+        return { total: 0, results: [], degraded: true, hint: '' }
+      },
+    } as unknown as MemoryRecallStore
+    wireInjection(host.ctx, {
+      store,
+      recallStore: recall,
+      resolved: RESOLVED,
+      skeleton: {
+        readFacts: async () => [{
+          id: 'pin-m5',
+          layer: 'L1',
+          kind: 'work_fact',
+          priority: -1,
+          text: '常驻层仍要注入的强规则',
+          recordedAt: '2026-11-17T00:00:00.000Z',
+        }],
+        capTokens: () => 2000,
+      },
+    })
+    const listener = host.listeners.find((entry) => entry.event === 'agent/pre-step')!.listener
+
+    await listener(PAYLOAD, vi.fn(async () => DEFAULT_DECISION))
+
+    expect(providerText(host, 'omw-memory-dynamic')).toContain('常驻层仍要注入的强规则')
+    expect(providerText(host, 'omw-memory:recall')).toBe('')
+    expect(store.read('s-f01')?.status).toBe('skipped')
+  })
+
+  it('矩阵 9 / T5：骨架渲染计数进入 lastAlwaysOn（status 的 always_on 数据源）', async () => {
+    const { store, listener } = (() => {
+      const host = makeHost()
+      const store = createInjectionStore()
+      wireInjection(host.ctx, {
+        store,
+        recallStore: makeRecall(),
+        resolved: RESOLVED,
+        skeleton: {
+          readFacts: async () => [
+            { id: 'pin', layer: 'L1', kind: 'work_fact', priority: -1, text: '强规则', recordedAt: '2026-11-17T00:00:00.000Z' },
+          ],
+          capTokens: () => 2000,
+        },
+      })
+      const listener = host.listeners.find((entry) => entry.event === 'agent/pre-step')!.listener
+      return { store, listener }
+    })()
+
+    await listener(PAYLOAD, vi.fn(async () => DEFAULT_DECISION))
+
+    const summary = store.readLastAlwaysOn()
+    expect(summary).toMatchObject({
+      kept: 1,
+      keptInviolable: 1,
+      overBudget: false,
+      truncated: false,
+    })
+    expect(summary?.tokens).toBeGreaterThan(0)
+    // 未渲染过 ⇒ undefined（status 只打 enabled=true，不编造计数）。
+    expect(createInjectionStore().readLastAlwaysOn()).toBeUndefined()
+  })
+})

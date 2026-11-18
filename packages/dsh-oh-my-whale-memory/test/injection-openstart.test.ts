@@ -112,6 +112,8 @@ function makeGenerator(args: {
   readonly route?: OpenstartRoute | null
   /** Story 8.6 / T4：注入口净化开关（缺省 = 模块默认）。 */
   readonly purify?: PurifyOptions
+  /** Story 3.4 / T4：常驻层已收集的 id 集（缺省 = 空集，不排除任何候选）。 */
+  readonly excludeAlwaysOnIds?: (sessionKey: string) => ReadonlySet<string>
 }) {
   const store = args.store ?? createInjectionStore()
   const { port, calls: recallCalls, embedCalls } = makeRecall(args.recallItems ?? [L2_ITEM, L1_ITEM], args.embeddingEnabled ?? true)
@@ -124,6 +126,7 @@ function makeGenerator(args: {
     timeoutMs: args.timeoutMs,
     logger: args.logger ?? { warn: vi.fn() },
     ...(args.purify === undefined ? {} : { purify: args.purify }),
+    ...(args.excludeAlwaysOnIds === undefined ? {} : { excludeAlwaysOnIds: args.excludeAlwaysOnIds }),
   })
   return { store, generate, recallCalls, embedCalls }
 }
@@ -519,5 +522,50 @@ describe('Story 8.6 / T4：注入口净化（矩阵行 11）', () => {
     await generate(payload('s-purify-off'))
 
     expect(store.textFor('s-purify-off')).toContain('Let me…')
+  })
+})
+
+/**
+ * Story 3.4 / T4、AD-39：可选层 `recall(top-8)` 结果按 id 排除常驻层成员。
+ * 同 id 只出现在常驻层、不重复注入/计预算（矩阵 7）；空集时行为与现状逐字一致（矩阵 4）。
+ */
+describe('Story 3.4 / T4：可选层排除常驻层成员', () => {
+  it('重叠 id 被过滤，其余候选照常注入（不重复注入）', async () => {
+    const summary = JSON.stringify({ summary: '开局摘要', evidence_ids: ['l2-1', 'l1-1'] })
+    const { llm } = makeLlm(replyWith(summary))
+    const { store, generate } = makeGenerator({
+      llm,
+      recallItems: [L2_ITEM, L1_ITEM, L1_ONLY],
+      excludeAlwaysOnIds: () => new Set(['l1-1']),
+    })
+
+    await generate(payload('s-t4'))
+
+    const text = store.textFor('s-t4')
+    expect(text).toContain('用户偏好 ESM')
+    expect(text).toContain('只有 L1')
+    // 常驻层成员不出现在可选层注入文本里。
+    expect(text).not.toContain('证据原文 A')
+  })
+
+  it('全部命中都属常驻层 ⇒ 可选层零注入（skipped，常驻层另行注入）', async () => {
+    const { store, generate } = makeGenerator({
+      recallItems: [L1_ITEM],
+      excludeAlwaysOnIds: () => new Set(['l1-1']),
+    })
+
+    await generate(payload('s-t4-all'))
+
+    expect(store.read('s-t4-all')?.status).toBe('skipped')
+    expect(store.textFor('s-t4-all')).toBe('')
+  })
+
+  it('缺省不排除任何 id ⇒ 行为与现状逐字一致', async () => {
+    const { llm } = makeLlm(replyWith(SUMMARY_JSON))
+    const { store, generate } = makeGenerator({ llm, recallItems: [L2_ITEM, L1_ITEM] })
+
+    await generate(payload('s-t4-none'))
+
+    expect(store.textFor('s-t4-none')).toContain('证据原文 A')
   })
 })

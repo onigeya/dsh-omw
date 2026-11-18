@@ -146,6 +146,16 @@ export interface SkeletonRender {
   readonly kept: number
   /** 是否因预算丢弃/截断过事实。 */
   readonly truncated: boolean
+  /**
+   * Story 3.4 / T3、AD-39：保留的 `priority === -1` 事实条数（不可裁集合成员）。
+   * 即使超预算也全保留，因此这是「常驻人设层里强规则」的可见计数。
+   */
+  readonly keptInviolable: number
+  /**
+   * Story 3.4 / T3、AD-39：是否因 `priority === -1` 集合（或最终文本）超出 `alwaysOnTokenCap`
+   * 而超预算。`-1` 不可裁 ⇒ 超预算时仍全保留并在此标 true（矩阵 2/3）。
+   */
+  readonly overBudget: boolean
 }
 
 /**
@@ -155,7 +165,9 @@ export interface SkeletonRender {
  * （独立首行，与骨架事实行不混排）。两块共享同一预算：骨架先渲染，accepted 只用剩余额度；
  * 剩余不足一行即整块丢弃并标 `truncated`。空集合 ⇒ `text: ''`（矩阵 8：不占预算、宿主不产消息）。
  *
- * `accepted` 缺省为空 ⇒ 输出与 Story 8.5 逐字一致（既有钉死断言不受影响）。
+ * Story 3.4 / T2、AD-39：`priority === -1` 的条目**不得被预算截断**（即使总超预算也全保留），
+ * 并计入 `keptInviolable` / 在超预算时标 `overBudget`；非 `-1` 条目按既有顺序照常截断
+ * （矩阵 2/3）。`accepted` 缺省为空 ⇒ 输出与 Story 8.5 逐字一致（既有钉死断言不受影响）。
  */
 export function renderSkeleton(
   facts: readonly SkeletonFact[],
@@ -165,35 +177,44 @@ export function renderSkeleton(
   const ordered = orderSkeletonFacts(facts)
   const knowledge = orderAcceptedKnowledge(accepted)
   if (ordered.length === 0 && knowledge.length === 0) {
-    return { text: '', tokens: 0, kept: 0, truncated: false }
+    return { text: '', tokens: 0, kept: 0, truncated: false, keptInviolable: 0, overBudget: false }
   }
   const cap = typeof capTokens === 'number' && Number.isFinite(capTokens) && capTokens > 0
     ? Math.trunc(capTokens)
     : 0
-  if (cap === 0) return { text: '', tokens: 0, kept: 0, truncated: true }
 
   const lines: string[] = ordered.length > 0 ? [SKELETON_HEADER] : [SELF_KNOWLEDGE_HEADER]
   let tokens = 0
   let kept = 0
+  let keptInviolable = 0
   let truncated = false
   for (const fact of ordered) {
-    const remaining = cap - tokens
-    if (remaining < SKELETON_MIN_LINE_TOKENS) {
-      truncated = true
-      break
+    const isInviolable = fact.priority === -1
+    if (!isInviolable) {
+      const remaining = cap - tokens
+      if (remaining < SKELETON_MIN_LINE_TOKENS) {
+        truncated = true
+        break
+      }
+      const body = truncateToTokenCap(fact.text, remaining)
+      if (body.text === '') {
+        truncated = true
+        break
+      }
+      lines.push(`- [${fact.layer}] ${fact.id}: ${body.text}`)
+      tokens += estimateTokens(body.text)
+      kept += 1
+      if (body.truncated) {
+        truncated = true
+        break
+      }
+      continue
     }
-    const body = truncateToTokenCap(fact.text, remaining)
-    if (body.text === '') {
-      truncated = true
-      break
-    }
-    lines.push(`- [${fact.layer}] ${fact.id}: ${body.text}`)
-    tokens += estimateTokens(body.text)
+    // `priority === -1`：不可裁，整条保留（即使让总 tokens 超预算）。
+    lines.push(`- [${fact.layer}] ${fact.id}: ${fact.text}`)
+    tokens += estimateTokens(fact.text)
     kept += 1
-    if (body.truncated) {
-      truncated = true
-      break
-    }
+    keptInviolable += 1
   }
   if (knowledge.length > 0 && !truncated) {
     const remaining = cap - tokens
@@ -222,31 +243,54 @@ export function renderSkeleton(
       }
     }
   }
+  const overBudget = tokens > cap
   // 一个成员都放不下 ⇒ 空串（不注入只有首行、没有内容的消息；与「空骨架不占预算」同口径）。
-  if (kept === 0) return { text: '', tokens: 0, kept: 0, truncated: true }
-  return { text: lines.join('\n'), tokens, kept, truncated }
+  if (kept === 0) {
+    return { text: '', tokens: 0, kept: 0, truncated: true, keptInviolable: 0, overBudget: false }
+  }
+  return { text: lines.join('\n'), tokens, kept, truncated, keptInviolable, overBudget }
 }
 
 /** 每会话骨架文本的进程内缓存（与注入状态机同键；不持久化）。 */
 export interface SkeletonStore {
   textFor(sessionKey: string): string
-  set(sessionKey: string, text: string): void
+  /**
+   * Story 3.4 / T4、AD-39：写入渲染文本，并记录本次常驻层**已收集**的成员 id
+   * （骨架事实 + accepted 自省）。默认空集 = 无常驻层成员（可选层照旧不排除任何候选）。
+   */
+  set(sessionKey: string, text: string, ids?: readonly string[]): void
   read(sessionKey: string): { readonly text: string } | undefined
+  /**
+   * Story 3.4 / T4：本会话常驻层已收集的 id 集（只用于可选层按 id 去重，不做语义去重）。
+   * 未刷新过 / 刷新失败 / 常驻层关闭 ⇒ 空集。
+   */
+  idsFor(sessionKey: string): ReadonlySet<string>
   reset(sessionKey: string): void
 }
 
+/** 每会话记录：渲染文本 + 常驻层已收集的 id 集。 */
+interface SkeletonRecord {
+  readonly text: string
+  readonly ids: ReadonlySet<string>
+}
+
+const EMPTY_IDS: ReadonlySet<string> = new Set()
+
 export function createSkeletonStore(): SkeletonStore {
-  const records = new Map<string, string>()
+  const records = new Map<string, SkeletonRecord>()
   return {
     textFor(sessionKey) {
-      return records.get(sessionKey) ?? ''
+      return records.get(sessionKey)?.text ?? ''
     },
-    set(sessionKey, text) {
-      records.set(sessionKey, text)
+    set(sessionKey, text, ids) {
+      records.set(sessionKey, { text, ids: ids === undefined ? EMPTY_IDS : new Set(ids) })
     },
     read(sessionKey) {
-      const text = records.get(sessionKey)
-      return text === undefined ? undefined : { text }
+      const record = records.get(sessionKey)
+      return record === undefined ? undefined : { text: record.text }
+    },
+    idsFor(sessionKey) {
+      return records.get(sessionKey)?.ids ?? EMPTY_IDS
     },
     reset(sessionKey) {
       records.delete(sessionKey)
@@ -273,6 +317,11 @@ export interface SkeletonRefresherOptions {
    * Story 11.3 起同一净化也作用于 accepted 自省副本（同一注入边界，不留第二条回注路径）。
    */
   readonly purifyOptions?: () => PurifyOptions
+  /**
+   * Story 3.4 / T5：每次成功渲染后回报一次渲染结果（计数与预算标记），供
+   * `/memory status` 的 `always_on:` 行读取。缺省 = 不回报（既有装配逐字不变）。
+   */
+  readonly onRendered?: (render: SkeletonRender) => void
 }
 
 /** 净化账本的聚合形态（与 `context/purify-ledger.ts` 的输入同形）。 */
@@ -351,7 +400,11 @@ export function createSkeletonRefresher(
       const purified = purifyCopies(facts, purifyOptions)
       const purifiedAccepted = purifyCopies(accepted, purifyOptions)
       const rendered = renderSkeleton(purified.items, options.capTokens(), purifiedAccepted.items)
-      options.store.set(sessionKey, rendered.text)
+      // Story 3.4 / T4：常驻层已收集的 id 集（骨架事实 + accepted 自省，只按 id，不做语义去重）。
+      const collectedIds = [...purified.items.map((fact) => fact.id), ...purifiedAccepted.items.map((fact) => fact.id)]
+      options.store.set(sessionKey, rendered.text, collectedIds)
+      // Story 3.4 / T5：渲染计数回报（`always_on:` 行的数据源）。
+      options.onRendered?.(rendered)
       const ledger = mergePurifyLedgers(purified.ledger, purifiedAccepted.ledger)
       if (ledger !== null) {
         void recordPurifyRun(

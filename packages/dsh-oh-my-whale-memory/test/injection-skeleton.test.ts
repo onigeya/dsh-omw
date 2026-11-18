@@ -79,7 +79,14 @@ function makeHost(): { host: InjectionPromptHost; sections: Captured[]; contexts
 
 describe('矩阵 8：骨架为空 ⇒ 空串、不占预算', () => {
   it('空集合渲染空串（tokens 0、kept 0）', () => {
-    expect(renderSkeleton([], 2000)).toEqual({ text: '', tokens: 0, kept: 0, truncated: false })
+    expect(renderSkeleton([], 2000)).toEqual({
+      text: '',
+      tokens: 0,
+      kept: 0,
+      truncated: false,
+      keptInviolable: 0,
+      overBudget: false,
+    })
   })
 
   it('上限为 0/非法 ⇒ 空串 + truncated（不产出无预算内容）', () => {
@@ -134,23 +141,54 @@ describe('模式 9：超预算按稳定顺序截断（禁令 / instruction 优�
     expect(rendered.kept).toBe(2)
   })
 
-  it('单条超预算 ⇒ 截断该条并停止（含省略号，不劈句）', () => {
-    const long = fact('long', '很长的规则。'.repeat(100), { priority: -1 })
+  it('单条超预算（非 -1）⇒ 截断该条并停止（含省略号，不劈句）', () => {
+    const long = fact('long', '很长的规则。'.repeat(100), { kind: 'instruction' })
     const rendered = renderSkeleton([long], 40)
     expect(rendered.text.endsWith('…')).toBe(true)
     expect(rendered.tokens).toBeLessThanOrEqual(40)
     expect(rendered.truncated).toBe(true)
     expect(rendered.kept).toBe(1)
+    expect(rendered.keptInviolable).toBe(0)
+    expect(rendered.overBudget).toBe(false)
   })
 
-  it('剩余额度低于最小行 ⇒ 不产生碎片行（直接停）', () => {
-    const first = fact('first', 'a'.repeat(40), { priority: -1 })
-    const second = fact('second', '第二条规定', { priority: -1 })
+  it('剩余额度低于最小行（非 -1）⇒ 不产生碎片行（直接停）', () => {
+    const first = fact('first', 'a'.repeat(40), { kind: 'instruction' })
+    const second = fact('second', '第二条规定', { kind: 'instruction' })
     const cap = estimateTokens(first.text) + SKELETON_MIN_LINE_TOKENS - 1
     const rendered = renderSkeleton([first, second], cap)
     expect(rendered.text).toContain('first')
     expect(rendered.text).not.toContain('second')
     expect(rendered.truncated).toBe(true)
+    expect(rendered.overBudget).toBe(false)
+  })
+
+  it('矩阵 2：priority=-1 超预算 ⇒ 全保留、不截断，标 overBudget', () => {
+    const pin = fact('pin', '很长的禁令。'.repeat(100), { priority: -1 })
+    const rendered = renderSkeleton([pin], 40)
+    // Story 3.4 / AC:990：-1 条目本身不裁，即使总 tokens 超预算。
+    expect(rendered.text).toContain('很长的禁令。')
+    expect(rendered.text.endsWith('…')).toBe(false)
+    expect(rendered.tokens).toBeGreaterThan(40)
+    expect(rendered.truncated).toBe(false)
+    expect(rendered.kept).toBe(1)
+    expect(rendered.keptInviolable).toBe(1)
+    expect(rendered.overBudget).toBe(true)
+  })
+
+  it('矩阵 3：-1 全保留，普通事实按序截断；-1 不超预算时 overBudget=false', () => {
+    const pin = fact('pin', '不提交不推送', { priority: -1 })
+    const first = fact('first', '甲'.repeat(40), { kind: 'instruction' })
+    const second = fact('second', '乙'.repeat(40), { kind: 'instruction' })
+    const cap = estimateTokens(pin.text) + estimateTokens(first.text)
+    const rendered = renderSkeleton([pin, first, second], cap)
+    const lines = rendered.text.split('\n')
+    expect(lines[1]).toContain('pin')
+    expect(rendered.text).toContain('first')
+    expect(rendered.text).not.toContain('second')
+    expect(rendered.keptInviolable).toBe(1)
+    expect(rendered.truncated).toBe(true)
+    expect(rendered.overBudget).toBe(false)
   })
 
   it('同输入两次渲染逐字相同（前缀稳定的确定性前提）', () => {
@@ -379,5 +417,71 @@ describe('Story 8.6 / T4：骨架回注前净化（注入口）', () => {
     await refresh('s1')
 
     expect(store.textFor('s1')).toContain('Let me…')
+  })
+})
+
+/**
+ * Story 3.4 / T4、T5、AD-39：常驻层 id 集（供可选层按 id 去重）与渲染计数回报。
+ * 矩阵 8（legacy persona 经 `priority=-1` 进常驻层）与矩阵 9 的状态单行数据源。
+ */
+describe('Story 3.4：常驻层 id 集与渲染计数（T4 / T5）', () => {
+  it('矩阵 8：legacy persona 与 user_portrait 都按 priority=-1 进常驻层（id 集含两者）', () => {
+    const store = createSkeletonStore()
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [
+        fact('legacy-persona', '旧 persona 的 -1 强规则', { kind: 'persona', priority: -1 }),
+        fact('portrait', '新 user_portrait 的 -1 强规则', { kind: 'user_portrait', priority: -1 }),
+      ],
+      capTokens: () => 2000,
+    })
+
+    return refresh('s1').then(() => {
+      // 常驻层 id 集 = 骨架事实 + accepted 自省（只按 id，不做语义去重）。
+      expect(store.idsFor('s1').has('legacy-persona')).toBe(true)
+      expect(store.idsFor('s1').has('portrait')).toBe(true)
+    })
+  })
+
+  it('矩阵 9：onRendered 回报 SkeletonRender 的计数（kept / keptInviolable / overBudget / truncated / tokens）', async () => {
+    const store = createSkeletonStore()
+    const rendered = vi.fn()
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => [
+        fact('pin', '不推送', { priority: -1 }),
+        fact('plain', '普通', {}),
+      ],
+      capTokens: () => 2000,
+      onRendered: rendered,
+    })
+
+    await refresh('s1')
+
+    expect(rendered).toHaveBeenCalledTimes(1)
+    const report = rendered.mock.calls[0]?.[0] as { kept: number; keptInviolable: number; overBudget: boolean; truncated: boolean; tokens: number }
+    expect(report.kept).toBe(2)
+    expect(report.keptInviolable).toBe(1)
+    expect(report.overBudget).toBe(false)
+    expect(report.truncated).toBe(false)
+  })
+
+  it('矩阵 6：同一会话重复刷新常驻层区块字节稳定（会话内缓存，INV-1）', async () => {
+    const store = createSkeletonStore()
+    const facts: SkeletonFact[] = [
+      fact('pin', '不推送', { priority: -1 }),
+    ]
+    const refresh = createSkeletonRefresher({
+      store,
+      readFacts: async () => facts,
+      capTokens: () => 2000,
+    })
+
+    await refresh('s1')
+    const first = store.textFor('s1')
+    await refresh('s1')
+    const second = store.textFor('s1')
+    expect(second).toBe(first)
+    expect(store.idsFor('s1').size).toBe(1)
   })
 })

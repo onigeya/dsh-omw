@@ -64,12 +64,36 @@ export interface InjectionStore {
   setLastInjection(summary: LastInjectionSummary): void
   /** 最近一次注入摘要；从未注入过返回 undefined（status 渲染「未知」而不是 0）。 */
   readLastInjection(): LastInjectionSummary | undefined
+  /**
+   * Story 3.4 / T5：记录最近一次常驻层渲染的观测摘要（`/memory status` 的 `always_on:` 行）。
+   */
+  setLastAlwaysOn(summary: LastAlwaysOnSummary): void
+  /** 最近一次常驻层渲染摘要；从未组装过返回 undefined（status 只打 `enabled`，不编造计数）。 */
+  readLastAlwaysOn(): LastAlwaysOnSummary | undefined
+}
+
+/**
+ * Story 3.4 / T3、T5、AD-39：最近一次常驻层渲染的计数摘要（进程内、不持久化，不含任何正文）。
+ * 数据源是 `renderSkeleton` 的返回值，字段与 `SkeletonRender` 的计数一一对应。
+ */
+export interface LastAlwaysOnSummary {
+  /** 实际渲染的成员数（骨架事实 + accepted 自省）。 */
+  readonly kept: number
+  /** 保留的 `priority === -1` 事实条数（不可裁集合，矩阵 2）。 */
+  readonly keptInviolable: number
+  /** true = 不可裁集合本身让常驻层超出 `alwaysOnTokenCap`（仍然全保留，矩阵 2/3）。 */
+  readonly overBudget: boolean
+  /** true = 因预算丢弃/截断过非 `-1` 成员（矩阵 3）。 */
+  readonly truncated: boolean
+  /** 计入预算的正文 tokens。 */
+  readonly tokens: number
 }
 
 /** 构造每会话注入状态存储（进程内 Map；键数受活跃/历史会话数约束）。 */
 export function createInjectionStore(): InjectionStore {
   const records = new Map<string, InjectionRecord>()
   let last: LastInjectionSummary | undefined
+  let lastAlwaysOn: LastAlwaysOnSummary | undefined
   return {
     read(sessionKey) {
       return records.get(sessionKey)
@@ -97,6 +121,13 @@ export function createInjectionStore(): InjectionStore {
     },
     readLastInjection() {
       return last
+    },
+    // Story 3.4 / T5：常驻层渲染计数（status 的 `always_on:` 行）。
+    setLastAlwaysOn(summary) {
+      lastAlwaysOn = summary
+    },
+    readLastAlwaysOn() {
+      return lastAlwaysOn
     },
   }
 }

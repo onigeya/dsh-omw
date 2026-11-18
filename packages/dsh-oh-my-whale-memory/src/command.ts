@@ -29,7 +29,7 @@ import {
   isMemoryPriority,
 } from './shared/memory-vocab.js'
 import { summarizeMemoryText } from './shared/summarize.js'
-import type { LastInjectionSummary } from './injection/state.js'
+import type { LastInjectionSummary, LastAlwaysOnSummary } from './injection/state.js'
 import type { PersonaStatus } from './persona/spec.js'
 import { RECALL_DEFAULT_LIMIT } from './recall/core.js'
 
@@ -354,6 +354,17 @@ export interface MemoryStatusSnapshot {
    * 缺省按 true 处理（既有夹具无需改动即向后兼容）。
    */
   readonly injectionEnabled?: boolean
+  /**
+   * Story 3.4 / T5、AD-39：常驻人设层总开关（Config `alwaysOnEnabled`）。`undefined` = 调用方
+   * 未提供 ⇒ 不渲染 `always_on:` 行（既有逐行输出逐字不变）；`false` ⇒ 只输出
+   * `always_on: disabled`（唯一允许的简写形态）。
+   */
+  readonly alwaysOnEnabled?: boolean
+  /**
+   * Story 3.4 / T5：最近一次常驻层渲染的计数（进程内，不含正文）。`null`/缺省 = 本实例尚未
+   * 组装常驻层 ⇒ 只打 `enabled=true`（缺项不打印，不编造计数）。
+   */
+  readonly alwaysOn?: LastAlwaysOnSummary | null
   /**
    * Story 11.2 / T5：Persona Spec 静态 section 的三态。`undefined` = 调用方未提供（不渲染该行，
    * 既有逐行输出逐字不变）；`null` = 未启用 / 未批准 / 空正文 ⇒ `disabled(awaiting-approval)`；
@@ -1048,6 +1059,8 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   // Story 3.3 / B4：开局注入的可见性（末尾追加，既有行逐字不动）。恒打印一行，
   // 让「Config 关闭」「从未注入」「已注入」三态都可断言；预算超限再追加一行（INV-2 提示）。
   lines.push(...renderInjectionStatusLines(snapshot))
+  // Story 3.4 / T5：常驻人设层行（紧随注入面；缺省不追加，既有钉死块逐字不变）。
+  lines.push(...renderAlwaysOnStatusLines(snapshot))
   // Story 11.2 / T5：Persona Spec 的可见性（紧随注入面；缺省不追加，既有钉死块逐字不变）。
   lines.push(...renderPersonaStatusLines(snapshot))
   // Story 11.3 / T6：Self-Knowledge 计数行（紧随 persona；缺省不追加，既有钉死块逐字不变）。
@@ -1326,6 +1339,32 @@ function renderInjectionStatusLines(snapshot: MemoryStatusSnapshot): string[] {
     lines.push('injection: 预算超限（不可删集合先保留）')
   }
   return lines
+}
+
+/**
+ * `always_on:` 行（Story 3.4 / T5、AD-39：常驻人设层与召回解耦）。
+ *
+ * - 缺省（`alwaysOnEnabled === undefined`）⇒ 不渲染该行，既有钉死块逐字不变；
+ * - `alwaysOnEnabled=false` ⇒ 只输出 `always_on: disabled`（唯一允许的简写形态，矩阵 1）；
+ * - 开启且有渲染观测 ⇒ `enabled=true kept=.. keptInviolable=.. overBudget=.. truncated=.. tokens=..`
+ *   （`keptInviolable` / `overBudget` 是 T2/T3 的可见计数；矩阵 2/3）；
+ * - 开启但尚未组装（`alwaysOn` 为 null/缺省）⇒ 只打 `enabled=true`（缺项不打印，不编造计数）。
+ */
+function renderAlwaysOnStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  if (snapshot.alwaysOnEnabled === undefined) return []
+  if (!snapshot.alwaysOnEnabled) return ['always_on: disabled']
+  const parts = ['enabled=true']
+  const view = snapshot.alwaysOn
+  if (view !== null && view !== undefined) {
+    parts.push(
+      `kept=${view.kept}`,
+      `keptInviolable=${view.keptInviolable}`,
+      `overBudget=${view.overBudget}`,
+      `truncated=${view.truncated}`,
+      `tokens=${view.tokens}`,
+    )
+  }
+  return [`always_on: ${parts.join(' ')}`]
 }
 
 /**

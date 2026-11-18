@@ -37,6 +37,8 @@ export const OPENSTART_LLM_TIMEOUT_MS = 3000
 export const OPENSTART_MAX_OUTPUT_TOKENS = 512
 /** 结构化输出 sentinel preamble（§14）。 */
 export const OPENSTART_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
+/** Story 3.4 / T4：无可排除 id 时的共享空集（避免每次分配）。 */
+const EMPTY_ID_SET: ReadonlySet<string> = new Set()
 
 /** 输出 schema（与 prompt 同文件保存；改 prompt 必须同步改 schema，§14）。 */
 export const OPENSTART_OUTPUT_SCHEMA = JSON.stringify({
@@ -132,6 +134,12 @@ export interface OpenstartGeneratorOptions {
    * 只净化注入副本（摘要 + 条目正文），库里的节点与观测摘要都不改（INV-1）。
    */
   readonly purify?: PurifyOptions
+  /**
+   * Story 3.4 / T4、AD-39：常驻层已收集的 id 集（骨架事实 + accepted 自省）。可选层的
+   * `recall(top-8)` 结果按 id 过滤：同 id 只出现在常驻层，不重复注入、不重复计入预算
+   * （矩阵 7）。缺省 = 空集 ⇒ 行为与现状逐字一致（矩阵 4）。
+   */
+  readonly excludeAlwaysOnIds?: (sessionKey: string) => ReadonlySet<string>
 }
 
 /** 摘要输出解析结果。 */
@@ -454,9 +462,14 @@ export function createOpenstartGenerator(
       options.store.markSkipped(key)
       return
     }
-    const results = recalled.results
+    // Story 3.4 / T4、AD-39：可选层排除常驻层成员（同 id 只出现在常驻层，不重复注入/计预算）。
+    // 常驻层为空（空集）时走原引用 ⇒ 行为与现状逐字一致（矩阵 4）。
+    const alwaysOnIds = options.excludeAlwaysOnIds?.(key) ?? EMPTY_ID_SET
+    const results = alwaysOnIds.size === 0
+      ? recalled.results
+      : recalled.results.filter((item) => !alwaysOnIds.has(item.id))
     if (results.length === 0) {
-      // 召回命中为空 ⇒ 零注入（AC:928-930；唯一允许零注入的路径）。
+      // 召回命中为空（或全部属常驻层成员）⇒ 零可选层注入（AC:928-930；唯一允许零注入的路径）。
       options.store.markSkipped(key)
       return
     }

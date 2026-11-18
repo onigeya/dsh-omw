@@ -30,6 +30,9 @@ export const MEMORY_CONFIG_DEFAULTS = {
   captureMaxTokens: 32000,
   inboxRefineConcurrency: 4,
   injectOnNewSession: true,
+  // Story 3.4 / T1、AD-39：常驻人设层的总开关（默认开）。关闭 ⇒ 零查库、零注入；
+  // 与 `injectOnNewSession`（可选层摘要）互不联动（FR-18）。
+  alwaysOnEnabled: true,
   rrfK: 60,
   retrievalTopK: 50,
   layerWeights: { l2: 0.7, l1: 0.4 },
@@ -269,6 +272,12 @@ export const Config = Schema.object({
   injectionSummaryCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.injectionSummaryCap).volatile(),
   alwaysOnTokenCap: Schema.number().default(MEMORY_CONFIG_DEFAULTS.alwaysOnTokenCap).volatile(),
   /**
+   * Story 3.4 / T1、AD-39：常驻人设层总开关（默认 **true**）。
+   * 关闭 ⇒ 跳过常驻层收集与渲染，零查库、零注入；`injectOnNewSession` 只控制可选层摘要，
+   * 两者互不联动（FR-18 / 矩阵 1）。
+   */
+  alwaysOnEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.alwaysOnEnabled).volatile(),
+  /**
    * Story 8.6 / AC:1868、FR-30：确定性净化 pass 的开关（四字段全部 `.volatile()`，
    * 运行期可覆盖，INV-12）。默认开 R1 + R3、关 R2；R1/R2 共用 `purifyMinRemainder` 安全阀。
    */
@@ -316,6 +325,11 @@ export interface RuntimeConfig {
   captureMaxTokens: number
   inboxRefineConcurrency: number
   injectOnNewSession: boolean
+  /**
+   * Story 3.4 / T1、AD-39：常驻人设层总开关（默认 true）。关闭 ⇒ 跳过常驻层收集与渲染，
+   * 零查库、零注入；与 `injectOnNewSession` 互不联动（FR-18）。
+   */
+  alwaysOnEnabled: boolean
   rrfK: number
   retrievalTopK: number
   layerWeights: { l2: number; l1: number }
@@ -524,6 +538,7 @@ export function resolveRuntimeConfig(config: {
   captureMaxTokens?: Getter<number>
   inboxRefineConcurrency?: Getter<number>
   injectOnNewSession?: Getter<boolean>
+  alwaysOnEnabled?: Getter<boolean>
   rrfK?: Getter<number>
   retrievalTopK?: Getter<number>
   layerWeights?: Getter<{ l2?: number; l1?: number }>
@@ -833,6 +848,8 @@ export function resolveRuntimeConfig(config: {
   const systemOneModel = systemOneRaw.model?.trim() || undefined
   const systemOneToken = systemOneRaw.token?.trim() || undefined
   const injectOnNewSession = read(config.injectOnNewSession ?? MEMORY_CONFIG_DEFAULTS.injectOnNewSession)
+  // Story 3.4 / T1：常驻人设层开关（默认 true，缺省不改既有行为）。
+  const alwaysOnEnabled = read(config.alwaysOnEnabled ?? MEMORY_CONFIG_DEFAULTS.alwaysOnEnabled)
   const llmProvider = read(config.llmProvider ?? undefined)
   const llmModel = read(config.llmModel ?? undefined)
 
@@ -850,6 +867,7 @@ export function resolveRuntimeConfig(config: {
     captureMaxTokens,
     inboxRefineConcurrency,
     injectOnNewSession,
+    alwaysOnEnabled,
     rrfK,
     retrievalTopK,
     layerWeights: { l2, l1 },
@@ -912,6 +930,8 @@ export interface ConfigShape {
   captureSteps: Volatile<number>
   inboxRefineConcurrency: Volatile<number>
   injectOnNewSession: Volatile<boolean>
+  /** Story 3.4 / T1：常驻人设层总开关（默认 true）。 */
+  alwaysOnEnabled: Volatile<boolean>
   rrfK: Volatile<number>
   retrievalTopK: Volatile<number>
   layerWeights: Volatile<{ l2: number; l1: number }>
