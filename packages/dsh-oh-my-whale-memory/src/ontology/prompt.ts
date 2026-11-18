@@ -29,6 +29,17 @@ export interface OntologyPromptConfig {
 
 export const DEFAULT_ONTOLOGY_PROMPT_CHAR_BUDGET = 4000
 
+/**
+ * 单行化：把标签里的控制字符与连续空白折叠为单个空格。
+ *
+ * 词表块是「每行一条」的固定形态，而 Turtle 的 `rdfs:label` 可以含换行；不清洗的话
+ * 一个恶意/手滑的 label 就能凭空插入一条 `- relation …` 伪词表行，污染抽取引导
+ * （评审 F1）。IRI 由 n3 保证不含空白，local name 来自 IRI，只有 label 需要清洗。
+ */
+function singleLineLabel(value: string): string {
+  return value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, ' ').replace(/\s+/gu, ' ').trim()
+}
+
 /** 渲染一行（固定形态：`- <kind> <IRI> <label> [domain -> range]`）。 */
 function renderEntryLine(entry: OntologyEntry): string {
   const kind = entry.kind === 'entity' ? 'type' : 'relation'
@@ -36,7 +47,8 @@ function renderEntryLine(entry: OntologyEntry): string {
     ? ''
     : ' [' + (entry.domain.length > 0 ? entry.domain.join('|') : '*') + ' -> ' +
       (entry.range.length > 0 ? entry.range.join('|') : '*') + ']'
-  return '- ' + kind + ' ' + entry.iri + ' ' + entry.label + shape
+  const label = singleLineLabel(entry.label) || entry.name
+  return '- ' + kind + ' ' + entry.iri + ' ' + label + shape
 }
 
 function compareEntries(left: OntologyEntry, right: OntologyEntry): number {
