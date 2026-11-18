@@ -39,6 +39,12 @@ export const RECALL_MAX_LIMIT = 20
 export const RECALL_MIN_LIMIT = 1
 
 /**
+ * 内部候选池上限（Story 9.3 / AD-16：粗排 top-50/路）。
+ * 只由处境条件化回路的 `poolLimit` 使用，**不改变**用户可见 `limit` 的 [1,20] 契约。
+ */
+export const RECALL_MAX_POOL_LIMIT = 50
+
+/**
  * 单条召回文本的 token 预算（spec Always 第 6 条）：超过即截断到首段 + `…`。
  * 与精炼侧「每条 ≤150 token」是不同口径：召回给的是摘要预览，256 让 Agent 一眼读懂
  * 一条记忆的主干，又不至于把一次召回塞满上下文。
@@ -125,6 +131,12 @@ export interface RecallCoreInput {
   readonly priorityWeight: number
   /** 结果条数（夹紧 [1,20]，缺省 5）。 */
   readonly limit: number
+  /**
+   * 内部候选池上限（Story 9.3 / AD-16，仅处境条件化回路传）：在用户可见 `limit` 之前
+   * 多返回一些候选给重排，夹紧到 [limit, {@link RECALL_MAX_POOL_LIMIT}]。
+   * 缺省 = 不启用（v1 行为逐字不变）。
+   */
+  readonly poolLimit?: number
   /** 层过滤（`'L1' | 'L2'`）；缺省不过滤（未指定时 L2 优先于 L1 由层权重承载）。 */
   readonly layer?: string | null
   /** 当前时刻（缺省 `new Date().toISOString()`；测试注入）。 */
@@ -147,6 +159,11 @@ export interface RecallResultItem {
   readonly truncated?: boolean
   /** 非空 `source_refs`（证据引用）；空时缺省，不出现空数组。 */
   readonly evidence?: readonly string[]
+  /**
+   * 记录时间（UTC ISO-8601）。Story 9.3 的时效性因子读它；工具/命令输出不投影该字段
+   * （逐字段映射），既有输出逐字不变。
+   */
+  readonly recordedAt?: string
 }
 
 export interface RecallCoreResult {
@@ -330,7 +347,11 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
   // 层过滤 → 标注 truncated / evidence，再 limit 截断。
   const layerFilter = input.layer?.trim()
   const filtered = layerFilter ? scored.filter((entry) => entry.candidate.layer === layerFilter) : scored
-  const limit = clampRecallLimit(input.limit)
+  // Story 9.3：内部候选池（AD-16 重排用）在用户可见 limit 之前多留候选；缺省仍按 v1 夹紧。
+  const visibleLimit = clampRecallLimit(input.limit)
+  const limit = input.poolLimit === undefined || !Number.isFinite(input.poolLimit)
+    ? visibleLimit
+    : Math.min(RECALL_MAX_POOL_LIMIT, Math.max(visibleLimit, Math.trunc(input.poolLimit)))
   // total 语义（spec D6）：limit 截断前的融合命中总数；results.length = min(limit, total)。
   // 没有命中时即 0，limit 并存时 total 才有信息量（「还有多少没显示」）。
   const total = filtered.length
@@ -344,6 +365,7 @@ export async function runRecallCore(input: RecallCoreInput): Promise<RecallCoreR
       text: preview.text,
       ...(preview.truncated ? { truncated: true } : {}),
       ...(candidate.sourceRefs.length > 0 ? { evidence: candidate.sourceRefs } : {}),
+      ...(candidate.recordedAt === '' ? {} : { recordedAt: candidate.recordedAt }),
     }
   })
 

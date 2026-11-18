@@ -339,3 +339,127 @@ describe('memory_recall execute（假 store）', () => {
     expect(generic.error).toMatchObject({ code: 'db_read_failed', message: 'driver exploded', retryable: false })
   })
 })
+
+/**
+ * Story 9.3 / T6：处境条件化召回的开关接线。
+ *
+ * 核心断言：**开关 off 时行为与改动前逐字一致**——同一调用形态、同一结果投影，
+ * `recallSituated` 一次都不调用；只有 `situatedRecallEnabled === true` 且 store 真的
+ * 提供了 `recallSituated` 时才走新链路。
+ */
+describe('Story 9.3 / T6：memory_recall 的处境链路开关', () => {
+  /** 带 deriveMessages 的 session（描述符从 session 尾部构建）。 */
+  function execWithMessages(sessionId: string, messages: readonly unknown[]): unknown {
+    return { agent: { session: { id: sessionId, deriveMessages: () => messages } } }
+  }
+
+  const SESSION_MESSAGES = [
+    { role: 'user', content: '看看 src/a.ts 的实现' },
+    { role: 'assistant', content: [{ type: 'tool-call', name: 'Read', arguments: '{"file_path":"src/a.ts"}' }] },
+  ]
+
+  it('缺省 / 显式 false：仍走 v1 `recall`，recallSituated 不调用，结果与改动前逐字一致', async () => {
+    for (const flag of [undefined, false] as const) {
+      const recallSituated = vi.fn()
+      const v1 = vi.fn(async () => ({
+        total: 1,
+        results: [HIT],
+        degraded: false,
+        hint: '混合检索（语义向量路 + 关键词路，RRF 融合排序）。',
+      }))
+      const store = makeStore({ recall: v1, recallSituated, situatedRecallEnabled: flag })
+      const value = await makeTool(store).execute({ query: 'RRF', limit: 5 })
+
+      expect(recallSituated).not.toHaveBeenCalled()
+      // v1 调用形态逐字不变：不传 descriptor / poolLimit，只传既有字段。
+      expect(v1).toHaveBeenCalledExactlyOnceWith({ query: 'RRF', queryVector: [1, 0, 0, 0], limit: 5, layer: undefined })
+      // 结果投影逐字不变（无新增字段）。
+      expect(value).toEqual({
+        query: 'RRF',
+        total: 1,
+        results: [HIT],
+        hint: '混合检索（语义向量路 + 关键词路，RRF 融合排序）。',
+      })
+    }
+  })
+
+  it('开关 true 但 store 未接线（无 recallSituated）⇒ 安全回退 v1', async () => {
+    const recall = vi.fn(async () => ({ total: 1, results: [HIT], degraded: false, hint: '混合检索' }))
+    const store = makeStore({ recall, situatedRecallEnabled: true })
+    const value = await makeTool(store).execute({ query: 'RRF' })
+    expect(value.total).toBe(1)
+    expect(recall).toHaveBeenCalledTimes(1)
+  })
+
+  it('开关 true 且接线：走 recallSituated，描述符由 session 尾部构建，结果同一投影', async () => {
+    const core = {
+      total: 1,
+      results: [HIT],
+      degraded: false,
+      hint: '处境条件化召回（原始 lane + 改写 lane 合并；重排模式：rrf）。',
+    }
+    const recall = vi.fn()
+    const recallSituated = vi.fn(async () => core)
+    const store = makeStore({ recall, recallSituated, situatedRecallEnabled: true })
+    const tool = makeTool(store, createRecallTurnQuota(10))
+    const value = await tool.execute(
+      { query: 'RRF', limit: 3, layer: 'L1' },
+      execWithMessages('s-situated', SESSION_MESSAGES),
+    )
+
+    expect(recall).not.toHaveBeenCalled()
+    expect(recallSituated).toHaveBeenCalledTimes(1)
+    const input = (recallSituated.mock.calls as unknown as Array<[{
+      query: string
+      limit: number
+      layer?: string
+      sessionId?: string
+      descriptor: unknown
+    }]>)[0]![0]
+    expect(input).toMatchObject({ query: 'RRF', limit: 3, layer: 'L1', sessionId: 's-situated' })
+    expect(input.descriptor).toMatchObject({
+      goal: '看看 src/a.ts 的实现',
+      tools: ['Read'],
+      files: ['src/a.ts'],
+    })
+    // 成功值同一投影（query / total / results / hint / degraded 的字段集不变）。
+    expect(value).toEqual({
+      query: 'RRF',
+      total: 1,
+      results: [HIT],
+      hint: core.hint,
+    })
+  })
+
+  it('开关 true：空 session ⇒ descriptor 为 null（由 store 回退 v1 并标降级，工具不自行回退）', async () => {
+    const recallSituated = vi.fn(async () => ({ total: 0, results: [], degraded: true, hint: '降级' }))
+    const store = makeStore({ recallSituated, situatedRecallEnabled: true })
+    await makeTool(store).execute({ query: 'RRF' }, execWithMessages('s-empty', []))
+    const input = (recallSituated.mock.calls as unknown as Array<[{ descriptor: unknown }]>)[0]![0]
+    expect(input.descriptor).toBeNull()
+  })
+
+  it('开关 true 时新链路抛 MemoryDbError / 其它错误 ⇒ 同一失败信封（不 throw）', async () => {
+    const typed = makeStore({
+      recallSituated: async () => {
+        throw new MemoryDbError('db_read_failed', '读取失败')
+      },
+      situatedRecallEnabled: true,
+    })
+    expect(await makeTool(typed).execute({ query: 'q' })).toMatchObject({
+      action: 'failed',
+      error: { code: 'db_read_failed', retryable: false },
+    })
+
+    const generic = makeStore({
+      recallSituated: async () => {
+        throw new Error('boom')
+      },
+      situatedRecallEnabled: true,
+    })
+    expect(await makeTool(generic).execute({ query: 'q' })).toMatchObject({
+      action: 'failed',
+      error: { code: 'db_read_failed', message: 'boom' },
+    })
+  })
+})

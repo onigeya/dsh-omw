@@ -84,6 +84,16 @@ export const MEMORY_CONFIG_DEFAULTS = {
   // Story 9.2 / AD-40：词表渲染的字符预算（AD-8 字符域，不与 token 预算换算，INV-21）。
   // 4000 是 AD-40 钉死的 v1 值；超预算整条丢弃，不截断条目内部。
   ontologyPromptCharBudget: 4000,
+  // Story 9.3 / T6、AD-16：处境条件化召回**默认关**——关闭时 memory_recall 与 v1 逐字一致。
+  situatedRecallEnabled: false,
+  // 第二段 System One 重排默认关（Alpha 端点不进硬依赖；打开后失败仍按 AD-16 降级）。
+  systemOneRerankEnabled: false,
+  // 第一段 bge-reranker 的默认模型（AD-14/16 逐字）与 top-N / 单段超时。
+  // topN=20 是 AD-16 钉死的「截到 top-20」；timeout 1200ms 与 `recall/rerank.ts` 的
+  // RERANK_STAGE_TIMEOUT_MS 同源（kernel 不得 import domain，故在此重复常量并互相注释）。
+  rerankModel: 'BAAI/bge-reranker-v2-m3',
+  rerankTopN: 20,
+  rerankTimeoutMs: 1_200,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -95,10 +105,19 @@ const EmbeddingSchema = Schema.object({
   dim: Schema.number(),
 }).default({}).volatile()
 
+/**
+ * ReRank 配置（Story 9.3 / T6、AD-16）：v1.1 由处境条件化召回消费。
+ *
+ * 子对象整体 `.volatile()`、子字段 plain（AD-11 的 volatile 嵌套约束）；`token` 必须
+ * `.role('secret')`（AD-9）。关闭 `situatedRecallEnabled` 时本块**不解析、不校验**，
+ * 缺省行为与 v1 逐字一致（Story 3.1 的 `'rerank' in resolved === false` 契约保留）。
+ */
 const RerankSchema = Schema.object({
   endpoint: Schema.string(),
   token: Schema.string().role('secret'),
   model: Schema.string(),
+  topN: Schema.number().default(MEMORY_CONFIG_DEFAULTS.rerankTopN),
+  timeoutMs: Schema.number().default(MEMORY_CONFIG_DEFAULTS.rerankTimeoutMs),
 }).default({}).volatile()
 
 const LayerWeightsSchema = Schema.object({
@@ -273,6 +292,13 @@ export const Config = Schema.object({
   ontologyGate: OntologyGateSchema,
   /** Story 9.2 / AD-40：本体输入（path）与词表渲染（allowlist + 字符预算），见上方 OntologySchema。 */
   ontology: OntologySchema,
+  /**
+   * Story 9.3 / T6：处境条件化召回总开关（默认 **false**）。
+   * 关闭时 `memory_recall` 走 v1 链路且行为逐字一致；打开后才用描述符/改写/双路/AD-16 重排。
+   */
+  situatedRecallEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.situatedRecallEnabled).volatile(),
+  /** Story 9.3 / AD-16：第二段 System One 重排开关（默认 false；失败仍按降级阶梯兜底）。 */
+  systemOneRerankEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.systemOneRerankEnabled).volatile(),
 })
 
 /**
@@ -353,6 +379,24 @@ export interface RuntimeConfig {
    * `OntologySettings` 同形，两处靠结构类型直接对接；kernel 不 import domain）。
    */
   ontology: OntologyConfig
+  /**
+   * Story 9.3 / T6：处境条件化召回（默认关）。关闭时本块与相关字段都不参与召回。
+   */
+  situatedRecallEnabled: boolean
+  /** Story 9.3 / AD-16：第二段 System One 重排（默认 false）。 */
+  systemOneRerankEnabled: boolean
+  /**
+   * Story 9.3 / T6、AD-16：第一段 bge-reranker 配置。**只在 `situatedRecallEnabled=true` 时存在**
+   * （关闭时不解析、不校验，保持 v1 的 `'rerank' in resolved === false` 契约）。
+   * `endpoint` 为空串 = 未配置（reranker 段不可用，按 AD-16 降级，不抛错）。
+   */
+  rerank?: {
+    readonly endpoint: string
+    readonly token?: string
+    readonly model: string
+    readonly topN: number
+    readonly timeoutMs: number
+  }
   warnings: string[]
 }
 
@@ -522,6 +566,16 @@ export function resolveRuntimeConfig(config: {
       promptTypes?: readonly string[]
       promptRelations?: readonly string[]
       promptCharBudget?: number
+    }>
+    /** Story 9.3 / T6：处境条件化召回开关与 AD-16 重排配置。 */
+    situatedRecallEnabled?: Getter<boolean>
+    systemOneRerankEnabled?: Getter<boolean>
+    rerank?: Getter<{
+      endpoint?: string
+      token?: string
+      model?: string
+      topN?: number
+      timeoutMs?: number
     }>
 }): RuntimeConfig {
   const warnings: string[] = []
@@ -708,6 +762,44 @@ export function resolveRuntimeConfig(config: {
       ontologySettingsRaw.promptCharBudget ?? MEMORY_CONFIG_DEFAULTS.ontologyPromptCharBudget,
     ),
   }
+  // Story 9.3 / T6、AD-16：处境条件化召回与 reranker 配置。
+  // 关闭时**不解析、不校验** rerank（保持 v1「v1 不消费不校验」与 `'rerank' in resolved` 契约）。
+  const situatedRecallEnabled = read(config.situatedRecallEnabled ?? MEMORY_CONFIG_DEFAULTS.situatedRecallEnabled) === true
+  const systemOneRerankEnabled =
+    read(config.systemOneRerankEnabled ?? MEMORY_CONFIG_DEFAULTS.systemOneRerankEnabled) === true
+  const rerankRaw = read(config.rerank ?? {}) as {
+    endpoint?: string
+    token?: string
+    model?: string
+    topN?: number
+    timeoutMs?: number
+  }
+  let rerank: RuntimeConfig['rerank']
+  if (situatedRecallEnabled) {
+    // endpoint 填了就硬校验（与 embedding.endpoint 同口径）；未配置不抛错：
+    // reranker 段不可用是配置态降级（AD-16 阶梯），由 warnings 可见。
+    const rerankEndpoint = requireHttpUrl('rerank.endpoint', rerankRaw.endpoint)
+    if (rerankEndpoint === undefined) {
+      warnings.push(
+        '处境条件化召回已开启，但 rerank.endpoint 未配置：第一段 bge-reranker 不可用，' +
+        '按 AD-16 降级为 System One-only / 纯 RRF（结果照常返回）',
+      )
+    }
+    rerank = {
+      endpoint: rerankEndpoint ?? '',
+      // token 只 trim，值本身不写日志 / 审计 / status（NFR9）。
+      token: rerankRaw.token?.trim() || undefined,
+      model: rerankRaw.model?.trim() || MEMORY_CONFIG_DEFAULTS.rerankModel,
+      topN: requirePositiveInt(
+        'rerank.topN',
+        rerankRaw.topN ?? MEMORY_CONFIG_DEFAULTS.rerankTopN,
+      ),
+      timeoutMs: requirePositiveInt(
+        'rerank.timeoutMs',
+        rerankRaw.timeoutMs ?? MEMORY_CONFIG_DEFAULTS.rerankTimeoutMs,
+      ),
+    }
+  }
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -795,6 +887,10 @@ export function resolveRuntimeConfig(config: {
     ontologyGate,
     // Story 9.2 / AD-40：本体输入 + 词表渲染（path 未配置时对象里没有该键 = off）。
     ontology,
+    // Story 9.3 / T6：处境条件化召回（默认关；关闭时 rerank 键不出现，v1 契约不变）。
+    situatedRecallEnabled,
+    systemOneRerankEnabled,
+    ...(rerank === undefined ? {} : { rerank }),
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -845,4 +941,8 @@ export interface ConfigShape {
   ontologyGate: Volatile<OntologyGateConfig>
   /** Story 9.2 / AD-40：本体路径 + 词表 allowlist + 渲染字符预算（默认 4000）。 */
   ontology: Volatile<OntologyConfig>
+  /** Story 9.3 / T6：处境条件化召回总开关（默认 false）。 */
+  situatedRecallEnabled: Volatile<boolean>
+  /** Story 9.3 / AD-16：第二段 System One 重排开关（默认 false）。 */
+  systemOneRerankEnabled: Volatile<boolean>
 }

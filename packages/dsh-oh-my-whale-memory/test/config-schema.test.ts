@@ -56,7 +56,10 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       'retrievalTopK', 'rrfK',
       // Story 11.3 / T5：反思观察写入 Self-Knowledge 候选区的开关（默认 false）。
       'selfKnowledgeCaptureEnabled',
+      // Story 9.3 / T6：处境条件化召回总开关 + System One 第二段开关（都默认 false）。
+      'situatedRecallEnabled',
       'strategyGate', 'systemOne',
+      'systemOneRerankEnabled',
     ])
   })
 
@@ -101,7 +104,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
     expect(resolved.priorityWeight.get()).toBe(0.5)
     expect(resolved.systemOne.get()).toEqual({ enabled: true })
     expect(resolved.embedding.get()).toEqual({})
-    expect(resolved.rerank.get()).toEqual({})
+    // Story 9.3 / T6：rerank 顶部有 topN/timeoutMs 默认值（AD-16：20 / 1200ms）。
+    expect(resolved.rerank.get()).toEqual({ topN: 20, timeoutMs: 1_200 })
     // Story 8.4 / AC:1713-1760：长度三带与句柄重写阈值的默认值（经验值，可覆盖）。
     expect(resolved.compactionLengthMin.get()).toBe(1200)
     expect(resolved.compactionT3Threshold.get()).toBe(8000)
@@ -602,5 +606,90 @@ describe('Story 9.2：本体输入与词表渲染配置', () => {
       ...validConfig(),
       ontology: { promptCharBudget: 120 },
     }).ontology.promptCharBudget).toBe(120)
+  })
+})
+
+/**
+ * Story 9.3 / T6、AD-16：处境条件化召回的配置与开关。
+ *
+ * - `situatedRecallEnabled` / `systemOneRerankEnabled` 默认 **false**（v1 默认召回逐字不变）；
+ * - 关闭时 `rerank` 键不解析、不校验、不出现（`'rerank' in resolved === false`，v1 契约保留）；
+ * - 打开时 `rerank.endpoint` 填了就硬校验、`rerank.topN / timeoutMs` 正整数校验；
+ * - `rerank.token` 是 secret（AD-9）；全部相关字段 `.volatile()`（AD-11）。
+ */
+describe('Story 9.3：处境条件化召回配置（T6）', () => {
+  it('situatedRecallEnabled / systemOneRerankEnabled 默认 false，且 schema 默认与 resolved 兜底同源', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    expect(schemaResolved.situatedRecallEnabled.get()).toBe(false)
+    expect(schemaResolved.systemOneRerankEnabled.get()).toBe(false)
+    expect(resolveRuntimeConfig(validConfig()).situatedRecallEnabled).toBe(false)
+    expect(resolveRuntimeConfig(validConfig()).systemOneRerankEnabled).toBe(false)
+  })
+
+  it('两个开关运行期可覆盖（volatile，INV-12）', () => {
+    const on = resolveRuntimeConfig({ ...validConfig(), situatedRecallEnabled: true, systemOneRerankEnabled: true })
+    expect(on.situatedRecallEnabled).toBe(true)
+    expect(on.systemOneRerankEnabled).toBe(true)
+  })
+
+  it('默认关时 rerank 键不出现，v1 的 `rerank in resolved === false` 契约保留', () => {
+    const resolved = resolveRuntimeConfig(validConfig())
+    expect('rerank' in resolved).toBe(false)
+    // 关闭时 rerank 里的非法值也不校验、不出现（既有第 8 行用例在开态下补足）。
+    expect(resolveRuntimeConfig({ ...validConfig(), rerank: { endpoint: 'not-a-url', topN: 0 } }))
+      .not.toHaveProperty('rerank')
+  })
+
+  it('打开时 rerank.endpoint 填了就硬校验；topN / timeoutMs 正整数校验', () => {
+    const cfg = { ...validConfig(), situatedRecallEnabled: true }
+    // endpoint 非 http(s) 抛错。
+    expect(() => resolveRuntimeConfig({ ...cfg, rerank: { endpoint: 'ftp://bad' } }))
+      .toThrowError(/rerank\.endpoint/)
+    // topN / timeoutMs 非正整数抛错。
+    for (const [field, bad] of [
+      ['topN', 0],
+      ['timeoutMs', -1],
+      ['topN', 2.5],
+      ['timeoutMs', Number.NaN],
+    ] as const) {
+      expect(() => resolveRuntimeConfig({ ...cfg, rerank: { [field]: bad } }), field + '=' + String(bad))
+        .toThrowError(new RegExp('rerank\\.' + field))
+    }
+    // 合法配置落地。
+    const ok = resolveRuntimeConfig({ ...cfg, rerank: { endpoint: 'https://r.example/v1', topN: 20, timeoutMs: 1200 } })
+    expect(ok.rerank).toMatchObject({ endpoint: 'https://r.example/v1', topN: 20, timeoutMs: 1200 })
+    expect(ok.rerank?.model).toBe('BAAI/bge-reranker-v2-m3')
+  })
+
+  it('打开但 rerank.endpoint 未配置 ⇒ 配置态降级 warning，不抛错（AD-16 阶梯）', () => {
+    const resolved = resolveRuntimeConfig({ ...validConfig(), situatedRecallEnabled: true })
+    expect(resolved.rerank?.endpoint).toBe('')
+    expect(resolved.warnings.some((warning) => warning.includes('rerank.endpoint'))).toBe(true)
+  })
+
+  it('rerank.token 是 secret；关闭时 rerank 不解析所以不出现，打开时仍可脱敏', () => {
+    const top = Config.dict as Record<string, any>
+    const rerankNode = top.rerank
+    expect(rerankNode?.dict.token.meta?.role).toBe('secret')
+
+    const on = resolveRuntimeConfig({
+      ...validConfig(),
+      situatedRecallEnabled: true,
+      rerank: { endpoint: 'https://r.example/v1', token: 'sk-reranker' },
+    })
+    expect(on.rerank?.token).toBe('sk-reranker')
+    expect(JSON.stringify(on.warnings)).not.toContain('sk-reranker')
+  })
+
+  it('全部相关字段标 volatile（否则不进 /settings 表单，AD-11）', () => {
+    const dict = Config.dict as Record<string, any>
+    for (const field of ['situatedRecallEnabled', 'systemOneRerankEnabled']) {
+      expect(dict[field]?.meta?.volatile, field).toBe(true)
+    }
+    // rerank 子对象整体 volatile，子字段 plain（不嵌套 volatile）。
+    expect(dict.rerank?.meta?.volatile).toBe(true)
+    for (const key of ['endpoint', 'token', 'model', 'topN', 'timeoutMs']) {
+      expect(dict.rerank.dict[key]?.meta?.volatile, key).toBeUndefined()
+    }
   })
 })

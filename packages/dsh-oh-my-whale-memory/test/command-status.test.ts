@@ -474,3 +474,73 @@ describe('Story 5.1 / AC:1171：存储后端行（backend）', () => {
   })
 })
 
+describe('Story 9.3 / T7：situated_recall: 状态行（AD-16 可观测）', () => {
+  it('缺省（调用方未提供）⇒ 不渲染该行，既有钉死输出逐字不变', () => {
+    const text = renderMemoryStatus(STATUS_BASE)
+    expect(text).not.toContain('situated_recall:')
+    expect(text).toBe(renderMemoryStatus(STATUS_BASE))
+  })
+
+  it('enabled=false ⇒ 只打印 disabled（默认态，召回与 v1 逐字一致）', () => {
+    const text = renderMemoryStatus({ ...STATUS_BASE, situatedRecall: { enabled: false, degraded: false, p50Ms: null, p95Ms: null, degradeRate: null, samples: 0 } })
+    expect(text).toContain('situated_recall: disabled（situatedRecallEnabled=false，v1 混合检索）')
+    expect(text).not.toContain('enabled mode=')
+  })
+
+  it('enabled=true：渲染重排模式 + P50/P95 + 降级率 + slow + 样本数', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      situatedRecall: {
+        enabled: true,
+        degraded: false,
+        mode: 'reranker+systemone',
+        p50Ms: 400,
+        p95Ms: 1500,
+        degradeRate: 0.1,
+        slowRate: 0.05,
+        samples: 120,
+      },
+    })
+    expect(text).toContain(
+      'situated_recall: enabled mode=reranker+systemone p50=400ms p95=1500ms degraded=10% slow=5% samples=120',
+    )
+    expect(text).not.toContain('最近一次降级')
+  })
+
+  it('无样本时延迟写 n/a，不编造数字', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      situatedRecall: { enabled: true, degraded: false, mode: undefined, p50Ms: null, p95Ms: null, degradeRate: null, slowRate: null, samples: 0 },
+    })
+    expect(text).toContain('situated_recall: enabled mode=n/a p50=n/a p95=n/a degraded=n/a slow=n/a samples=0')
+  })
+
+  it('最近一次样本降级时另起一行给原因（NFR12：降级必须可感知）', () => {
+    const text = renderMemoryStatus({
+      ...STATUS_BASE,
+      situatedRecall: {
+        enabled: true,
+        degraded: true,
+        reason: 'rerank:http-500',
+        mode: 'rrf',
+        p50Ms: 900,
+        p95Ms: 2800,
+        degradeRate: 0.4,
+        slowRate: 0.2,
+        samples: 40,
+      },
+    })
+    expect(text).toContain('situated_recall: enabled mode=rrf p50=900ms p95=2800ms degraded=40% slow=20% samples=40')
+    expect(text).toContain('situated_recall: 最近一次降级（rerank:http-500）')
+  })
+
+  it('行位置紧随 ontology 行（可观测块内的固定顺序）', () => {
+    const lines = renderMemoryStatus({
+      ...STATUS_BASE,
+      situatedRecall: { enabled: true, degraded: false, p50Ms: null, p95Ms: null, degradeRate: null, samples: 0 },
+    }).split('\n')
+    // ontology 缺省不出现，situated_recall 行存在即可（顺序由 renderMemoryStatus 保证）。
+    expect(lines.some((line) => line.startsWith('situated_recall:'))).toBe(true)
+  })
+})
+

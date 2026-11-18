@@ -423,6 +423,12 @@ export interface MemoryStatusSnapshot {
    * （审计表缺失 / 只读实例降级），渲染成 `n/a`，不静默报 0。
    */
   readonly ontology?: MemoryOntologyView
+  /**
+   * Story 9.3 / T7、AD-16：处境条件化召回的 `situated_recall:` 行（开关、重排模式、
+   * P50/P95、降级率、最近降级原因）。`undefined` = 调用方未提供（不渲染该行，既有输出
+   * 逐字不变）。
+   */
+  readonly situatedRecall?: MemorySituatedRecallView
 }
 
 /** Story 9.1：本体闸门的六维丢弃桶（与 `ontology/gate.ts` 的维度键逐字一致）。 */
@@ -436,8 +442,7 @@ export interface MemoryOntologyDropCounts {
 }
 
 /** Story 9.1：`/memory status` 的 ontology 行数据（level + 逐维丢弃计数）。 */
-export interface MemoryOntologyView {
-  readonly level: 'off' | 'align' | 'strict'
+export interface MemoryOntologyView {  readonly level: 'off' | 'align' | 'strict'
   /** null = 算不出来（审计表缺失 / 只读实例），渲染 n/a；不是「0 条」。 */
   readonly drops: MemoryOntologyDropCounts | null
   /** drops=null 时的可读原因（缺省按「审计表缺失」）。 */
@@ -457,6 +462,30 @@ export interface MemoryOntologyView {
   readonly loadReason?: string
   /** Story 9.2 / FR-18：配置了本体 ⇒ 提示「改本体或档位后需重新抽取」。 */
   readonly reextractHint?: boolean
+}
+
+/**
+ * Story 9.3 / T7、AD-16：`situated_recall:` 行的视图（命令层只做格式化，不重新计算）。
+ *
+ * - `enabled=false` ⇒ 只打印 `disabled`（默认态，召回行为与 v1 逐字一致）；
+ * - `enabled=true` ⇒ 打印重排模式 + P50/P95 + 降级率 + 样本数；无样本时延迟写 `n/a`
+ *   （不编造数字）；
+ * - `degraded/reason` 是**最近一次**样本的状态，与聚合降级率分开，便于直接看到原因。
+ */
+export interface MemorySituatedRecallView {
+  readonly enabled: boolean
+  readonly degraded: boolean
+  /** 最近一次样本的降级原因（封闭前缀：rewrite:/rerank:/vector-degraded/over-soft-target/no-descriptor）。 */
+  readonly reason?: string
+  /** 最近一次样本的重排模式（reranker+systemone / reranker-only / systemone-only / rrf / fallback-v1）。 */
+  readonly mode?: string
+  readonly p50Ms: number | null
+  readonly p95Ms: number | null
+  /** 0..1（渲染成百分比）；无样本 = null。 */
+  readonly degradeRate: number | null
+  /** 超 3s 软目标的比例 0..1；无样本 = null。 */
+  readonly slowRate?: number | null
+  readonly samples: number
 }
 
 /**
@@ -1025,6 +1054,8 @@ export function renderMemoryStatus(snapshot: MemoryStatusSnapshot): string {
   lines.push(...renderSelfKnowledgeStatusLines(snapshot))
   // Story 9.1 / T7：本体闸门行（level + 逐维丢弃计数；缺省不追加，既有钉死块逐字不变）。
   lines.push(...renderOntologyStatusLines(snapshot))
+  // Story 9.3 / T7：处境条件化召回行（开关 / 重排模式 / P50·P95 / 降级率；缺省不追加）。
+  lines.push(...renderSituatedRecallStatusLines(snapshot))
   // Story 4.3：健康指标五行（D-1：全部追加在末尾）。health 缺省时一行都不加，
   // 既有钉死块因此逐字不变（矩阵行 11）。
   lines.push(...renderHealthStatusLines(snapshot))
@@ -1372,9 +1403,34 @@ function renderOntologyStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   return [parts.join(' ')]
 }
 
+/**
+ * `situated_recall:` 行（Story 9.3 / T7、AD-16）。
+ *
+ * - 缺省（undefined）：不渲染，既有逐行输出逐字不变；
+ * - `enabled=false`：只打印 disabled（默认态，召回行为与 v1 逐字一致）；
+ * - `enabled=true`：`mode` + P50/P95 + 降级率 + 样本数；无样本写 `n/a`（不编造数字）；
+ * - 最近一次样本降级时另起一行给原因（NFR12：降级必须可感知）。
+ */
+function renderSituatedRecallStatusLines(snapshot: MemoryStatusSnapshot): string[] {
+  const view = snapshot.situatedRecall
+  if (view === undefined) return []
+  if (!view.enabled) return ['situated_recall: disabled（situatedRecallEnabled=false，v1 混合检索）']
+  const formatMs = (value: number | null): string => (value === null ? 'n/a' : `${value}ms`)
+  const formatRate = (value: number | null | undefined): string =>
+    value === null || value === undefined ? 'n/a' : `${Math.round(value * 1000) / 10}%`
+  const slow = view.slowRate === undefined ? '' : ` slow=${formatRate(view.slowRate)}`
+  const lines = [
+    `situated_recall: enabled mode=${view.mode ?? 'n/a'} p50=${formatMs(view.p50Ms)} p95=${formatMs(view.p95Ms)} ` +
+    `degraded=${formatRate(view.degradeRate)}${slow} samples=${view.samples}`,
+  ]
+  if (view.degraded) {
+    lines.push(`situated_recall: 最近一次降级（${view.reason ?? '未知原因'}）`)
+  }
+  return lines
+}
+
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */
-export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {
-  return {
+export function createMemoryCommandDefinition(deps: MemoryCommandDependencies): MemoryCommandDefinition {  return {
     name: MEMORY_COMMAND_NAME,
     description: '记录与浏览长期记忆（remember / list / show / status / recall / related / forget）',
     input: {

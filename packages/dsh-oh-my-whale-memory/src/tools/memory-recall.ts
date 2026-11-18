@@ -18,8 +18,10 @@
  */
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import type { ParameterSchemaSpec, ValueSchemaSpec } from '@deepseek-ai/dsh-tools'
+import { sessionMessages } from '../capture/transcript.js'
 import { MemoryDbError } from '../db/errors.js'
 import { clampRecallLimit, type RecallCoreResult, type RecallResultItem } from '../recall/core.js'
+import { buildSituationDescriptor, buildSituationEvents, type SituationDescriptor } from '../recall/situation.js'
 import { failedEnvelope, quotaOwnerOf, toolSignalOf, type ToolFailure } from './recall-shared.js'
 import type { RecallQuota } from './recall-quota.js'
 import { summarizeMemoryText } from '../shared/summarize.js'
@@ -47,6 +49,11 @@ export const MEMORY_RECALL_TOOL_DESCRIPTION = [
  */
 export interface MemoryRecallStore {
   readonly embeddingEnabled: boolean
+  /**
+   * Story 9.3 / T6：处境条件化召回开关（Config `situatedRecallEnabled`，默认 false）。
+   * 只有 `true` 且提供 `recallSituated` 时工具才走新链路；否则 `recall` 调用形态与 v1 逐字一致。
+   */
+  readonly situatedRecallEnabled?: boolean
   /** 查询向量；`signal`（F-09）用于取消：宿主中断后 embed 立即停，不白等 4s 超时。 */
   embedQuery(query: string, signal?: AbortSignal): Promise<readonly number[] | null>
   recall(input: {
@@ -55,6 +62,20 @@ export interface MemoryRecallStore {
     readonly limit: number
     readonly layer?: string
     /** F-09：与 `embedQuery` 同一取消信号，内核在每条语句前后检查。 */
+    readonly signal?: AbortSignal
+  }): Promise<RecallCoreResult>
+  /**
+   * Story 9.3：处境条件化召回（描述符 → 改写 → 双路合并 → AD-16 重排 → 条件化排序）。
+   * 查询向量由 store 自己取（原 query 与改写 query 各一次）；描述符为 `null` 时 store
+   * 回退 v1 并标降级（矩阵 1 / 14）。缺省不提供 = 该 store 未接线新链路。
+   */
+  recallSituated?(input: {
+    readonly query: string
+    readonly limit: number
+    readonly layer?: string
+    readonly descriptor: SituationDescriptor | null
+    /** 会话 id（改写路由的回退链从 session 记录解析 provider/model）。 */
+    readonly sessionId?: string
     readonly signal?: AbortSignal
   }): Promise<RecallCoreResult>
 }
@@ -228,13 +249,29 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           '本轮召回配额已用尽（每轮召回族工具合计最多 3 次）；回合边界（turn/start、turn/end）后自动恢复，或改用 /memory recall 手动检索。',
         )
       }
-      // F-09/F-03：宿主 ToolExecutionInput.signal 是必填取消信号（用户中断 / turn 终止），
-      // 统一经共享件 `toolSignalOf` 读取后透传给 embed 与内核，中断后不再白等 embed 超时、
-      // 也不再继续跑查询。
       const signal = toolSignalOf(exec)
+      const limit = clampRecallLimit(args.limit)
+      // Story 9.3 / T6：只有开关打开且 store 接好新链路时才走处境条件化召回；
+      // 关闭时完全落到下面的 v1 分支（调用形态与结果逐字不变）。
+      if (store.situatedRecallEnabled === true && typeof store.recallSituated === 'function') {
+        const session = sessionOf(exec)
+        const descriptor = buildSituationDescriptor({ events: buildSituationEvents(sessionMessages(session)) })
+        try {
+          const core = await store.recallSituated({
+            query: args.query,
+            limit,
+            ...(args.layer === undefined ? {} : { layer: args.layer }),
+            descriptor,
+            sessionId: quotaOwnerOf(exec),
+            ...(signal === undefined ? {} : { signal }),
+          })
+          return succeededValue(args.query, core)
+        } catch (error) {
+          return failureValue(error)
+        }
+      }
       // 4) 查询向量：配置齐全才 embed；失败/异常一律降级为关键词单路（degraded: true），
       //    不因网络错误让整次检索失败（spec I/O 矩阵「召回查询 embed 失败」行）。
-      const limit = clampRecallLimit(args.limit)
       let queryVector: readonly number[] | null = null
       if (store.embeddingEnabled) {
         try {
@@ -253,23 +290,34 @@ export function createMemoryRecallTool(options: MemoryRecallToolOptions) {
           layer: args.layer,
           ...(signal === undefined ? {} : { signal }),
         })
-        const results = core.results.map(toResultEntry)
-        const succeeded: MemoryRecallSucceeded = {
-          query: args.query,
-          total: core.total,
-          results,
-          hint: core.hint,
-          ...(core.degraded ? { degraded: true } : {}),
-        }
-        return succeeded
+        return succeededValue(args.query, core)
       } catch (error) {
-        if (error instanceof MemoryDbError) {
-          return failedEnvelope(error.code, error.message, error.retryable)
-        }
-        return failedEnvelope('db_read_failed', error instanceof Error ? error.message : String(error))
+        return failureValue(error)
       }
     },
   })
+}
+
+/** 工具执行上下文里的宿主 Session（结构窄化；配额 owner 与描述符都从它取）。 */
+function sessionOf(exec: unknown): unknown {
+  return (exec as { readonly agent?: { readonly session?: unknown } } | null | undefined)?.agent?.session
+}
+
+/** 内核成功值 → 工具成功值（v1 与处境链路共用同一投影，字段集不变）。 */
+function succeededValue(query: string, core: RecallCoreResult): MemoryRecallSucceeded {
+  return {
+    query,
+    total: core.total,
+    results: core.results.map(toResultEntry),
+    hint: core.hint,
+    ...(core.degraded ? { degraded: true } : {}),
+  }
+}
+
+/** 检索失败 → canonical 失败信封（MemoryDbError 透传 code，其它兜底 db_read_failed）。 */
+function failureValue(error: unknown): MemoryRecallFailed {
+  if (error instanceof MemoryDbError) return failedEnvelope(error.code, error.message, error.retryable)
+  return failedEnvelope('db_read_failed', error instanceof Error ? error.message : String(error))
 }
 
 /** 内核条目 → 工具输出条目（readonly → 可变数组形态，evidence 只在非空时出现）。 */
