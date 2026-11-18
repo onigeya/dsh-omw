@@ -37,6 +37,10 @@ import { IOT_THINKING_PRESENT_NOTICE, detectIotThinking } from './context/purify
 import { detectCompactionOverlayGap, compactionOverlayGapWarning } from './context/compaction-gap.js'
 import { registerHandleWriter, setCompactionReadonly } from './context/handle-writer.js'
 import { createAttributionTap, type TokenMeterLike } from './context/attribution-tap.js'
+import { loadOntology } from './ontology/load.js'
+import { renderOntologyPrompt } from './ontology/prompt.js'
+import { setOntologyPromptBlock } from './ontology/runtime.js'
+import type { OntologyIndex } from './ontology/index.js'
 import { writeHandle } from './context/handles.js'
 import { foldStream } from './shared/stream-fold.js'
 import { queryRows } from './db/rows.js'
@@ -209,6 +213,14 @@ export async function apply(
   const reflectionState = createReflectionState()
   // Story 10.1：capture 装配在 access 之后；用闭包持「最近一次装配结果」给 status 读。
   let captureModeView: (() => { readonly trigger: string, readonly persistence: string }) | null = null
+  // Story 9.2 / AD-40：本体加载结果给 status 读（full/prompt/path/loadReason）。
+  let ontologyView: (() => {
+    readonly fullEntries?: number
+    readonly promptEntries?: number
+    readonly path?: string
+    readonly loadReason?: string
+    readonly reextractHint?: boolean
+  }) | null = null
   const access = createMemoryAccess({
     getDb,
     resolved,
@@ -216,6 +228,8 @@ export async function apply(
     getSystemOneClient: () => slots.systemOneClient,
     // Story 10.1：采集模式（tokens / steps(degraded)；指针持久化是否可用）。
     captureModeView: () => captureModeView?.() ?? null,
+    // Story 9.2：本体加载/渲染视图（未配置/不可用 → null 或 loadReason）。
+    ontologyView: () => ontologyView?.() ?? null,
     // Story 3.3：status 读注入观测摘要（进程内，null=本实例尚未触发注入）。
     injectionStore,
     // Story 8.1：status 的 context_ledger 行读同一个 tap 快照（null ⇒ n/a）。
@@ -359,6 +373,37 @@ export async function apply(
     ctx.logger.warn(message)
   }
 
+  // Story 9.2 / AD-31、AD-40：本体只在加载期解析一次（n3 同步 Parser），判定用全量索引、
+  // 渲染用确定性裁剪子集。失败 ⇒ 闸门不可用（fail-open + 告警 + status 可见），不静默当空本体。
+  let ontologyIndex: OntologyIndex | null = null
+  const ontologyLoad = loadOntology(profile.dir, resolved.ontology.path)
+  if (!ontologyLoad.ok) {
+    setOntologyPromptBlock(null)
+    ctx.logger.warn('本体加载失败（闸门按不可用处理，fail-open）：' + ontologyLoad.reason)
+    // 失败也把配置的路径带给 status：可见「哪个文件不可用」，不静默退化成一个 warn。
+    ontologyView = () => ({ loadReason: ontologyLoad.reason, path: ontologyLoad.path, reextractHint: true })
+  } else if (ontologyLoad.value === null) {
+    setOntologyPromptBlock(null)
+  } else {
+    const loaded = ontologyLoad.value
+    // 档位随渲染配置一起传入：off ⇒ 不渲染（epics:1987-1989），判定侧仍拿全量索引。
+    const promptBlock = renderOntologyPrompt(loaded.entries, {
+      ...resolved.ontology,
+      level: resolved.ontologyGate.level,
+    })
+    setOntologyPromptBlock(promptBlock)
+    ontologyIndex = loaded.index
+    const promptEntries = promptBlock === null
+      ? 0
+      : promptBlock.split('\n').filter((line) => line.startsWith('- ')).length
+    ontologyView = () => ({
+      fullEntries: loaded.entries.length,
+      promptEntries,
+      path: loaded.path,
+      reextractHint: true,
+    })
+  }
+
   // AC1/AC3：先抢写者锁再开库，第二个实例拿不到锁就降级只读，不阻断宿主启动；
   // 陈旧锁由 withFileLock 的接管语义处理（waitMs: 0 也不会牺牲它）。
   // 锁文件是 `<dbPath>.lock`，与库同在 `<profile>/memory/`，所以目录必须先存在；
@@ -436,6 +481,9 @@ export async function apply(
     onTeardown: () => {
       cancelReflectionTimer?.()
       cancelCompactionTimers?.()
+      // Story 9.2：词表块随实例销毁清空，不继承给下一个实例。
+      setOntologyPromptBlock(null)
+      ontologyView = null
       // Story 8.3：实例销毁后 provider 不能再写句柄（同 ctx 槽位清空，回到 fail-open）。
       registerHandleWriter(null)
       setCompactionReadonly(true)
@@ -596,6 +644,7 @@ export async function apply(
     embedding,
     gate,
     slots,
+    ontologyIndex,
   }))
   if (distill) {
     await wireStep('inbox-consumers', () => startInboxConsumers({

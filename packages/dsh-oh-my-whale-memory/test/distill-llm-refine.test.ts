@@ -8,6 +8,7 @@
 import { describe, expect, it } from 'vitest'
 import type { StreamChunk } from '@deepseek-ai/dsh-llm'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../src/db/memory'
+import { setOntologyPromptBlock } from '../src/ontology/runtime'
 import { MEMORY_KINDS } from '../src/tools/memory-remember'
 import {
   MAX_REFINE_FACT_TOKENS,
@@ -271,5 +272,43 @@ describe('token 估算', () => {
     expect(pieces.length).toBeGreaterThan(1)
     expect(pieces.every((piece) => estimateTokens(piece) <= MAX_REFINE_FACT_TOKENS)).toBe(true)
     expect(pieces.join('')).toBe(url)
+  })
+})
+
+describe('Story 9.2 / AD-40：词表块只在配置本体时插入', () => {
+  const promptText = (transcript: string, ontologyBlock?: string | null): string => {
+    const messages = ontologyBlock === undefined
+      ? buildRefineMessages(transcript)
+      : buildRefineMessages(transcript, ontologyBlock)
+    return (messages[0]?.content as Array<{ text?: string }>)[0]?.text ?? ''
+  }
+  const block = '本体词表（判定用全量，渲染用裁剪子集）：\n- type https://e.test#Person Person'
+
+  it('block=null ⇒ prompt 与未启用逐字节一致（含 sentinel/schema/原文）', () => {
+    const text = promptText('用户: 记住我偏好中文', null)
+    expect(text).not.toContain('本体词表')
+    expect(text).toContain('对话原文：\n用户: 记住我偏好中文')
+  })
+
+  it('block 非空 ⇒ 插在 schema 与对话原文之间；只出现一次', () => {
+    const text = promptText('原文', block)
+    expect(text.indexOf(block)).toBeGreaterThan(text.indexOf('输出 JSON schema：'))
+    expect(text.indexOf(block)).toBeLessThan(text.indexOf('对话原文：'))
+    expect(text.split('本体词表（判定用全量').length).toBe(2)
+  })
+
+  it('去掉插入的词表块后与 block=null 的 prompt 逐字节相同（不是「近似不变」）', () => {
+    const baseline = promptText('原文', null)
+    expect(promptText('原文', block).replace(block + '\n\n', '')).toBe(baseline)
+  })
+
+  it('apply 交接：setOntologyPromptBlock 的块被默认取用；清空后回到基线', () => {
+    try {
+      setOntologyPromptBlock(block)
+      expect(promptText('原文')).toBe(promptText('原文', block))
+    } finally {
+      setOntologyPromptBlock(null)
+    }
+    expect(promptText('原文')).toBe(promptText('原文', null))
   })
 })

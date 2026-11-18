@@ -9,6 +9,7 @@
 import type { RequestMessage, StreamChunk } from '@deepseek-ai/dsh-llm'
 import { normalizeFingerprintText } from '../db/id.js'
 import { DEFAULT_MEMORY_KIND, DEFAULT_MEMORY_PRIORITY } from '../db/memory.js'
+import { getOntologyPromptBlock } from '../ontology/runtime.js'
 import { MEMORY_KINDS, LEGACY_USER_PORTRAIT_KIND, MEMORY_PRIORITY_MAX, MEMORY_PRIORITY_MIN, normalizeMemoryKind } from '../shared/memory-vocab.js'
 import { estimateTokens, splitToBudget as splitTextToBudget } from '../shared/text-budget.js'
 import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
@@ -17,7 +18,7 @@ import { foldStream, type FoldedStream } from '../shared/stream-fold.js'
 export const REFINE_SENTINEL_PREAMBLE = 'Field descriptions are never valid values; set them to null'
 
 /** prompt 版本；改 prompt 或 schema 必须同时递增，并同步本文的 REFINE_OUTPUT_SCHEMA。 */
-export const REFINE_PROMPT_VERSION = '3'
+export const REFINE_PROMPT_VERSION = '4'
 
 /**
  * 七类标识符的枚举串（单一来源 = src/shared/memory-vocab.ts 的 MEMORY_KINDS）。
@@ -57,7 +58,7 @@ export const REFINE_INSTRUCTION = [
 ].join('\n')
 
 /** 组装一次精炼请求的消息（prompt 与 schema 同源）。 */
-export function buildRefineMessages(transcript: string): RequestMessage[] {
+export function buildRefineMessages(transcript: string, ontologyBlock: string | null = getOntologyPromptBlock()): RequestMessage[] {
   const instruction = [
     REFINE_SENTINEL_PREAMBLE,
     '',
@@ -66,6 +67,9 @@ export function buildRefineMessages(transcript: string): RequestMessage[] {
     '输出 JSON schema：',
     REFINE_OUTPUT_SCHEMA,
     '',
+    // Story 9.2 / AD-40：词表块只在配置了本体且非 off 时存在；null 时整段不插入，
+    // 保证「未配置/off ⇒ prompt 字节级不变」（prompt cache 命中）。
+    ...(ontologyBlock === null ? [] : [ontologyBlock, '']),
     '对话原文：',
     transcript,
   ].join('\n')

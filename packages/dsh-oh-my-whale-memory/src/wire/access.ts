@@ -49,6 +49,14 @@ export interface MemoryAccessOptions {
   readonly contextLedgerView?: () => AttributionSnapshot | null
   /** Story 10.1：采集模式提供者（缺省 ⇒ 不渲染 capture_trigger 行）。 */
   readonly captureModeView?: () => { readonly trigger: string, readonly persistence: string } | null
+  /** Story 9.2 / AD-40：本体加载/渲染视图（full/prompt/path/loadReason/reextractHint）。 */
+  readonly ontologyView?: () => {
+    readonly fullEntries?: number
+    readonly promptEntries?: number
+    readonly path?: string
+    readonly loadReason?: string
+    readonly reextractHint?: boolean
+  } | null
   /** 惰性取库句柄（建库之前为 undefined）。 */
   readonly getDb: () => MemoryDatabase | undefined
   /** apply 时 resolve 的配置（status 的 embeddingMode 与 System One 开关）。 */
@@ -229,12 +237,17 @@ export function createMemoryAccess(options: MemoryAccessOptions): MemoryAccess {
       // 缺表（旧库只读、未迁移 0011）⇒ null = 渲染「未知」，与 auditGap / strategyGate 同一约定。
       selfKnowledge: await countsByState(connection).catch(() => null),
       // Story 9.1 / T7：本体闸门行。off 恒打印 off；只读实例与缺表都渲染 n/a（不静默报 0）。
+      // Story 9.2 / T7：加载视图（types=full/prompt、path、不可用原因、重新抽取提示）在所有
+      // 分支都合并——只读实例同样在加载期读过本体，路径与档位对它一样是只读事实。
       ontology: await (async () => {
         const level = options.resolved.ontologyGate.level
-        if (level === 'off') return { level, drops: null }
-        if (readonlyState.readonly) return { level, drops: null, unavailableReason: '只读实例' }
+        const loaded = options.ontologyView?.() ?? null
+        const withLoaded = <T extends object>(view: T): T => (loaded === null ? view : { ...view, ...loaded })
+        if (level === 'off') return withLoaded({ level, drops: null })
+        if (readonlyState.readonly) return withLoaded({ level, drops: null, unavailableReason: '只读实例' })
         const drops = await countOntologyDrops(connection)
-        return drops === null ? { level, drops: null } : { level, drops }
+        const gateView = drops === null ? { level, drops: null } : { level, drops }
+        return withLoaded(gateView)
       })(),
       // Story 8.1：上下文归因（进程内快照）与压缩运行（落库）。
       contextLedger: mapContextLedger(options.contextLedgerView?.() ?? null),

@@ -96,6 +96,74 @@ describe('ontology 行三态', () => {
     expect(renderMemoryStatus(BASE)).not.toContain('ontology:')
   })
 
+  it('Story 9.2：types=full/prompt + path + 重新抽取提示（AD-40:765 / FR-18）', () => {
+    const text = renderMemoryStatus({
+      ...BASE,
+      ontology: {
+        level: 'align',
+        drops: {
+          nameNormalization: 0,
+          duplicateTypeDiscard: 0,
+          entityType: 0,
+          relationType: 0,
+          domainRange: 0,
+          datatype: 0,
+        },
+        fullEntries: 4,
+        promptEntries: 2,
+        path: '/p/memory/ontology.ttl',
+        reextractHint: true,
+      },
+    })
+    expect(ontologyLines(text)).toEqual([
+      'ontology: align types=4/2 name-normalization=0 duplicate-type-discard=0 entity-type=0 ' +
+      'relation-type=0 domain-range=0 datatype=0 path=/p/memory/ontology.ttl （改本体或档位后需重新抽取）',
+    ])
+  })
+
+  it('Story 9.2：闸门不可用原因可见（AD-31:437），不清零也不报 0', () => {
+    const text = renderMemoryStatus({
+      ...BASE,
+      ontology: {
+        level: 'strict',
+        drops: null,
+        loadReason: '本体文件不可读（ENOENT）：/p/memory/ontology.ttl',
+        path: '/p/memory/ontology.ttl',
+        reextractHint: true,
+      },
+    })
+    expect(ontologyLines(text)).toEqual([
+      'ontology: strict unavailable=本体文件不可读（ENOENT）：/p/memory/ontology.ttl ' +
+      'n/a（审计表缺失） path=/p/memory/ontology.ttl （改本体或档位后需重新抽取）',
+    ])
+  })
+
+  it('Story 9.2：off 档仍可显示已加载条目数与路径（不渲染词表，但事实可见）', () => {
+    const text = renderMemoryStatus({
+      ...BASE,
+      ontology: { level: 'off', drops: null, fullEntries: 3, promptEntries: 0, path: '/p/o.ttl', reextractHint: true },
+    })
+    expect(ontologyLines(text)).toEqual(['ontology: off types=3/0 path=/p/o.ttl （改本体或档位后需重新抽取）'])
+  })
+
+  it('Story 9.2：只读实例仍显示 types=full/prompt 与 path（加载只读，计数才 n/a）', () => {
+    const text = renderMemoryStatus({
+      ...BASE,
+      ontology: {
+        level: 'align',
+        drops: null,
+        unavailableReason: '只读实例',
+        fullEntries: 5,
+        promptEntries: 3,
+        path: '/p/memory/ontology.ttl',
+        reextractHint: true,
+      },
+    })
+    expect(ontologyLines(text)).toEqual([
+      'ontology: align types=5/3 n/a（只读实例） path=/p/memory/ontology.ttl （改本体或档位后需重新抽取）',
+    ])
+  })
+
   it('行位置固定在 self_knowledge 之后、health 之前（只增不改既有块）', () => {
     const text = renderMemoryStatus({
       ...BASE,

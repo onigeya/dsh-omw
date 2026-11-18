@@ -43,6 +43,8 @@ describe('Config schema 形态（AD-9 / AD-11）', () => {
       'expandCountThreshold', 'foldThresholdTokens', 'inboxRefineConcurrency', 'injectOnNewSession',
       'injectionRatio', 'injectionSingleCap', 'injectionSummaryCap', 'injectionTokenCap',
       'layerWeights', 'llmModel', 'llmProvider',
+      // Story 9.2 / AD-40：本体输入（path）与词表渲染（allowlist + 字符预算）。
+      'ontology',
       // Story 9.1 / AD-31：本体闸门档位 + 逐维覆盖（默认 level=off）。
       'ontologyGate',
       // Story 11.2 / AD-38：Persona Spec 静态 section 开关（默认 false，运行期可覆盖）。
@@ -520,5 +522,85 @@ describe('Story 11.3：Self-Knowledge 采集开关', () => {
   it('volatile 标记存在（否则不进 /settings 表单，AD-11）', () => {
     const dict = Config.dict as Record<string, any>
     expect(dict.selfKnowledgeCaptureEnabled?.meta?.volatile).toBe(true)
+  })
+})
+
+/**
+ * Story 9.2 / T4、AD-40：本体输入与词表渲染配置。
+ *
+ * 默认 off（未配置 path）、预算 4000（AD-8 字符域）、allowlist 空 = 不过滤；
+ * 预算 ≤ 0 / 非有限 / 非整数、allowlist 非字符串数组、path 非字符串一律 fail-loud
+ * （静默关裁剪或静默退化成「不过滤」都会让 prompt 预算失控）。
+ */
+describe('Story 9.2：本体输入与词表渲染配置', () => {
+  it('默认值：未配置 path（off）、空 allowlist、预算 4000', () => {
+    const schemaResolved = Config({}) as Record<string, any>
+    expect(schemaResolved.ontology.get()).toEqual({
+      promptTypes: [],
+      promptRelations: [],
+      promptCharBudget: 4000,
+    })
+    expect(resolveRuntimeConfig(validConfig()).ontology).toEqual({
+      promptTypes: [],
+      promptRelations: [],
+      promptCharBudget: 4000,
+    })
+    // 未配置 path 时对象里没有该键（`off` 的判据是缺键 / 空串，不是 undefined 占位）。
+    expect('path' in resolveRuntimeConfig(validConfig()).ontology).toBe(false)
+  })
+
+  it('子对象整体 volatile（AD-11）；子字段为 plain（不嵌套 volatile）', () => {
+    const dict = Config.dict as Record<string, any>
+    expect(dict.ontology?.meta?.volatile).toBe(true)
+    for (const key of ['path', 'promptTypes', 'promptRelations', 'promptCharBudget']) {
+      expect(dict.ontology.dict[key]?.meta?.volatile, key).toBeUndefined()
+    }
+  })
+
+  it('path 去空白；空串等价于未配置（off）', () => {
+    const filled = resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { path: '  memory/ontology.ttl  ' },
+    })
+    expect(filled.ontology.path).toBe('memory/ontology.ttl')
+    expect(resolveRuntimeConfig({ ...validConfig(), ontology: { path: '   ' } }).ontology.path).toBeUndefined()
+  })
+
+  it('allowlist 去空白、丢空项并冻结；非数组 / 非字符串 fail-loud', () => {
+    const resolved = resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { promptTypes: [' https://e.test#Person ', '  '], promptRelations: ['https://e.test#worksAt'] },
+    })
+    expect(resolved.ontology.promptTypes).toEqual(['https://e.test#Person'])
+    expect(resolved.ontology.promptRelations).toEqual(['https://e.test#worksAt'])
+    expect(Object.isFrozen(resolved.ontology.promptTypes)).toBe(true)
+    expect(() => resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { promptTypes: 'https://e.test#Person' as unknown as string[] },
+    })).toThrow(/ontology\.promptTypes/)
+    expect(() => resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { promptRelations: [1 as unknown as string] },
+    })).toThrow(/ontology\.promptRelations/)
+  })
+
+  it('预算 ≤ 0 / 非有限 / 非整数 / 非字符串 path ⇒ fail-loud（不静默关裁剪，AD-40）', () => {
+    for (const bad of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, 4000.5]) {
+      expect(() => resolveRuntimeConfig({
+        ...validConfig(),
+        ontology: { promptCharBudget: bad },
+      }), String(bad)).toThrow(/ontology\.promptCharBudget/)
+    }
+    expect(() => resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { path: 42 as unknown as string },
+    })).toThrow(/ontology\.path/)
+  })
+
+  it('预算运行期可覆盖（volatile，INV-12）', () => {
+    expect(resolveRuntimeConfig({
+      ...validConfig(),
+      ontology: { promptCharBudget: 120 },
+    }).ontology.promptCharBudget).toBe(120)
   })
 })

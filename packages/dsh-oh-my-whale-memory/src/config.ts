@@ -81,6 +81,9 @@ export const MEMORY_CONFIG_DEFAULTS = {
   // Story 9.1 / AD-31：抽取期本体约束闸门的档位。默认 **off**——默认行为与未启用本体时
   // 逐条一致（SM-9 ④ 的可回退对照）；档位只在 9.2 加载本体后才可能有可观察效果。
   ontologyGateLevel: 'off' as const,
+  // Story 9.2 / AD-40：词表渲染的字符预算（AD-8 字符域，不与 token 预算换算，INV-21）。
+  // 4000 是 AD-40 钉死的 v1 值；超预算整条丢弃，不截断条目内部。
+  ontologyPromptCharBudget: 4000,
 }
 
 /** Volatile 子对象：整体标 .volatile()，子字段保持 plain（AD-11 / Design Notes）。 */
@@ -150,13 +153,43 @@ const StrategyGateSchema = Schema.object({
  * 保证「off 产出的图与未启用本体逐条一致」）。逐维覆盖只在 align / strict 之上生效。
  */
 const OntologyGateSchema = Schema.object({
-  level: Schema.union(['off', 'align', 'strict'] as const).default(MEMORY_CONFIG_DEFAULTS.ontologyGateLevel),
+  level: Schema.union(['off', 'align', 'strict'] as const).default(MEMORY_CONFIG_DEFAULTS.ontologyGateLevel).description(
+    '本体闸门档位（off/align/strict）。改本体或改档位后需重新抽取：已产出断言的分类冻结在节点元数据里，换词表不自动重算。',
+  ),
   nameNormalization: Schema.boolean(),
   duplicateTypeDiscard: Schema.boolean(),
   entityType: Schema.boolean(),
   relationType: Schema.boolean(),
   domainRange: Schema.boolean(),
   datatype: Schema.boolean(),
+}).default({}).volatile()
+
+/**
+ * Story 9.2 / T4、AD-40：本体输入与词表渲染（全部 `.volatile()`，INV-12）。
+ *
+ * - `path`：Turtle 文件路径，**相对 profile 目录**；未配置 ⇒ `off`（不读文件、不渲染，
+ *   抽取 prompt 字节级不变）；
+ * - `promptTypes` / `promptRelations`：渲染 allowlist（IRI 列表）；空 = 不过滤；
+ * - `promptCharBudget`：渲染字符预算（AD-8 字符域，AD-40 默认 4000；≤ 0 / 非有限 / 非整数
+ *   在 `resolveRuntimeConfig` 里 fail-loud，不静默关裁剪）。
+ *
+ * 设置面提示（FR-18）：**改本体或改档位后必须重新抽取**，已产出断言的分类冻结在节点
+ * 元数据里，换词表不自动重算。该边界同时出现在 `/memory status` 的 `ontology:` 行。
+ */
+const OntologySchema = Schema.object({
+  path: Schema.string().description(
+    '本体 Turtle 文件路径（相对 profile 目录，例如 memory/ontology.ttl）；留空 = 关闭。' +
+    '改本体或改档位后需重新抽取：已产出断言的分类冻结在节点元数据里，换词表不自动重算。',
+  ),
+  promptTypes: Schema.array(Schema.string()).default([]).description(
+    '词表渲染的实体类型 IRI 白名单（空 = 不过滤）；只影响 prompt 引导，不影响判定（判定用全量本体）。',
+  ),
+  promptRelations: Schema.array(Schema.string()).default([]).description(
+    '词表渲染的关系 IRI 白名单（空 = 不过滤）；只影响 prompt 引导，不影响判定（判定用全量本体）。',
+  ),
+  promptCharBudget: Schema.number().default(MEMORY_CONFIG_DEFAULTS.ontologyPromptCharBudget).description(
+    '词表渲染的字符预算（AD-8 字符域，默认 4000）；超预算整条丢弃，不截断条目内部。',
+  ),
 }).default({}).volatile()
 
 /** FR-18 全字段 Config schema。每项 `.volatile()`；凭据标 `.role('secret')`。 */
@@ -238,6 +271,8 @@ export const Config = Schema.object({
   selfKnowledgeCaptureEnabled: Schema.boolean().default(MEMORY_CONFIG_DEFAULTS.selfKnowledgeCaptureEnabled).volatile(),
   /** Story 9.1：本体约束闸门档位 + 逐维覆盖（默认 off，见上方 OntologyGateSchema）。 */
   ontologyGate: OntologyGateSchema,
+  /** Story 9.2 / AD-40：本体输入（path）与词表渲染（allowlist + 字符预算），见上方 OntologySchema。 */
+  ontology: OntologySchema,
 })
 
 /**
@@ -313,6 +348,11 @@ export interface RuntimeConfig {
    * 结构上与 `ontology/gate.ts` 的 `OntologyGatePolicy` 同形，两处靠结构类型直接对接。
    */
   ontologyGate: OntologyGateConfig
+  /**
+   * Story 9.2 / AD-40：本体输入 + 词表渲染配置（结构上与 `ontology/load.ts` 的
+   * `OntologySettings` 同形，两处靠结构类型直接对接；kernel 不 import domain）。
+   */
+  ontology: OntologyConfig
   warnings: string[]
 }
 
@@ -328,6 +368,34 @@ export interface OntologyGateConfig {
   readonly relationType?: boolean
   readonly domainRange?: boolean
   readonly datatype?: boolean
+}
+
+/**
+ * Story 9.2 / AD-40：本体输入 + 词表渲染（已过校验的运行时形态）。
+ *
+ * `path` 相对 profile 目录；缺省 = 未配置（off）。`promptTypes` / `promptRelations` 里的
+ * 空白项在解析期被丢弃，数组恒为冻结的只读值。
+ */
+export interface OntologyConfig {
+  /** 本体 Turtle 路径（相对 profile 目录）；undefined = 未配置（off）。 */
+  readonly path?: string
+  readonly promptTypes: readonly string[]
+  readonly promptRelations: readonly string[]
+  /** 渲染字符预算（AD-8 字符域；正整数，默认 4000）。 */
+  readonly promptCharBudget: number
+}
+
+/** IRI allowlist 硬校验：必须是字符串数组；去空白、丢空项后冻结（非数组 / 非字符串 fail-loud）。 */
+function requireIriList(field: string, raw: unknown): readonly string[] {
+  if (raw === undefined) return Object.freeze([] as string[])
+  if (!Array.isArray(raw)) throw new Error(`${field}（期望字符串数组，实际 ${JSON.stringify(raw)}）`)
+  const out: string[] = []
+  for (const item of raw) {
+    if (typeof item !== 'string') throw new Error(`${field}（期望字符串数组，含非字符串项 ${JSON.stringify(item)}）`)
+    const trimmed = item.trim()
+    if (trimmed.length > 0) out.push(trimmed)
+  }
+  return Object.freeze(out)
 }
 
 /** 统一读法：既接受 volatile 节点（.get()），也接受普通值，便于纯单测直接传值包装。 */
@@ -447,6 +515,13 @@ export function resolveRuntimeConfig(config: {
       relationType?: boolean
       domainRange?: boolean
       datatype?: boolean
+    }>
+    /** Story 9.2 / AD-40：本体路径与词表渲染（path / allowlist / 字符预算）。 */
+    ontology?: Getter<{
+      path?: string
+      promptTypes?: readonly string[]
+      promptRelations?: readonly string[]
+      promptCharBudget?: number
     }>
 }): RuntimeConfig {
   const warnings: string[] = []
@@ -612,6 +687,27 @@ export function resolveRuntimeConfig(config: {
     ...gateOverride('domainRange', ontologyRaw.domainRange),
     ...gateOverride('datatype', ontologyRaw.datatype),
   }
+  // Story 9.2 / T4、AD-40：本体输入与词表渲染。path 是**相对 profile 目录**的路径，
+  // 空串等价于未配置（off）；预算 ≤ 0 / 非有限 / 非整数 fail-loud（不静默关裁剪）。
+  const ontologySettingsRaw = read(config.ontology ?? {}) as {
+    path?: string
+    promptTypes?: readonly string[]
+    promptRelations?: readonly string[]
+    promptCharBudget?: number
+  }
+  if (ontologySettingsRaw.path !== undefined && typeof ontologySettingsRaw.path !== 'string') {
+    throw new Error(`ontology.path（期望字符串，实际 ${JSON.stringify(ontologySettingsRaw.path)}）`)
+  }
+  const ontologyPath = ontologySettingsRaw.path?.trim()
+  const ontology: OntologyConfig = {
+    ...(ontologyPath === undefined || ontologyPath.length === 0 ? {} : { path: ontologyPath }),
+    promptTypes: requireIriList('ontology.promptTypes', ontologySettingsRaw.promptTypes),
+    promptRelations: requireIriList('ontology.promptRelations', ontologySettingsRaw.promptRelations),
+    promptCharBudget: requirePositiveInt(
+      'ontology.promptCharBudget',
+      ontologySettingsRaw.promptCharBudget ?? MEMORY_CONFIG_DEFAULTS.ontologyPromptCharBudget,
+    ),
+  }
   requirePositiveInt('reflection.threshold', Math.trunc(reflectionRaw.threshold ?? MEMORY_CONFIG_DEFAULTS.reflectionThreshold))
   requirePositiveInt('reflection.idleWaitMs', Math.trunc(reflectionRaw.idleWaitMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIdleWaitMs))
   requirePositiveInt('reflection.intervalMs', Math.trunc(reflectionRaw.intervalMs ?? MEMORY_CONFIG_DEFAULTS.reflectionIntervalMs))
@@ -697,6 +793,8 @@ export function resolveRuntimeConfig(config: {
     personaSpecEnabled,
     selfKnowledgeCaptureEnabled,
     ontologyGate,
+    // Story 9.2 / AD-40：本体输入 + 词表渲染（path 未配置时对象里没有该键 = off）。
+    ontology,
     strategyGate: {
       minConfidence: strategyMinConfidence,
       expiryDays: Number(strategyRaw.expiryDays ?? MEMORY_CONFIG_DEFAULTS.strategyExpiryDays),
@@ -745,4 +843,6 @@ export interface ConfigShape {
   selfKnowledgeCaptureEnabled: Volatile<boolean>
   /** Story 9.1：本体闸门档位 + 逐维覆盖（默认 level=off）。 */
   ontologyGate: Volatile<OntologyGateConfig>
+  /** Story 9.2 / AD-40：本体路径 + 词表 allowlist + 渲染字符预算（默认 4000）。 */
+  ontology: Volatile<OntologyConfig>
 }

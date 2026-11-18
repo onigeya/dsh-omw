@@ -442,6 +442,21 @@ export interface MemoryOntologyView {
   readonly drops: MemoryOntologyDropCounts | null
   /** drops=null 时的可读原因（缺省按「审计表缺失」）。 */
   readonly unavailableReason?: string
+  /**
+   * Story 9.2 / AD-40：全量条目数与实际渲染进 prompt 的条目数（`types=<full>/<prompt>`）。
+   * 同时给 undefined = 未配置本体 / 加载不可用 ⇒ 不渲染这一段（既有输出逐字不变）。
+   */
+  readonly fullEntries?: number
+  readonly promptEntries?: number
+  /** Story 9.2：本体文件路径（配置时可见；未配置 / 加载不可用不带路径时为 undefined）。 */
+  readonly path?: string
+  /**
+   * Story 9.2 / AD-31:437：闸门不可用原因（文件缺失 / 损坏 / 索引失败）。有值即渲染
+   * `unavailable=<原因>`：fail-open 的显式痕迹，不静默当空本体。
+   */
+  readonly loadReason?: string
+  /** Story 9.2 / FR-18：配置了本体 ⇒ 提示「改本体或档位后需重新抽取」。 */
+  readonly reextractHint?: boolean
 }
 
 /**
@@ -1315,7 +1330,12 @@ function renderSelfKnowledgeStatusLines(snapshot: MemoryStatusSnapshot): string[
 }
 
 /**
- * `ontology:` 行（Story 9.1 / T7、AD-31:443）。
+ * `ontology:` 行（Story 9.1 / T7、9.2 / T7、AD-31:443、AD-40:765）。
+ *
+ * 固定组装顺序（缺项不打印，既有输出逐字不变）：
+ * `ontology: <level>` → `types=<full>/<prompt>`（9.2，配置了本体且可加载时）→
+ * `unavailable=<原因>`（9.2，闸门不可用时）→ 六维丢弃计数 / `n/a（原因）`（仅非 off）→
+ * `path=<路径>`（配置时）→ 重新抽取提示（配置了本体时）。
  *
  * - `off`：闸门关闭，只打印 `ontology: off`（默认态，行为与未启用本体逐条一致）；
  * - 非 off + 有计数：`ontology: align name-normalization=0 duplicate-type-discard=0 ...`；
@@ -1325,18 +1345,31 @@ function renderSelfKnowledgeStatusLines(snapshot: MemoryStatusSnapshot): string[
 function renderOntologyStatusLines(snapshot: MemoryStatusSnapshot): string[] {
   const view = snapshot.ontology
   if (view === undefined) return []
-  if (view.level === 'off') return ['ontology: off']
-  if (view.drops === null) {
-    return [`ontology: ${view.level} n/a（${view.unavailableReason ?? '审计表缺失'}）`]
+  const parts: string[] = [`ontology: ${view.level}`]
+  if (view.fullEntries !== undefined && view.promptEntries !== undefined) {
+    parts.push(`types=${view.fullEntries}/${view.promptEntries}`)
   }
-  return [
-    `ontology: ${view.level} name-normalization=${view.drops.nameNormalization}` +
-    ` duplicate-type-discard=${view.drops.duplicateTypeDiscard}` +
-    ` entity-type=${view.drops.entityType}` +
-    ` relation-type=${view.drops.relationType}` +
-    ` domain-range=${view.drops.domainRange}` +
-    ` datatype=${view.drops.datatype}`,
-  ]
+  if (view.loadReason !== undefined && view.loadReason.length > 0) {
+    parts.push(`unavailable=${view.loadReason}`)
+  }
+  // 丢弃计数只在闸门真正可能丢弃候选时才有意义（off 档零判定）。
+  if (view.level !== 'off') {
+    if (view.drops === null) {
+      parts.push(`n/a（${view.unavailableReason ?? '审计表缺失'}）`)
+    } else {
+      parts.push(
+        `name-normalization=${view.drops.nameNormalization}` +
+        ` duplicate-type-discard=${view.drops.duplicateTypeDiscard}` +
+        ` entity-type=${view.drops.entityType}` +
+        ` relation-type=${view.drops.relationType}` +
+        ` domain-range=${view.drops.domainRange}` +
+        ` datatype=${view.drops.datatype}`,
+      )
+    }
+  }
+  if (view.path !== undefined && view.path.length > 0) parts.push(`path=${view.path}`)
+  if (view.reextractHint === true) parts.push('（改本体或档位后需重新抽取）')
+  return [parts.join(' ')]
 }
 
 /** 构造 `/memory` 命令定义。纯工厂：不读 ctx、不持有 db。 */

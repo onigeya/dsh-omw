@@ -13,6 +13,7 @@ import type { RuntimeConfig } from '../config.js'
 import type { MemoryDatabase } from '../db/database.js'
 import type { EmbeddingProfile } from '../db/embedding-profile.js'
 import type { HostLogServiceLike } from '../db/host-log.js'
+import type { OntologyIndex } from '../ontology/index.js'
 import { createEmbeddingBackfill } from '../embedding/backfill.js'
 import { createEmbeddingClient, type EmbedClient } from '../embedding/client.js'
 import { createInboxProcessor } from '../distill/processor.js'
@@ -37,6 +38,8 @@ export interface DistillWiringOptions {
   readonly embedding: EmbeddingProfile
   readonly gate: IdleGate
   readonly slots: MemoryRuntimeSlots
+  /** Story 9.2：已加载的本体索引（未配置/不可用 ⇒ null；闸门 fail-open）。 */
+  readonly ontologyIndex?: OntologyIndex | null
 }
 
 export interface DistillWiring {
@@ -115,7 +118,7 @@ export function createDistillWiring(options: DistillWiringOptions): DistillWirin
     // Story 9.1 / AD-31：抽取路径上的单一判定点。9.2 之前没有 Turtle 解析器 ⇒ index=null；
     // 档位 off 时判定函数不执行，默认行为逐条不变；档位非 off 时按「闸门不可用 ⇒ 整闸
     // fail-open」显式告警，不静默丢弃候选。
-    ontology: { index: null, policy: resolved.ontologyGate },
+    ontology: { index: options.ontologyIndex ?? null, policy: resolved.ontologyGate },
     // Story 10.2：指针 payload 的正文 hydrate 通道（唯一读宿主处，AD-36）。
     hostLog,
   })
